@@ -119,6 +119,8 @@ const RECONNECT_DELAY_INITIAL_MS = 1_200;
 const RECONNECT_DELAY_MAX_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 8_000;
 const DISCOVERED_ENDPOINT_TTL_MS = 35_000;
+const DISCOVERY_REFRESH_INTERVAL_MS = 12_000;
+const LAST_HEALTHY_RETRY_WINDOW_MS = 14_000;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -358,6 +360,9 @@ export class RelayClient {
   };
   private readonly explicitRelayUrl: string | null;
   private selectedEndpoint: string | null = null;
+  private lastHealthyEndpoint: string | null = null;
+  private lastHealthyEndpointFailedAt = 0;
+  private lastDiscoveryRefreshAt = 0;
   private profile: Profile;
   private lastPresenceAt = 0;
   private lastPresenceRevision = -1;
@@ -386,6 +391,8 @@ export class RelayClient {
     this.connecting = false;
     this.lastPresenceRevision = -1;
     this.lastPresenceAt = 0;
+    this.lastHealthyEndpointFailedAt = 0;
+    this.lastDiscoveryRefreshAt = 0;
     this.relayPeersById.clear();
     this.discoveredEndpoints.clear();
     this.discoveredEndpointByServiceKey.clear();
@@ -505,9 +512,15 @@ export class RelayClient {
         }
         this.socket = null;
       }
+      this.connectWithBackoff(true);
+      return { ...this.endpointSettings };
     }
 
-    this.connectWithBackoff(true);
+    // Evita reconectar desnecessariamente quando usuário salva configurações
+    // sem alterar endpoint (ex.: apenas "iniciar com o sistema").
+    if (this.started && !this.isConnected()) {
+      this.connectWithBackoff(true);
+    }
     return { ...this.endpointSettings };
   }
 
@@ -592,8 +605,33 @@ export class RelayClient {
       return a.url.localeCompare(b.url);
     });
 
+    const now = Date.now();
+    if (this.lastHealthyEndpoint) {
+      const recentlyFailed =
+        this.lastHealthyEndpointFailedAt > 0 &&
+        now - this.lastHealthyEndpointFailedAt <= LAST_HEALTHY_RETRY_WINDOW_MS;
+      if (!recentlyFailed || discovered.length === 0) {
+        return this.lastHealthyEndpoint;
+      }
+      if (discovered.length > 0) {
+        return discovered[0].url;
+      }
+      return this.lastHealthyEndpoint;
+    }
+
     if (discovered.length > 0) {
       return discovered[0].url;
+    }
+
+    // Em rede real, a descoberta pode atrasar/oscilar. Se já havia endpoint
+    // válido selecionado anteriormente, reutiliza para evitar fallback indevido
+    // para localhost em clientes remotos.
+    if (
+      this.selectedEndpoint &&
+      this.selectedEndpoint.length > 0 &&
+      this.selectedEndpoint !== DEFAULT_RELAY_URL
+    ) {
+      return this.selectedEndpoint;
     }
 
     return DEFAULT_RELAY_URL;
@@ -744,7 +782,11 @@ export class RelayClient {
     });
 
     if (!this.ready) {
+      if (endpoint === this.lastHealthyEndpoint) {
+        this.lastHealthyEndpointFailedAt = Date.now();
+      }
       this.connecting = false;
+      this.refreshRelayDiscoveryIfNeeded();
       this.scheduleReconnect();
     }
   }
@@ -771,6 +813,10 @@ export class RelayClient {
       endpoint
     });
 
+    if (endpoint === this.lastHealthyEndpoint) {
+      this.lastHealthyEndpointFailedAt = Date.now();
+    }
+    this.refreshRelayDiscoveryIfNeeded(true);
     this.scheduleReconnect();
   }
 
@@ -798,6 +844,10 @@ export class RelayClient {
       case 'relay:welcome':
         return;
       case 'relay:hello:ok': {
+        if (this.selectedEndpoint) {
+          this.lastHealthyEndpoint = this.selectedEndpoint;
+          this.lastHealthyEndpointFailedAt = 0;
+        }
         this.requestPresence();
         return;
       }
@@ -940,11 +990,21 @@ export class RelayClient {
     if (this.heartbeatTimer) return;
 
     this.heartbeatTimer = setInterval(() => {
-      if (!this.started || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      if (!this.started) {
+        return;
+      }
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        this.refreshRelayDiscoveryIfNeeded();
         return;
       }
 
-      this.sendEnvelope({ type: 'relay:heartbeat', payload: { id: randomUUID() } });
+      this.sendEnvelope(
+        { type: 'relay:heartbeat', payload: { id: randomUUID() } },
+        (error) => {
+          if (!error) return;
+          this.forceSocketDisconnect();
+        }
+      );
       this.pruneDiscoveredEndpoints();
       if (this.lastPresenceAt > 0 && Date.now() - this.lastPresenceAt > 25_000) {
         this.requestPresence();
@@ -963,7 +1023,24 @@ export class RelayClient {
   }
 
   private requestPresence(): void {
-    this.sendEnvelope({ type: 'relay:presence:request', payload: {} });
+    this.sendEnvelope({ type: 'relay:presence:request', payload: {} }, (error) => {
+      if (!error) return;
+      this.forceSocketDisconnect();
+    });
+  }
+
+  private forceSocketDisconnect(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    try {
+      socket.terminate();
+    } catch {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private sendEnvelope(
@@ -1032,6 +1109,36 @@ export class RelayClient {
     } catch {
       this.callbacks.onWarning?.('Não foi possível usar descoberta automática do relay (mDNS).');
     }
+  }
+
+  private refreshRelayDiscoveryIfNeeded(force = false): void {
+    if (!this.started) return;
+    if (!this.endpointSettings.automatic) return;
+    if (this.explicitRelayUrl) return;
+
+    const now = Date.now();
+    if (!force && now - this.lastDiscoveryRefreshAt < DISCOVERY_REFRESH_INTERVAL_MS) {
+      return;
+    }
+    this.lastDiscoveryRefreshAt = now;
+
+    if (this.browser) {
+      try {
+        this.browser.stop();
+      } catch {
+        // ignore
+      }
+      this.browser = null;
+    }
+    if (this.bonjour) {
+      try {
+        this.bonjour.destroy();
+      } catch {
+        // ignore
+      }
+      this.bonjour = null;
+    }
+    this.startRelayDiscovery();
   }
 
   private waitUntilReady(timeoutMs: number): Promise<void> {
