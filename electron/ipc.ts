@@ -53,7 +53,8 @@ export interface IpcBindings {
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
-    limit?: number
+    limit?: number,
+    offset?: number
   ) => string[];
   getConversationPreviews: (conversationIds: string[]) => Record<string, string>;
   getMessageReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
@@ -64,6 +65,7 @@ export interface IpcBindings {
   forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Record<string, number>;
   addManualPeer: (address: string, port: number) => void;
+  saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
 }
 
 export const registerIpc = (
@@ -112,8 +114,8 @@ export const registerIpc = (
   );
   ipcMain.handle(
     'lantern:searchConversationMessageIds',
-    (_event, conversationId: string, query: string, limit?: number) =>
-      bindings.searchConversationMessageIds(conversationId, query, limit)
+    (_event, conversationId: string, query: string, limit?: number, offset?: number) =>
+      bindings.searchConversationMessageIds(conversationId, query, limit, offset)
   );
   ipcMain.handle('lantern:getConversationPreviews', (_event, conversationIds: string[]) =>
     bindings.getConversationPreviews(conversationIds)
@@ -139,6 +141,9 @@ export const registerIpc = (
   ipcMain.handle('lantern:getConversations', () => bindings.getConversations());
   ipcMain.handle('lantern:addManualPeer', (_event, address: string, port: number) =>
     bindings.addManualPeer(address, port)
+  );
+  ipcMain.handle('lantern:saveFileAs', (_event, filePath: string, fileName?: string) =>
+    bindings.saveFileAs(filePath, fileName)
   );
 
   ipcMain.handle('lantern:pickFile', async () => {

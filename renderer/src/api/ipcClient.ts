@@ -129,7 +129,8 @@ interface LanternApi {
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
-    limit?: number
+    limit?: number,
+    offset?: number
   ) => Promise<string[]>;
   getConversationPreviews: (conversationIds: string[]) => Promise<Record<string, string>>;
   getMessageReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
@@ -144,6 +145,7 @@ interface LanternApi {
   pickFiles: () => Promise<string[]>;
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
   openFile: (filePath: string) => Promise<void>;
+  saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
   getFilePreview: (filePath: string) => Promise<string | null>;
   getFileInfo: (filePath: string) => Promise<{
@@ -189,8 +191,12 @@ export const ipcClient = {
   getMessages: (conversationId: string, limit: number, before?: number) =>
     window.lantern.getMessages(conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) => window.lantern.getMessagesByIds(messageIds),
-  searchConversationMessageIds: (conversationId: string, query: string, limit?: number) =>
-    window.lantern.searchConversationMessageIds(conversationId, query, limit),
+  searchConversationMessageIds: (
+    conversationId: string,
+    query: string,
+    limit?: number,
+    offset?: number
+  ) => window.lantern.searchConversationMessageIds(conversationId, query, limit, offset),
   getConversationPreviews: (conversationIds: string[]) =>
     window.lantern.getConversationPreviews(conversationIds),
   getMessageReactions: (messageIds: string[]) =>
@@ -208,6 +214,7 @@ export const ipcClient = {
   pickFiles: () => window.lantern.pickFiles(),
   pickDirectory: (defaultPath?: string) => window.lantern.pickDirectory(defaultPath),
   openFile: (filePath: string) => window.lantern.openFile(filePath),
+  saveFileAs: (filePath: string, fileName?: string) => window.lantern.saveFileAs(filePath, fileName),
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),
   getFileInfo: (filePath: string) => window.lantern.getFileInfo(filePath),

@@ -1155,6 +1155,13 @@ body {
   color: #b4232f;
 }
 
+.message-file-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .bubble-actions-row {
   position: absolute;
   top: calc(100% + 4px);

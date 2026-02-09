@@ -32,6 +32,8 @@ interface LanternState {
   onlinePeerIds: string[];
   selectedConversationId: string;
   messagesByConversation: Record<string, MessageRow[]>;
+  hasMoreHistoryByConversation: Record<string, boolean>;
+  loadingOlderByConversation: Record<string, boolean>;
   announcementReactionsByMessage: Record<string, AnnouncementReactionSummary>;
   conversationPreviewById: Record<string, string>;
   unreadByConversation: Record<string, number>;
@@ -52,6 +54,7 @@ interface LanternState {
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
+  loadOlderMessages: (conversationId: string, limit?: number) => Promise<number>;
   ensureConversationMessagesLoaded: (
     conversationId: string,
     messageIds: string[]
@@ -73,12 +76,14 @@ interface LanternState {
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<void>;
   addManualPeer: (address: string, port: number) => Promise<void>;
   openFile: (filePath: string) => Promise<void>;
+  saveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   dismissToast: (id: string) => void;
 }
 
 const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
 const PROFILE_ONBOARDING_KEY_PREFIX = 'lantern.profile.onboarding.done';
+const MESSAGES_PAGE_SIZE = 80;
 
 const getInitialThemeMode = (): 'system' | 'light' | 'dark' => {
   if (typeof window === 'undefined') {
@@ -175,6 +180,15 @@ const normalizeMessageOrder = (rows: MessageRow[]): MessageRow[] =>
     return a.messageId.localeCompare(b.messageId);
   });
 
+const mergeOrderedMessages = (existing: MessageRow[], incoming: MessageRow[]): MessageRow[] => {
+  if (incoming.length === 0) return existing;
+  const byId = new Map(existing.map((row) => [row.messageId, row]));
+  for (const row of incoming) {
+    byId.set(row.messageId, row);
+  }
+  return normalizeMessageOrder(Array.from(byId.values()));
+};
+
 const updateExistingMessageOnly = (rows: MessageRow[], incoming: MessageRow): MessageRow[] => {
   let found = false;
   const next = rows.map((row) => {
@@ -224,6 +238,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   onlinePeerIds: [],
   selectedConversationId: ANNOUNCEMENTS_ID,
   messagesByConversation: {},
+  hasMoreHistoryByConversation: {},
+  loadingOlderByConversation: {},
   announcementReactionsByMessage: {},
   conversationPreviewById: {},
   unreadByConversation: {},
@@ -293,7 +309,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     });
 
     const current = get().selectedConversationId;
-    const initialMessages = normalizeMessageOrder(await ipcClient.getMessages(current, 100));
+    const initialMessages = normalizeMessageOrder(
+      await ipcClient.getMessages(current, MESSAGES_PAGE_SIZE)
+    );
+    const hasMoreHistory = initialMessages.length === MESSAGES_PAGE_SIZE;
     const initialReactionMessageIds = initialMessages.map((row) => row.messageId);
     const initialMessageReactions =
       initialReactionMessageIds.length > 0
@@ -305,6 +324,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       messagesByConversation: {
         ...state.messagesByConversation,
         [current]: initialMessages
+      },
+      hasMoreHistoryByConversation: {
+        ...state.hasMoreHistoryByConversation,
+        [current]: hasMoreHistory
+      },
+      loadingOlderByConversation: {
+        ...state.loadingOlderByConversation,
+        [current]: false
       },
       announcementReactionsByMessage: {
         ...state.announcementReactionsByMessage,
@@ -612,6 +639,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             ...state.messagesByConversation,
             [event.conversationId]: []
           },
+          hasMoreHistoryByConversation: {
+            ...state.hasMoreHistoryByConversation,
+            [event.conversationId]: false
+          },
+          loadingOlderByConversation: {
+            ...state.loadingOlderByConversation,
+            [event.conversationId]: false
+          },
           conversationPreviewById: {
             ...state.conversationPreviewById,
             [event.conversationId]: ''
@@ -743,7 +778,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
     }));
     try {
-      const rows = normalizeMessageOrder(await ipcClient.getMessages(conversationId, 100));
+      const rows = normalizeMessageOrder(
+        await ipcClient.getMessages(conversationId, MESSAGES_PAGE_SIZE)
+      );
+      const hasMoreHistory = rows.length === MESSAGES_PAGE_SIZE;
       const reactionMessageIds = rows.map((row) => row.messageId);
       const messageReactions =
         reactionMessageIds.length > 0
@@ -758,6 +796,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         messagesByConversation: {
           ...state.messagesByConversation,
           [conversationId]: rows
+        },
+        hasMoreHistoryByConversation: {
+          ...state.hasMoreHistoryByConversation,
+          [conversationId]: hasMoreHistory
+        },
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [conversationId]: false
         },
         conversationPreviewById: {
           ...state.conversationPreviewById,
@@ -777,9 +823,97 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }));
     } catch {
       set((state) => ({
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [conversationId]: false
+        },
         loadingConversationId:
           state.loadingConversationId === conversationId ? null : state.loadingConversationId
       }));
+    }
+  },
+  loadOlderMessages: async (conversationId, limit = MESSAGES_PAGE_SIZE) => {
+    const safeLimit = Number.isFinite(limit)
+      ? Math.max(20, Math.min(Math.trunc(limit), 200))
+      : MESSAGES_PAGE_SIZE;
+    const snapshot = get();
+    if (snapshot.loadingOlderByConversation[conversationId]) {
+      return 0;
+    }
+
+    const currentRows = snapshot.messagesByConversation[conversationId] || [];
+    if (snapshot.hasMoreHistoryByConversation[conversationId] === false && currentRows.length > 0) {
+      return 0;
+    }
+    const oldest = currentRows[0];
+    const before = oldest?.createdAt;
+
+    set((state) => ({
+      loadingOlderByConversation: {
+        ...state.loadingOlderByConversation,
+        [conversationId]: true
+      }
+    }));
+
+    try {
+      const olderRows = normalizeMessageOrder(
+        await ipcClient.getMessages(conversationId, safeLimit, before)
+      );
+
+      if (olderRows.length === 0) {
+        set((state) => ({
+          hasMoreHistoryByConversation: {
+            ...state.hasMoreHistoryByConversation,
+            [conversationId]: false
+          },
+          loadingOlderByConversation: {
+            ...state.loadingOlderByConversation,
+            [conversationId]: false
+          }
+        }));
+        return 0;
+      }
+
+      const knownIds = new Set(currentRows.map((row) => row.messageId));
+      const newlyAddedRows = olderRows.filter((row) => !knownIds.has(row.messageId));
+      const reactionTargetIds = olderRows.map((row) => row.messageId);
+      const reactionMap =
+        reactionTargetIds.length > 0
+          ? conversationId === ANNOUNCEMENTS_ID
+            ? await ipcClient.getAnnouncementReactions(reactionTargetIds)
+            : await ipcClient.getMessageReactions(reactionTargetIds)
+          : {};
+
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [conversationId]: mergeOrderedMessages(
+            state.messagesByConversation[conversationId] || [],
+            olderRows
+          )
+        },
+        hasMoreHistoryByConversation: {
+          ...state.hasMoreHistoryByConversation,
+          [conversationId]: olderRows.length === safeLimit
+        },
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [conversationId]: false
+        },
+        announcementReactionsByMessage: {
+          ...state.announcementReactionsByMessage,
+          ...reactionMap
+        }
+      }));
+      return newlyAddedRows.length;
+    } catch {
+      set((state) => ({
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [conversationId]: false
+        }
+      }));
+      return 0;
     }
   },
   ensureConversationMessagesLoaded: async (conversationId, messageIds) => {
@@ -807,6 +941,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     if (incomingRows.length === 0) {
       return;
     }
+    const reactionIds = incomingRows.map((row) => row.messageId);
+    const reactionMap =
+      reactionIds.length > 0
+        ? conversationId === ANNOUNCEMENTS_ID
+          ? await ipcClient.getAnnouncementReactions(reactionIds)
+          : await ipcClient.getMessageReactions(reactionIds)
+        : {};
 
     set((current) => {
       const rows = current.messagesByConversation[conversationId] || [];
@@ -819,6 +960,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         messagesByConversation: {
           ...current.messagesByConversation,
           [conversationId]: normalizeMessageOrder(Array.from(byId.values()))
+        },
+        announcementReactionsByMessage: {
+          ...current.announcementReactionsByMessage,
+          ...reactionMap
         }
       };
     });
@@ -1026,6 +1171,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         ...state.messagesByConversation,
         [conversationId]: []
       },
+      hasMoreHistoryByConversation: {
+        ...state.hasMoreHistoryByConversation,
+        [conversationId]: false
+      },
+      loadingOlderByConversation: {
+        ...state.loadingOlderByConversation,
+        [conversationId]: false
+      },
       announcementReactionsByMessage:
         conversationId === ANNOUNCEMENTS_ID ? {} : state.announcementReactionsByMessage,
       conversationPreviewById: {
@@ -1048,6 +1201,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       const nextMessages = { ...state.messagesByConversation };
       delete nextMessages[conversationId];
 
+      const nextHasMore = { ...state.hasMoreHistoryByConversation };
+      delete nextHasMore[conversationId];
+
+      const nextLoadingOlder = { ...state.loadingOlderByConversation };
+      delete nextLoadingOlder[conversationId];
+
       const nextPreview = { ...state.conversationPreviewById };
       delete nextPreview[conversationId];
 
@@ -1064,6 +1223,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           : state.onlinePeerIds,
         selectedConversationId: wasSelected ? ANNOUNCEMENTS_ID : state.selectedConversationId,
         messagesByConversation: nextMessages,
+        hasMoreHistoryByConversation: nextHasMore,
+        loadingOlderByConversation: nextLoadingOlder,
         conversationPreviewById: nextPreview,
         unreadByConversation: nextUnread,
         typingByConversation: nextTyping
@@ -1095,6 +1256,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   },
   openFile: async (filePath) => {
     await ipcClient.openFile(filePath);
+  },
+  saveFileAs: async (filePath, fileName) => {
+    await ipcClient.saveFileAs(filePath, fileName || undefined);
   },
   dismissToast: (id) => {
     set((state) => ({

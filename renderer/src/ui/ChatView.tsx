@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
 import {
   ChevronDown20Regular,
@@ -24,6 +24,8 @@ interface ChatViewProps {
   messages: MessageRow[];
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
   transferByFileId: Record<string, { transferred: number; total: number }>;
+  hasMoreOlder: boolean;
+  loadingOlder: boolean;
   recentMessageIds: Record<string, number>;
   onSend: (text: string) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
@@ -33,7 +35,9 @@ interface ChatViewProps {
   onClearConversation: () => Promise<void>;
   onForgetContactConversation: () => Promise<void>;
   onOpenFile: (filePath: string) => Promise<void>;
+  onSaveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   onSearchMessageIds: (query: string) => Promise<string[]>;
+  onLoadOlderMessages: () => Promise<number>;
   onEnsureMessagesLoaded: (messageIds: string[]) => Promise<void>;
 }
 
@@ -184,6 +188,8 @@ export const ChatView = ({
   messages,
   reactionsByMessageId,
   transferByFileId,
+  hasMoreOlder,
+  loadingOlder,
   recentMessageIds,
   onSend,
   onTyping,
@@ -193,7 +199,9 @@ export const ChatView = ({
   onClearConversation,
   onForgetContactConversation,
   onOpenFile,
+  onSaveFileAs,
   onSearchMessageIds,
+  onLoadOlderMessages,
   onEnsureMessagesLoaded
 }: ChatViewProps) => {
   const [previewByMessageId, setPreviewByMessageId] = useState<Record<string, string>>({});
@@ -211,14 +219,28 @@ export const ChatView = ({
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const lastMessageCountRef = useRef(0);
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
   const forceScrollOnOpenRef = useRef(false);
   const forceScrollTimeoutRef = useRef<number | null>(null);
+  const hasMoreOlderRef = useRef(hasMoreOlder);
+  const loadingOlderRef = useRef(loadingOlder);
+  const searchJumpInFlightRef = useRef(false);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const matchedMessageIdSet = useMemo(() => new Set(matchedMessageIds), [matchedMessageIds]);
+  const loadedMessageIdSet = useMemo(
+    () => new Set(messages.map((row) => row.messageId)),
+    [messages]
+  );
+
+  useEffect(() => {
+    hasMoreOlderRef.current = hasMoreOlder;
+  }, [hasMoreOlder]);
+
+  useEffect(() => {
+    loadingOlderRef.current = loadingOlder;
+  }, [loadingOlder]);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,11 +254,9 @@ export const ChatView = ({
 
     setSearchLoading(true);
     void onSearchMessageIds(normalizedQuery)
-      .then(async (messageIds) => {
+      .then((messageIds) => {
         if (cancelled) return;
         const uniqueIds = Array.from(new Set(messageIds));
-        await onEnsureMessagesLoaded(uniqueIds);
-        if (cancelled) return;
         setMatchedMessageIds((current) => {
           if (
             current.length === uniqueIds.length &&
@@ -260,7 +280,7 @@ export const ChatView = ({
     return () => {
       cancelled = true;
     };
-  }, [normalizedQuery, conversationId, onEnsureMessagesLoaded, onSearchMessageIds]);
+  }, [normalizedQuery, conversationId, onSearchMessageIds]);
 
   const isNearBottom = (): boolean => {
     const node = messagesScrollRef.current;
@@ -282,18 +302,43 @@ export const ChatView = ({
     }
   };
 
+  const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
+    const node = messagesScrollRef.current;
+    if (!node) return 0;
+    if (loadingOlderRef.current) return 0;
+    if (!hasMoreOlderRef.current) return 0;
+
+    const previousHeight = node.scrollHeight;
+    const previousTop = node.scrollTop;
+    const loadedCount = await onLoadOlderMessages();
+    if (loadedCount <= 0) return 0;
+
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+    const nextNode = messagesScrollRef.current;
+    if (!nextNode) return loadedCount;
+    const delta = nextNode.scrollHeight - previousHeight;
+    if (delta > 0) {
+      nextNode.scrollTop = previousTop + delta;
+    }
+    return loadedCount;
+  }, [onLoadOlderMessages]);
+
   useEffect(() => {
     const node = messagesScrollRef.current;
     if (!node) return;
 
     const onScroll = () => {
       stickToBottomRef.current = isNearBottom();
+      if (node.scrollTop <= 56 && hasMoreOlderRef.current && !loadingOlderRef.current) {
+        void loadOlderWithViewportLock();
+      }
     };
 
     stickToBottomRef.current = isNearBottom();
     node.addEventListener('scroll', onScroll, { passive: true });
     return () => node.removeEventListener('scroll', onScroll);
-  }, [peer?.deviceId]);
+  }, [peer?.deviceId, loadOlderWithViewportLock]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -319,11 +364,18 @@ export const ChatView = ({
 
   useEffect(() => {
     if (normalizedQuery) return;
+    const lastMessage = messages[messages.length - 1];
+    const isOutgoingFileTransfer =
+      Boolean(lastMessage) &&
+      lastMessage.type === 'file' &&
+      Boolean(lastMessage.fileId) &&
+      (lastMessage.direction === 'out' || lastMessage.senderDeviceId === localProfile.deviceId) &&
+      Boolean(lastMessage.fileId && transferByFileId[lastMessage.fileId]);
     const frame = window.requestAnimationFrame(() => {
-      maybeFollowBottom(false, 'auto');
+      maybeFollowBottom(isOutgoingFileTransfer, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [transferByFileId, normalizedQuery]);
+  }, [transferByFileId, normalizedQuery, messages, localProfile.deviceId]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -378,32 +430,39 @@ export const ChatView = ({
     }
 
     const frame = window.requestAnimationFrame(() => {
-      maybeFollowBottom(false, 'auto');
+      const shouldForce =
+        lastMessage.direction === 'out' || lastMessage.senderDeviceId === localProfile.deviceId;
+      maybeFollowBottom(shouldForce, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
   }, [previewByMessageId, messages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
 
   useEffect(() => {
     if (normalizedQuery) return;
+    const currentLastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
     const currentLastId = messages.length > 0 ? messages[messages.length - 1].messageId : null;
-    const previousCount = lastMessageCountRef.current;
     const previousLastId = lastMessageIdRef.current;
-    const hasNewTailMessage =
-      messages.length > previousCount || (currentLastId !== null && currentLastId !== previousLastId);
+    const hasNewTailMessage = currentLastId !== null && currentLastId !== previousLastId;
 
     if (forceScrollOnOpenRef.current || hasNewTailMessage) {
+      const shouldForceFollow =
+        forceScrollOnOpenRef.current ||
+        Boolean(
+          hasNewTailMessage &&
+            currentLastMessage &&
+            (currentLastMessage.direction === 'out' ||
+              currentLastMessage.senderDeviceId === localProfile.deviceId)
+        );
       const frame = window.requestAnimationFrame(() => {
-        maybeFollowBottom(forceScrollOnOpenRef.current, 'auto');
+        maybeFollowBottom(shouldForceFollow, 'auto');
       });
-      lastMessageCountRef.current = messages.length;
       lastMessageIdRef.current = currentLastId;
       return () => window.cancelAnimationFrame(frame);
     }
 
-    lastMessageCountRef.current = messages.length;
     lastMessageIdRef.current = currentLastId;
     return undefined;
-  }, [messages, normalizedQuery]);
+  }, [messages, normalizedQuery, localProfile.deviceId]);
 
   useEffect(
     () => () => {
@@ -447,19 +506,63 @@ export const ChatView = ({
       setActiveMatchIndex(-1);
       return;
     }
+    let newestLoadedIndex = -1;
+    for (let index = matchedMessageIds.length - 1; index >= 0; index -= 1) {
+      if (loadedMessageIdSet.has(matchedMessageIds[index])) {
+        newestLoadedIndex = index;
+        break;
+      }
+    }
+    const fallbackIndex = newestLoadedIndex >= 0 ? newestLoadedIndex : matchedMessageIds.length - 1;
     setActiveMatchIndex((current) =>
-      current >= 0 && current < matchedMessageIds.length ? current : 0
+      current >= 0 && current < matchedMessageIds.length ? current : fallbackIndex
     );
-  }, [searchOpen, normalizedQuery, matchedMessageIds]);
+  }, [searchOpen, normalizedQuery, matchedMessageIds, loadedMessageIdSet]);
 
   useEffect(() => {
     if (activeMatchIndex < 0) return;
     const messageId = matchedMessageIds[activeMatchIndex];
     if (!messageId) return;
-    const node = matchRowRefs.current[messageId];
-    if (!node) return;
-    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, [activeMatchIndex, matchedMessageIds]);
+    let cancelled = false;
+
+    const jumpToMatch = async () => {
+      if (searchJumpInFlightRef.current) {
+        return;
+      }
+      searchJumpInFlightRef.current = true;
+      try {
+        let guard = 0;
+        while (!cancelled) {
+          const node = matchRowRefs.current[messageId];
+          if (node) {
+            node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            break;
+          }
+          if (!hasMoreOlderRef.current || guard >= 120) {
+            await onEnsureMessagesLoaded([messageId]);
+            await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+            const fallbackNode = matchRowRefs.current[messageId];
+            if (fallbackNode) {
+              fallbackNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            break;
+          }
+          guard += 1;
+          const loaded = await loadOlderWithViewportLock();
+          if (loaded <= 0) {
+            break;
+          }
+        }
+      } finally {
+        searchJumpInFlightRef.current = false;
+      }
+    };
+
+    void jumpToMatch();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMatchIndex, matchedMessageIds, loadOlderWithViewportLock, onEnsureMessagesLoaded]);
 
   if (!peer) {
     return <div className="empty-state">Selecione um contato para abrir o histórico da conversa.</div>;
@@ -665,9 +768,18 @@ export const ChatView = ({
                         </div>
                       )}
                       {message.filePath && message.status === 'delivered' ? (
-                        <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
-                          Abrir
-                        </Button>
+                        <div className="message-file-actions">
+                          <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
+                            Abrir
+                          </Button>
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            onClick={() => void onSaveFileAs(message.filePath!, message.fileName)}
+                          >
+                            Salvar como
+                          </Button>
+                        </div>
                       ) : message.status === 'failed' ? (
                         <div className="inline-status error">
                           <Caption1>Não foi possível enviar este anexo.</Caption1>

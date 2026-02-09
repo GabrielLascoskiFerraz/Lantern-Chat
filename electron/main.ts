@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog } from 'electron';
 import { randomUUID } from 'node:crypto';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
@@ -100,6 +100,34 @@ class LanternApp {
 
   private getConfiguredAttachmentsDir(): string {
     return this.db.getAttachmentsDirectory(this.getDefaultAttachmentsDir());
+  }
+
+  private async saveFileAs(filePath: string, fileName?: string): Promise<void> {
+    const sourcePath = path.resolve(filePath || '');
+    if (!sourcePath) return;
+
+    const sourceStats = await fs.promises.stat(sourcePath).catch(() => null);
+    if (!sourceStats?.isFile()) {
+      throw new Error('Arquivo não encontrado para salvar cópia.');
+    }
+
+    const suggestedName = (fileName || '').trim() || path.basename(sourcePath) || 'arquivo';
+    const saveDialogOptions = {
+      title: 'Salvar anexo como',
+      buttonLabel: 'Salvar',
+      defaultPath: path.join(app.getPath('documents'), suggestedName)
+    };
+    const result = this.mainWindow
+      ? await dialog.showSaveDialog(this.mainWindow, saveDialogOptions)
+      : await dialog.showSaveDialog(saveDialogOptions);
+
+    const destination = result.filePath ? path.resolve(result.filePath) : '';
+    if (result.canceled || !destination) {
+      return;
+    }
+
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    await fs.promises.copyFile(sourcePath, destination);
   }
 
   async start(): Promise<void> {
@@ -228,8 +256,8 @@ class LanternApp {
         this.deleteMessageForEveryone(conversationId, messageId),
       getMessages: (conversationId, limit, before) => this.db.getMessages(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
-      searchConversationMessageIds: (conversationId, query, limit) =>
-        this.db.searchConversationMessageIds(conversationId, query, limit),
+      searchConversationMessageIds: (conversationId, query, limit, offset) =>
+        this.db.searchConversationMessageIds(conversationId, query, limit, offset),
       getConversationPreviews: (conversationIds) => this.db.getConversationPreviews(conversationIds),
       getMessageReactions: (messageIds) =>
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
@@ -254,7 +282,8 @@ class LanternApp {
           host: address,
           port
         });
-      }
+      },
+      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
     });
 
     this.emitEvent = ipc.emitEvent;

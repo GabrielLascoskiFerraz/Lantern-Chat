@@ -32,8 +32,12 @@ const api = {
     ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getMessagesByIds', messageIds),
-  searchConversationMessageIds: (conversationId: string, query: string, limit?: number) =>
-    ipcRenderer.invoke('lantern:searchConversationMessageIds', conversationId, query, limit),
+  searchConversationMessageIds: (
+    conversationId: string,
+    query: string,
+    limit?: number,
+    offset?: number
+  ) => ipcRenderer.invoke('lantern:searchConversationMessageIds', conversationId, query, limit, offset),
   getConversationPreviews: (conversationIds: string[]) =>
     ipcRenderer.invoke('lantern:getConversationPreviews', conversationIds),
   getMessageReactions: (messageIds: string[]) =>
@@ -56,6 +60,8 @@ const api = {
   pickDirectory: (defaultPath?: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:pickDirectory', defaultPath),
   openFile: (filePath: string): Promise<void> => ipcRenderer.invoke('lantern:openFile', filePath),
+  saveFileAs: (filePath: string, fileName?: string): Promise<void> =>
+    ipcRenderer.invoke('lantern:saveFileAs', filePath, fileName),
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('lantern:openExternalUrl', url),
   getFilePreview: (filePath: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:getFilePreview', filePath),

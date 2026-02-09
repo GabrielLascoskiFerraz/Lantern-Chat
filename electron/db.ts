@@ -676,12 +676,18 @@ export class DbService {
     return rows;
   }
 
-  searchConversationMessageIds(conversationId: string, query: string, limit = 200): string[] {
+  searchConversationMessageIds(
+    conversationId: string,
+    query: string,
+    limit = 500,
+    offset = 0
+  ): string[] {
     const trimmed = query.trim();
     if (!trimmed) {
       return [];
     }
-    const normalizedLimit = Math.max(1, Math.min(limit, 1000));
+    const normalizedLimit = Math.max(1, Math.min(limit, 2000));
+    const normalizedOffset = Math.max(0, Math.trunc(offset));
     const escaped = trimmed.replace(/[\\%_]/g, (token) => `\\${token}`);
     const like = `%${escaped}%`;
     const rows = this.db
@@ -695,9 +701,12 @@ export class DbService {
              OR COALESCE(fileName, '') LIKE ? ESCAPE '\\'
            )
          ORDER BY createdAt ASC, messageId ASC
-         LIMIT ?`
+         LIMIT ?
+         OFFSET ?`
       )
-      .all(conversationId, like, like, normalizedLimit) as Array<{ messageId: string }>;
+      .all(conversationId, like, like, normalizedLimit, normalizedOffset) as Array<{
+      messageId: string;
+    }>;
     return rows.map((row) => row.messageId);
   }
 

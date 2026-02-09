@@ -22,6 +22,8 @@ export const Shell = () => {
     selectedConversationId,
     selectConversation,
     messagesByConversation,
+    hasMoreHistoryByConversation,
+    loadingOlderByConversation,
     announcementReactionsByMessage,
     conversationPreviewById,
     recentMessageIds,
@@ -36,6 +38,7 @@ export const Shell = () => {
     clearConversation,
     forgetContactConversation,
     openFile,
+    saveFileAs,
     settingsOpen,
     setSettingsOpen,
     updateProfile,
@@ -48,6 +51,7 @@ export const Shell = () => {
     setThemeMode,
     syncActive,
     loadingConversationId,
+    loadOlderMessages,
     ensureConversationMessagesLoaded
   } = useLanternStore();
 
@@ -57,6 +61,9 @@ export const Shell = () => {
     return peers.find((peer) => peer.deviceId === peerId) || null;
   }, [peers, selectedConversationId]);
   const selectedPeerOnline = selectedPeer ? onlinePeerIds.includes(selectedPeer.deviceId) : false;
+
+  const selectedHasMoreHistory = Boolean(hasMoreHistoryByConversation[selectedConversationId]);
+  const selectedLoadingOlderHistory = Boolean(loadingOlderByConversation[selectedConversationId]);
 
   const currentMessages = messagesByConversation[selectedConversationId] || [];
 
@@ -72,8 +79,35 @@ export const Shell = () => {
   }, [transfers]);
 
   const searchMessageIds = useCallback(
-    (query: string) => ipcClient.searchConversationMessageIds(selectedConversationId, query, 500),
+    async (query: string) => {
+      const normalized = query.trim();
+      if (!normalized) return [];
+      const pageSize = 500;
+      const maxResults = 20_000;
+      const collected: string[] = [];
+      let offset = 0;
+
+      while (offset < maxResults) {
+        const chunk = await ipcClient.searchConversationMessageIds(
+          selectedConversationId,
+          normalized,
+          pageSize,
+          offset
+        );
+        if (chunk.length === 0) break;
+        collected.push(...chunk);
+        if (chunk.length < pageSize) break;
+        offset += chunk.length;
+      }
+
+      return Array.from(new Set(collected));
+    },
     [selectedConversationId]
+  );
+
+  const loadOlderForConversation = useCallback(
+    () => loadOlderMessages(selectedConversationId),
+    [loadOlderMessages, selectedConversationId]
   );
 
   const ensureMessagesLoaded = useCallback(
@@ -149,6 +183,8 @@ export const Shell = () => {
           messages={currentMessages}
           reactionsByMessageId={announcementReactionsByMessage}
           transferByFileId={transferMap}
+          hasMoreOlder={selectedHasMoreHistory}
+          loadingOlder={selectedLoadingOlderHistory}
           onSend={(text) =>
             selectedPeer ? sendText(selectedPeer.deviceId, text) : Promise.resolve()
           }
@@ -171,8 +207,10 @@ export const Shell = () => {
           onClearConversation={() => clearConversation(selectedConversationId)}
           onForgetContactConversation={() => forgetContactConversation(selectedConversationId)}
           onOpenFile={openFile}
+          onSaveFileAs={saveFileAs}
           recentMessageIds={recentMessageIds}
           onSearchMessageIds={searchMessageIds}
+          onLoadOlderMessages={loadOlderForConversation}
           onEnsureMessagesLoaded={ensureMessagesLoaded}
         />
       )}
