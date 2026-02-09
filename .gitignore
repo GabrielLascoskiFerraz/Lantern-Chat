@@ -1,0 +1,70 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-*/
+build/
+out/
+release/
+coverage/
+
+# Electron builder artifacts
+*.blockmap
+*.dmg
+*.exe
+*.AppImage
+*.deb
+*.rpm
+*.snap
+*.msi
+*.nupkg
+latest.yml
+latest-*.yml
+builder-debug.yml
+
+# TypeScript / tooling cache
+*.tsbuildinfo
+.eslintcache
+.vite/
+.cache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / temp
+*.pid
+*.pid.lock
+*.seed
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Local app data (if generated inside project)
+attachments/
+Lantern Attachments/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Optional archives
+aquivo.zip
+Arquivo.zip

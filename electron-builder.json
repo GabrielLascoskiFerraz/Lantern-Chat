@@ -1,0 +1,33 @@
+{
+  "appId": "Lantern",
+  "productName": "Lantern",
+  "directories": {
+    "output": "dist-installers",
+    "buildResources": "assets"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "dist-renderer/**/*",
+    "assets/**/*",
+    "package.json"
+  ],
+  "asar": true,
+  "win": {
+    "icon": "assets/icon.png",
+    "target": ["nsis"],
+    "artifactName": "Lantern-Setup-${version}.${ext}"
+  },
+  "mac": {
+    "icon": "assets/icon.icns",
+    "target": ["dmg", "zip"],
+    "artifactName": "Lantern-${version}-${arch}.${ext}",
+    "category": "public.app-category.social-networking"
+  },
+  "nsis": {
+    "oneClick": false,
+    "installerIcon": "assets/icon.png",
+    "uninstallerIcon": "assets/icon.png",
+    "allowToChangeInstallationDirectory": true,
+    "perMachine": false
+  }
+}
