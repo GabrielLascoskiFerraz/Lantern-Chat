@@ -76,12 +76,25 @@ export const Sidebar = ({
   relayEndpoint,
   syncActive
 }: SidebarProps) => {
+  const pinnedStorageKey = 'lantern.sidebar.pinnedConversations';
   const filtered = useMemo(
     () => peers.filter((peer) => peer.displayName.toLowerCase().includes(search.toLowerCase())),
     [peers, search]
   );
-  const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>([]);
-  const pinnedStorageKey = 'lantern.sidebar.pinnedConversations';
+  const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>(() => {
+    try {
+      if (typeof window === 'undefined') return [];
+      const raw = window.localStorage.getItem(pinnedStorageKey);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (value): value is string => typeof value === 'string' && value.startsWith('dm:')
+      );
+    } catch {
+      return [];
+    }
+  });
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; conversationId: string } | null>(null);
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
   const [pendingForgetConversationId, setPendingForgetConversationId] = useState<string | null>(null);
@@ -114,14 +127,31 @@ export const Sidebar = ({
       const aPinned = pinnedSet.has(`dm:${a.deviceId}`) ? 1 : 0;
       const bPinned = pinnedSet.has(`dm:${b.deviceId}`) ? 1 : 0;
       if (aPinned !== bPinned) return bPinned - aPinned;
-      return 0;
+
+      const aUnread = unreadByConversation[`dm:${a.deviceId}`] || 0;
+      const bUnread = unreadByConversation[`dm:${b.deviceId}`] || 0;
+      const aHasUnread = aUnread > 0 ? 1 : 0;
+      const bHasUnread = bUnread > 0 ? 1 : 0;
+      if (aHasUnread !== bHasUnread) return bHasUnread - aHasUnread;
+      if (aUnread !== bUnread) return bUnread - aUnread;
+
+      return a.displayName.localeCompare(b.displayName, 'pt-BR', { sensitivity: 'base' });
     });
-  }, [filtered, pinnedConversationIds]);
+  }, [filtered, pinnedConversationIds, unreadByConversation]);
 
   const orderSignature = useMemo(
     () => orderedFiltered.map((peer) => peer.deviceId).join('|'),
     [orderedFiltered]
   );
+  const totalUnreadCount = useMemo(
+    () =>
+      Object.values(unreadByConversation).reduce(
+        (sum, value) => sum + Math.max(0, Number(value) || 0),
+        0
+      ),
+    [unreadByConversation]
+  );
+  const unreadLabel = totalUnreadCount === 1 ? '1 não lida' : `${totalUnreadCount} não lidas`;
   const shouldVirtualizeContacts = orderedFiltered.length > 70;
   const contactVisibleStart = shouldVirtualizeContacts
     ? Math.max(0, Math.floor(contactsScrollTop / CONTACT_ITEM_HEIGHT) - CONTACT_OVERSCAN)
@@ -141,21 +171,6 @@ export const Sidebar = ({
   const contactBottomSpacerHeight = shouldVirtualizeContacts
     ? Math.max(0, (orderedFiltered.length - contactVisibleEnd) * CONTACT_ITEM_HEIGHT)
     : 0;
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(pinnedStorageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      const valid = parsed.filter(
-        (value): value is string => typeof value === 'string' && value.startsWith('dm:')
-      );
-      setPinnedConversationIds(valid);
-    } catch {
-      // ignore
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -452,7 +467,9 @@ export const Sidebar = ({
 
       <div className="sidebar-section-title">
         <Caption1>Contatos</Caption1>
-        <Caption1>{onlinePeerIds.length} online</Caption1>
+        <Caption1 className="sidebar-section-summary">
+          {onlinePeerIds.length} online · {unreadLabel}
+        </Caption1>
       </div>
       <div className="contacts-list" ref={contactsListRef}>
         {contactTopSpacerHeight > 0 && (
