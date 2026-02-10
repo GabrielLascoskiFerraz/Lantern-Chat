@@ -1,5 +1,7 @@
 # Lantern + LanternRelay
 
+![Client no Mac](https://i.imgur.com/l6W3uUU.png)
+
 Lantern é um chat desktop para rede local com arquitetura **cliente + relay**.
 No estado atual do projeto, **todo tráfego passa pelo LanternRelay**:
 
