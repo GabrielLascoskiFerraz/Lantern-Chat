@@ -123,6 +123,7 @@ export const Sidebar = ({
 
   const orderedFiltered = useMemo(() => {
     const pinnedSet = new Set(pinnedConversationIds);
+    const onlineSet = new Set(onlinePeerIds);
     return [...filtered].sort((a, b) => {
       const aPinned = pinnedSet.has(`dm:${a.deviceId}`) ? 1 : 0;
       const bPinned = pinnedSet.has(`dm:${b.deviceId}`) ? 1 : 0;
@@ -133,11 +134,16 @@ export const Sidebar = ({
       const aHasUnread = aUnread > 0 ? 1 : 0;
       const bHasUnread = bUnread > 0 ? 1 : 0;
       if (aHasUnread !== bHasUnread) return bHasUnread - aHasUnread;
+
+      const aOnline = onlineSet.has(a.deviceId) ? 1 : 0;
+      const bOnline = onlineSet.has(b.deviceId) ? 1 : 0;
+      if (aOnline !== bOnline) return bOnline - aOnline;
+
       if (aUnread !== bUnread) return bUnread - aUnread;
 
       return a.displayName.localeCompare(b.displayName, 'pt-BR', { sensitivity: 'base' });
     });
-  }, [filtered, pinnedConversationIds, unreadByConversation]);
+  }, [filtered, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
 
   const orderSignature = useMemo(
     () => orderedFiltered.map((peer) => peer.deviceId).join('|'),
