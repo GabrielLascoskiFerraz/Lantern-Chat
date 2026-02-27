@@ -375,6 +375,22 @@ export class DbService {
       .all(conversationId, limit) as DbMessage[];
   }
 
+  getOutgoingTextMessagesForPeer(peerId: string, limit = 50): DbMessage[] {
+    const conversationId = `dm:${peerId}`;
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE conversationId = ?
+           AND direction = 'out'
+           AND type = 'text'
+           AND deletedAt IS NULL
+           AND (status IS NULL OR status != 'delivered')
+         ORDER BY createdAt ASC, messageId ASC
+         LIMIT ?`
+      )
+      .all(conversationId, limit) as DbMessage[];
+  }
+
   getOutgoingFileMessagesForPeer(peerId: string, limit = 50): DbMessage[] {
     const conversationId = `dm:${peerId}`;
     return this.db

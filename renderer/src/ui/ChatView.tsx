@@ -12,6 +12,7 @@ import {
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
+  Clock20Regular,
   Emoji20Regular,
   Copy20Regular,
   Delete20Regular,
@@ -39,7 +40,7 @@ interface ChatViewProps {
   recentMessageIds: Record<string, number>;
   onSend: (text: string) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
-  onSendFile: (filePath: string) => Promise<void>;
+  onSendFile?: (filePath: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onClearConversation: () => Promise<void>;
@@ -83,7 +84,17 @@ const formatDateSeparator = (value: number): string => {
 const statusLabel = (status: MessageRow['status']): string => {
   if (status === 'delivered') return 'Entregue';
   if (status === 'failed') return 'Não enviada';
-  return 'Enviando';
+  return 'Pendente';
+};
+
+const renderOutgoingStatusIcon = (status: MessageRow['status']): ReactNode => {
+  if (status === 'sent' || status === null) {
+    return <Clock20Regular className="bubble-time-icon pending" />;
+  }
+  if (status === 'failed') {
+    return <Dismiss20Regular className="bubble-time-icon failed" />;
+  }
+  return <Checkmark20Regular className="bubble-time-icon delivered" />;
 };
 
 const formatBytes = (bytes: number | null | undefined): string => {
@@ -922,6 +933,8 @@ export const ChatView = ({
                 <div
                   className={`bubble ${outgoing ? 'out' : 'in'} ${isDeleted ? 'deleted' : ''} ${
                     message.status === 'failed' ? 'failed' : ''
+                  } ${message.status === 'sent' ? 'pending' : ''} ${
+                    message.status === null ? 'pending' : ''
                   } ${isImageFile && !previewDataUrl ? 'media-loading' : ''} ${
                     isImageFile && previewDataUrl ? 'media-loaded' : ''
                   }`}
@@ -1007,7 +1020,7 @@ export const ChatView = ({
 
                   <div className="bubble-meta">
                     <span className="bubble-time">
-                      <Checkmark20Regular />
+                      {outgoing ? renderOutgoingStatusIcon(message.status) : null}
                       <span>{formatTime(message.createdAt)}</span>
                     </span>
                     {outgoing && <span>{statusLabel(message.status)}</span>}
@@ -1104,7 +1117,7 @@ export const ChatView = ({
 
       {!peerOnline && (
         <div className="chat-offline-hint">
-          Este contato está offline. Você pode consultar o histórico local, mas o envio só é liberado quando ele voltar.
+          Este contato está offline. Suas mensagens de texto ficarão pendentes e serão enviadas quando ele voltar.
         </div>
       )}
       {peerOnline && peerTyping && (
@@ -1120,11 +1133,11 @@ export const ChatView = ({
 
       <MessageComposer
         placeholder="Digite sua mensagem"
-        disabled={!peerOnline}
+        disabled={false}
         autoFocusKey={peer.deviceId}
         onSend={onSend}
         onTypingChange={onTyping}
-        onSendFile={onSendFile}
+        onSendFile={peerOnline ? onSendFile : undefined}
       />
 
       <ConfirmDialog

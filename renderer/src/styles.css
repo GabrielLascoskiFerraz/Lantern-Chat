@@ -1120,6 +1120,13 @@ body {
   border-color: var(--bubble-failed-border);
 }
 
+.bubble.out.pending {
+  --bubble-pending-border: color-mix(in srgb, #9da3b0 60%, var(--teams-border) 40%);
+  --bubble-pending-bg: color-mix(in srgb, #f1f3f7 78%, var(--teams-surface) 22%);
+  background: var(--bubble-pending-bg);
+  border-color: var(--bubble-pending-border);
+}
+
 .bubble.out::after {
   content: '';
   position: absolute;
@@ -1133,6 +1140,10 @@ body {
 
 .bubble.out.failed::after {
   background: var(--bubble-failed-border);
+}
+
+.bubble.out.pending::after {
+  background: var(--bubble-pending-border);
 }
 
 .bubble.out::before {
@@ -1152,8 +1163,17 @@ body {
   box-shadow: 1px 0 0 0 var(--bubble-failed-border), 0 1px 0 0 var(--bubble-failed-border);
 }
 
+.bubble.out.pending::before {
+  background: var(--bubble-pending-bg);
+  box-shadow: 1px 0 0 0 var(--bubble-pending-border), 0 1px 0 0 var(--bubble-pending-border);
+}
+
 .bubble.out.failed .bubble-meta {
   color: color-mix(in srgb, #7d1215 78%, var(--teams-muted));
+}
+
+.bubble.out.pending .bubble-meta {
+  color: color-mix(in srgb, #5e6473 82%, var(--teams-muted));
 }
 
 .bubble-row.grouped .bubble.in::before,
@@ -1181,6 +1201,18 @@ body {
 .bubble-time svg {
   width: 12px;
   height: 12px;
+}
+
+.bubble-time-icon.pending {
+  color: color-mix(in srgb, #6a7081 82%, var(--teams-muted));
+}
+
+.bubble-time-icon.delivered {
+  color: color-mix(in srgb, var(--teams-accent) 68%, var(--teams-muted) 32%);
+}
+
+.bubble-time-icon.failed {
+  color: #b4232f;
 }
 
 .message-text {
@@ -2523,11 +2555,32 @@ body {
   --bubble-failed-bg: color-mix(in srgb, #5e1f28 68%, var(--teams-bubble-out) 32%);
 }
 
+:root[data-theme='dark'] .bubble.out.pending {
+  --bubble-pending-border: color-mix(in srgb, #9aa2b3 48%, var(--teams-border) 52%);
+  --bubble-pending-bg: color-mix(in srgb, #2a313f 70%, var(--teams-bubble-out) 30%);
+}
+
 :root[data-theme='dark'] .bubble.out.failed .bubble-meta {
   color: #ffb3b5;
 }
 
+:root[data-theme='dark'] .bubble.out.pending .bubble-meta {
+  color: #c9cfdb;
+}
+
 :root[data-theme='dark'] .inline-status.error {
+  color: #ffb3b5;
+}
+
+:root[data-theme='dark'] .bubble-time-icon.pending {
+  color: #c0c8d6;
+}
+
+:root[data-theme='dark'] .bubble-time-icon.delivered {
+  color: color-mix(in srgb, #8da9ff 72%, #c0c8d6 28%);
+}
+
+:root[data-theme='dark'] .bubble-time-icon.failed {
   color: #ffb3b5;
 }
 

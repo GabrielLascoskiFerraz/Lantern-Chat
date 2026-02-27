@@ -996,14 +996,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           [message.conversationId]: previewFromMessage(message)
         }
       }));
-    } catch (error) {
-      const toastMessage =
-        error instanceof Error
-          ? error.message
-          : 'Contato offline. Não foi possível enviar a mensagem.';
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const failedMessage: MessageRow = {
-        messageId: `local-failed:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    } catch {
+      const pendingMessage: MessageRow = {
+        messageId: `local-pending:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
         conversationId,
         direction: 'out',
         senderDeviceId: get().profile?.deviceId || 'local',
@@ -1015,7 +1010,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         fileSize: null,
         fileSha256: null,
         filePath: null,
-        status: 'failed',
+        status: 'sent',
         reaction: null,
         deletedAt: null,
         createdAt: Date.now(),
@@ -1027,16 +1022,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ...state.messagesByConversation,
           [conversationId]: appendUniqueMessage(
             state.messagesByConversation[conversationId] || [],
-            failedMessage
+            pendingMessage
           )
         },
         conversationPreviewById: {
           ...state.conversationPreviewById,
-          [conversationId]: previewFromMessage(failedMessage)
-        },
-        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+          [conversationId]: previewFromMessage(pendingMessage)
+        }
       }));
-      window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
   sendTyping: async (peerId, isTyping) => {

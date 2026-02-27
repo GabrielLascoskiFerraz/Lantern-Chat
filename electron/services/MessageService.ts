@@ -146,18 +146,16 @@ export class MessageService {
       createdAt
     };
 
-    if (!peer) {
-      throw new Error('Contato offline. Não foi possível enviar a mensagem.');
-    }
-
-    try {
-      await this.sendToPeer(peer, frame);
-    } catch {
-      this.markUnreachable(peer);
-      throw new Error('Contato offline. Não foi possível enviar a mensagem.');
-    }
-
     this.db.saveMessage(message);
+
+    if (peer) {
+      try {
+        await this.sendToPeer(peer, frame);
+      } catch {
+        this.markUnreachable(peer);
+      }
+    }
+
     return message;
   }
 
@@ -263,7 +261,39 @@ export class MessageService {
   }
 
   async retryFailedMessagesForPeer(peer: Peer): Promise<void> {
-    void peer;
+    const pendingTextMessages = this.db.getOutgoingTextMessagesForPeer(peer.deviceId, 100);
+    for (const message of pendingTextMessages) {
+      if (!message.bodyText) continue;
+
+      if (message.status !== 'sent') {
+        this.db.updateMessageStatus(message.messageId, 'sent');
+        const updated = this.db.getMessageById(message.messageId);
+        if (updated) {
+          this.emitEvent({
+            type: 'message:updated',
+            message: updated
+          });
+        }
+      }
+
+      const frame: ProtocolFrame<ChatTextPayload> = {
+        type: 'chat:text',
+        messageId: message.messageId,
+        from: this.profile.deviceId,
+        to: peer.deviceId,
+        createdAt: message.createdAt,
+        payload: {
+          text: message.bodyText
+        }
+      };
+
+      try {
+        await this.sendToPeer(peer, frame);
+      } catch {
+        this.markUnreachable(peer);
+        break;
+      }
+    }
   }
 
   private isClipboardTempFile(filePath: string): boolean {
