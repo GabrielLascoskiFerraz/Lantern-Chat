@@ -1602,10 +1602,28 @@ body {
     background-color 120ms ease;
 }
 
-.reaction-btn:hover,
-.reaction-btn.active {
+.reaction-btn:hover {
   background: var(--teams-row-hover);
   transform: scale(1.04);
+}
+
+.reaction-btn.active {
+  background: color-mix(in srgb, var(--teams-accent) 20%, var(--teams-surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--teams-accent) 66%, var(--teams-border)),
+    0 1px 3px color-mix(in srgb, var(--teams-accent) 20%, transparent);
+  transform: scale(1.06);
+}
+
+.reaction-btn.active:hover {
+  background: color-mix(in srgb, var(--teams-accent) 24%, var(--teams-surface));
+}
+
+:root[data-theme='dark'] .reaction-btn.active {
+  background: color-mix(in srgb, var(--teams-accent) 32%, var(--teams-surface-2));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--teams-accent) 74%, var(--teams-border)),
+    0 1px 4px color-mix(in srgb, var(--teams-accent) 26%, transparent);
 }
 
 .reaction-picker.is-open .reaction-btn {
@@ -1642,8 +1660,17 @@ body {
 }
 
 .announcement-reaction-pill.active {
-  border-color: color-mix(in srgb, var(--teams-accent) 44%, var(--teams-border));
-  background: color-mix(in srgb, var(--teams-accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--teams-accent) 72%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-accent) 22%, var(--teams-surface));
+  color: color-mix(in srgb, var(--teams-accent) 40%, var(--teams-text));
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--teams-accent) 18%, transparent);
+}
+
+:root[data-theme='dark'] .announcement-reaction-pill.active {
+  border-color: color-mix(in srgb, var(--teams-accent) 78%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-accent) 34%, var(--teams-surface-2));
+  color: var(--teams-text);
+  box-shadow: 0 1px 5px color-mix(in srgb, var(--teams-accent) 22%, transparent);
 }
 
 .bubble-actions-row .fui-Button {
