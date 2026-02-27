@@ -754,9 +754,16 @@ export const MessageComposer = ({
 
     event.preventDefault();
     const menuWidth = 188;
-    const menuHeight = hasSelection ? 96 : 52;
-    const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+    const menuHeight = hasSelection ? 116 : 68;
+    const rootRect = composerRootRef.current?.getBoundingClientRect();
+    const rootLeft = rootRect?.left ?? 0;
+    const rootTop = rootRect?.top ?? 0;
+    const minX = 8 - rootLeft;
+    const maxX = window.innerWidth - 8 - rootLeft - menuWidth;
+    const minY = 8 - rootTop;
+    const maxY = window.innerHeight - 8 - rootTop - menuHeight;
+    const x = Math.min(Math.max(event.clientX - rootLeft, minX), maxX);
+    const y = Math.min(Math.max(event.clientY - rootTop, minY), maxY);
     setTextContextMenu({ x, y, hasSelection });
   };
 

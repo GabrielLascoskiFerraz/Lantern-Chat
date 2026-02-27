@@ -290,6 +290,40 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+  transform-origin: top right;
+}
+
+.quick-status-menu.open {
+  animation: quickStatusMenuIn 160ms var(--motion-ease-emphasized) forwards;
+}
+
+.quick-status-menu.closing {
+  animation: quickStatusMenuOut 140ms var(--motion-ease-standard) forwards;
+  pointer-events: none;
+}
+
+@keyframes quickStatusMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes quickStatusMenuOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
 }
 
 .quick-status-title {
@@ -676,10 +710,13 @@ body {
 }
 
 .chat-context-menu {
-  position: fixed;
+  position: absolute;
   z-index: 1200;
-  min-width: 188px;
-  max-width: 208px;
+  width: min(188px, calc(100vw - 16px));
+  min-width: 0;
+  max-width: min(208px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   border: 1px solid var(--teams-border);
   border-radius: var(--teams-radius-md);
   background: var(--teams-surface);
@@ -712,6 +749,7 @@ body {
 }
 
 .main-pane {
+  position: relative;
   min-width: 0;
   min-height: 0;
   height: 100%;

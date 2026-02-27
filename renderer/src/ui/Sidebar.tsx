@@ -102,9 +102,11 @@ export const Sidebar = ({
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
   const [pendingForgetConversationId, setPendingForgetConversationId] = useState<string | null>(null);
   const [quickStatusOpen, setQuickStatusOpen] = useState(false);
+  const [quickStatusClosing, setQuickStatusClosing] = useState(false);
   const [customStatusDraft, setCustomStatusDraft] = useState('');
   const quickStatusRef = useRef<HTMLDivElement | null>(null);
   const quickStatusButtonRef = useRef<HTMLButtonElement | null>(null);
+  const quickStatusCloseTimeoutRef = useRef<number | null>(null);
   const contactsListRef = useRef<HTMLDivElement | null>(null);
   const [quickStatusMenuStyle, setQuickStatusMenuStyle] = useState<CSSProperties>({});
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -189,12 +191,42 @@ export const Sidebar = ({
     }
   }, [pinnedConversationIds]);
 
+  const closeQuickStatusMenu = (): void => {
+    if (!quickStatusOpen || quickStatusClosing) return;
+    setQuickStatusClosing(true);
+    if (quickStatusCloseTimeoutRef.current) {
+      window.clearTimeout(quickStatusCloseTimeoutRef.current);
+    }
+    quickStatusCloseTimeoutRef.current = window.setTimeout(() => {
+      setQuickStatusOpen(false);
+      setQuickStatusClosing(false);
+      quickStatusCloseTimeoutRef.current = null;
+    }, 150);
+  };
+
+  const openQuickStatusMenu = (): void => {
+    if (quickStatusCloseTimeoutRef.current) {
+      window.clearTimeout(quickStatusCloseTimeoutRef.current);
+      quickStatusCloseTimeoutRef.current = null;
+    }
+    setQuickStatusClosing(false);
+    setQuickStatusOpen(true);
+  };
+
+  const toggleQuickStatusMenu = (): void => {
+    if (quickStatusOpen && !quickStatusClosing) {
+      closeQuickStatusMenu();
+      return;
+    }
+    openQuickStatusMenu();
+  };
+
   useEffect(() => {
     const onClose = () => setContextMenu(null);
     const onCloseQuickStatus = (event: MouseEvent) => {
       if (!quickStatusRef.current) return;
       if (!quickStatusRef.current.contains(event.target as Node)) {
-        setQuickStatusOpen(false);
+        closeQuickStatusMenu();
       }
     };
     window.addEventListener('click', onClose);
@@ -204,8 +236,12 @@ export const Sidebar = ({
       window.removeEventListener('click', onClose);
       window.removeEventListener('mousedown', onCloseQuickStatus);
       window.removeEventListener('scroll', onClose, true);
+      if (quickStatusCloseTimeoutRef.current) {
+        window.clearTimeout(quickStatusCloseTimeoutRef.current);
+        quickStatusCloseTimeoutRef.current = null;
+      }
     };
-  }, []);
+  }, [quickStatusOpen, quickStatusClosing]);
 
   useEffect(() => {
     setCustomStatusDraft(profile.statusMessage || '');
@@ -331,12 +367,12 @@ export const Sidebar = ({
       return;
     }
     event.preventDefault();
-    const menuWidth = 228;
+    const menuWidth = Math.max(140, Math.min(228, window.innerWidth - 24));
     const isDm = conversationId.startsWith('dm:');
     const actionCount = isDm ? 4 : 2;
-    const menuHeight = actionCount * 44;
-    const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+    const menuHeight = Math.max(112, Math.min(actionCount * 46 + 16, window.innerHeight - 24));
+    const x = Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight - 12));
     setContextMenu({ x, y, conversationId });
   };
 
@@ -381,11 +417,11 @@ export const Sidebar = ({
               icon={<Chat20Regular />}
               aria-label="Trocar status"
               title="Trocar status"
-              onClick={() => setQuickStatusOpen((open) => !open)}
+              onClick={toggleQuickStatusMenu}
             />
             {quickStatusOpen && (
               <div
-                className="quick-status-menu"
+                className={`quick-status-menu ${quickStatusClosing ? 'closing' : 'open'}`}
                 style={quickStatusMenuStyle}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -399,7 +435,7 @@ export const Sidebar = ({
                       onClick={() => {
                         void onQuickStatusChange(option);
                         setCustomStatusDraft(option);
-                        setQuickStatusOpen(false);
+                        closeQuickStatusMenu();
                       }}
                     >
                       {option}
@@ -418,7 +454,7 @@ export const Sidebar = ({
                     onClick={() => {
                       const value = customStatusDraft.trim() || 'Disponível';
                       void onQuickStatusChange(value);
-                      setQuickStatusOpen(false);
+                      closeQuickStatusMenu();
                     }}
                   >
                     Aplicar

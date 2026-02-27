@@ -255,6 +255,7 @@ export const ChatView = ({
     text: string;
   } | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -303,9 +304,16 @@ export const ChatView = ({
 
       event.preventDefault();
       const menuWidth = 188;
-      const menuHeight = 52;
-      const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
-      const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+      const menuHeight = 68;
+      const rootRect = paneRootRef.current?.getBoundingClientRect();
+      const rootLeft = rootRect?.left ?? 0;
+      const rootTop = rootRect?.top ?? 0;
+      const minX = 8 - rootLeft;
+      const maxX = window.innerWidth - 8 - rootLeft - menuWidth;
+      const minY = 8 - rootTop;
+      const maxY = window.innerHeight - 8 - rootTop - menuHeight;
+      const x = Math.min(Math.max(event.clientX - rootLeft, minX), maxX);
+      const y = Math.min(Math.max(event.clientY - rootTop, minY), maxY);
       setSelectionContextMenu({ x, y, text: selectedText });
     },
     []
@@ -747,7 +755,7 @@ export const ChatView = ({
   }
 
   return (
-    <div className="main-pane">
+    <div className="main-pane" ref={paneRootRef}>
       <header className="pane-header">
         <div className="pane-header-left">
           <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} />
