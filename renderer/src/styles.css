@@ -1983,6 +1983,34 @@ body {
   box-shadow: var(--teams-shadow-pop);
   max-height: 290px;
   overflow: auto;
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+  visibility: hidden;
+  pointer-events: none;
+  transform-origin: left bottom;
+  transition:
+    opacity 170ms var(--motion-ease-standard),
+    transform 200ms var(--motion-ease-standard),
+    visibility 0ms linear 200ms;
+}
+
+.emoji-picker.is-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 170ms var(--motion-ease-standard),
+    transform 200ms var(--motion-ease-standard),
+    visibility 0ms linear 0ms;
+}
+
+.emoji-picker-search {
+  margin-bottom: 8px;
+}
+
+.emoji-search-input {
+  width: 100%;
 }
 
 .emoji-picker-categories {
@@ -1990,6 +2018,23 @@ body {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
+  overflow: hidden;
+  max-height: 112px;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    max-height 180ms var(--motion-ease-standard),
+    opacity 150ms ease,
+    transform 180ms var(--motion-ease-standard),
+    margin-bottom 180ms var(--motion-ease-standard);
+}
+
+.emoji-picker-categories.is-hidden {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-6px);
+  margin-bottom: 0;
+  pointer-events: none;
 }
 
 .emoji-cat-btn {
@@ -2032,6 +2077,14 @@ body {
 .emoji-btn:hover {
   background: var(--teams-row-hover);
   transform: scale(1.06);
+}
+
+.emoji-picker-empty {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--teams-muted);
+  text-align: center;
+  padding: 6px 4px 2px;
 }
 
 .settings-modal {

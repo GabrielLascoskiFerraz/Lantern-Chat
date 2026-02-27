@@ -1,6 +1,7 @@
-import { ClipboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ClipboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
+  Input,
   Textarea
 } from '@fluentui/react-components';
 import {
@@ -40,6 +41,269 @@ interface PasteProgressItem {
   stage: PasteProgressStage;
 }
 
+type EmojiCategory = 'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos';
+
+interface EmojiItem {
+  emoji: string;
+  search: string;
+}
+
+const normalizeSearchTerm = (value: string): string =>
+  value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+const CATEGORY_EXACT_SEARCH_TERMS: Record<EmojiCategory, string[]> = {
+  rostos: ['rosto', 'rostos', 'face', 'faces', 'emocao', 'emocoes'],
+  gestos: ['gesto', 'gestos', 'mao', 'maos', 'mãos'],
+  animais: ['animal', 'animais', 'bicho', 'bichos', 'pet', 'pets'],
+  comida: ['comida', 'comidas', 'bebida', 'bebidas', 'alimento', 'alimentos'],
+  objetos: ['objeto', 'objetos', 'ferramenta', 'ferramentas'],
+  simbolos: ['simbolo', 'simbolos', 'símbolo', 'símbolos', 'icone', 'ícone', 'icones', 'ícones']
+};
+
+const EMOJI_ALIAS_MAP: Record<string, string[]> = {
+  '😀': ['feliz', 'sorriso', 'alegre'],
+  '😂': ['risada', 'rindo', 'kkkk'],
+  '😭': ['chorando', 'tristeza'],
+  '😡': ['bravo', 'raiva'],
+  '😴': ['sono', 'dormindo'],
+  '❤️': ['coracao', 'amor'],
+  '💔': ['coracao partido', 'termino'],
+  '👍': ['positivo', 'ok', 'joinha'],
+  '👎': ['negativo'],
+  '🙏': ['obrigado', 'por favor', 'reza'],
+  '👏': ['aplausos', 'parabens'],
+  '💪': ['forca', 'musculo'],
+  '🐶': ['cachorro', 'dog'],
+  '🐱': ['gato', 'cat'],
+  '🦊': ['raposa', 'fox'],
+  '🐼': ['panda'],
+  '🐧': ['pinguim'],
+  '🦁': ['leao'],
+  '🐸': ['sapo'],
+  '🐢': ['tartaruga'],
+  '🦄': ['unicornio'],
+  '🍕': ['pizza'],
+  '🍔': ['hamburguer'],
+  '🍟': ['batata frita', 'fritas'],
+  '🌮': ['taco'],
+  '🍣': ['sushi'],
+  '🍜': ['lamen', 'ramen'],
+  '🍰': ['bolo', 'doce'],
+  '🍩': ['donut'],
+  '🍫': ['chocolate'],
+  '🍓': ['morango'],
+  '🍉': ['melancia'],
+  '☕': ['cafe'],
+  '🧋': ['bubble tea', 'cha'],
+  '🍺': ['cerveja'],
+  '🍷': ['vinho'],
+  '💻': ['notebook', 'computador'],
+  '📱': ['celular', 'telefone'],
+  '📎': ['anexo', 'clipe'],
+  '🛠️': ['ferramentas'],
+  '⚙️': ['configuracao'],
+  '🚀': ['foguete', 'lancamento'],
+  '📦': ['pacote', 'caixa'],
+  '🧠': ['cerebro', 'ideia'],
+  '🔔': ['notificacao', 'alerta'],
+  '✅': ['confirmado', 'check'],
+  '❌': ['erro', 'cancelar'],
+  '⚠️': ['atencao', 'aviso'],
+  '🔒': ['trancado', 'privado'],
+  '🔓': ['destrancado'],
+  '🟢': ['online', 'verde'],
+  '⚫': ['offline', 'preto'],
+  '🔴': ['urgente', 'vermelho'],
+  '➡️': ['direita'],
+  '⬅️': ['esquerda'],
+  '⬆️': ['cima'],
+  '⬇️': ['baixo'],
+  '💬': ['chat', 'mensagem'],
+  '🗨️': ['conversa'],
+  '📢': ['anuncio', 'broadcast'],
+  '⏰': ['alarme', 'relogio'],
+  '🕒': ['hora', 'tempo']
+};
+
+const EMOJI_ALIAS_GROUPS: Array<{ emojis: string[]; terms: string[] }> = [
+  {
+    emojis: ['😀', '😃', '😄', '😁', '😆', '🙂', '😊', '😇', '🥰', '😍', '🤩', '😺', '😸', '😻'],
+    terms: ['feliz', 'alegre', 'sorrindo', 'sorriso']
+  },
+  {
+    emojis: ['🥳', '🤠', '😎', '🤗'],
+    terms: ['animado', 'empolgado', 'festa', 'comemorando']
+  },
+  {
+    emojis: ['😢', '😭', '😞', '🙁', '☹️', '😟', '😿'],
+    terms: ['triste', 'deprimido', 'chorando']
+  },
+  {
+    emojis: ['😡', '😠', '🤬', '👿'],
+    terms: ['raiva', 'bravo', 'irritado']
+  },
+  {
+    emojis: ['😴', '😪', '🥱'],
+    terms: ['sono', 'dormindo', 'cansado']
+  },
+  {
+    emojis: ['😮', '😯', '😲', '😳', '🤯', '🙀'],
+    terms: ['surpreso', 'espanto', 'chocado']
+  },
+  {
+    emojis: ['😂', '🤣', '😹'],
+    terms: ['rindo', 'risada', 'engracado', 'kkkk', 'kkk']
+  },
+  {
+    emojis: ['😘', '😗', '😚', '😙', '❤️', '💕', '💖', '💘'],
+    terms: ['amor', 'romantico', 'carinho', 'beijo']
+  }
+];
+
+const buildEmojiSearchAliasMap = (): Record<string, string[]> => {
+  const merged = new Map<string, Set<string>>();
+
+  for (const [emoji, aliases] of Object.entries(EMOJI_ALIAS_MAP)) {
+    const current = merged.get(emoji) || new Set<string>();
+    for (const alias of aliases) {
+      current.add(alias);
+    }
+    merged.set(emoji, current);
+  }
+
+  for (const group of EMOJI_ALIAS_GROUPS) {
+    for (const emoji of group.emojis) {
+      const current = merged.get(emoji) || new Set<string>();
+      for (const alias of group.terms) {
+        current.add(alias);
+      }
+      merged.set(emoji, current);
+    }
+  }
+
+  const result: Record<string, string[]> = {};
+  for (const [emoji, aliases] of merged.entries()) {
+    result[emoji] = Array.from(aliases);
+  }
+  return result;
+};
+
+const EMOJI_SEARCH_ALIAS_MAP = buildEmojiSearchAliasMap();
+
+const createEmojiItems = (emojis: string[]): EmojiItem[] =>
+  emojis.map((emoji) => {
+    const terms = [
+      emoji,
+      ...(EMOJI_SEARCH_ALIAS_MAP[emoji] || [])
+    ];
+    return {
+      emoji,
+      search: normalizeSearchTerm(Array.from(new Set(terms)).join(' '))
+    };
+  });
+
+const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem[] }> = {
+  rostos: {
+    label: 'Rostos',
+    emojis: createEmojiItems([
+      '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩',
+      '😘', '😗', '☺️', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🫢', '🫣',
+      '🤫', '🤔', '🫡', '🤐', '🤨', '😐', '😑', '😶', '🫥', '😶‍🌫️', '😏', '😒', '🙄', '😬', '😮‍💨',
+      '🤥', '😌', '😔', '😪', '🤤', '😴', '🫩', '😷', '🤒', '🤕', '🤢', '🤮', '🤧', '🥵', '🥶', '🥴',
+      '😵', '😵‍💫', '🤯', '🤠', '🥳', '🥸', '😎', '🤓', '🧐', '😕', '🫤', '😟', '🙁', '☹️', '😮',
+      '😯', '😲', '😳', '🥺', '🥹', '😦', '😧', '😨', '😰', '😥', '😢', '😭', '😱', '😖', '😣', '😞',
+      '😓', '😩', '😫', '🥱', '😤', '😡', '😠', '🤬', '😈', '👿', '💀', '☠️', '💩', '🤡', '👹', '👺',
+      '👻', '👽', '👾', '🤖', '😺', '😸', '😹', '😻', '😼', '😽', '🙀', '😿', '😾'
+    ])
+  },
+  gestos: {
+    label: 'Gestos',
+    emojis: createEmojiItems([
+      '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙', '👈', '👉',
+      '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '🫶', '👐', '🤲', '🤝',
+      '🙏', '✍️', '💅', '🤳', '💪', '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷',
+      '🦴', '👀', '👁️', '👅', '👄', '🫦', '🙋', '🙋‍♂️', '🙋‍♀️', '🙇', '🙇‍♂️', '🙇‍♀️', '🤦', '🤦‍♂️',
+      '🤦‍♀️', '🤷', '🤷‍♂️', '🤷‍♀️', '🙅', '🙅‍♂️', '🙅‍♀️', '🙆', '🙆‍♂️', '🙆‍♀️', '🙎', '🙎‍♂️',
+      '🙎‍♀️', '🙍', '🙍‍♂️', '🙍‍♀️', '💁', '💁‍♂️', '💁‍♀️', '🙆🏻', '🙆🏽', '🙆🏿'
+    ])
+  },
+  animais: {
+    label: 'Animais',
+    emojis: createEmojiItems([
+      '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈', '🐈‍⬛', '🦁', '🐯', '🐅', '🐆', '🐴',
+      '🫎', '🫏', '🐎', '🦄', '🦓', '🦌', '🦬', '🐮', '🐂', '🐃', '🐄', '🐷', '🐖', '🐗', '🐽', '🐏',
+      '🐑', '🐐', '🐪', '🐫', '🦙', '🦒', '🐘', '🦣', '🦏', '🦛', '🐭', '🐁', '🐀', '🐹', '🐰', '🐇',
+      '🐿️', '🦫', '🦔', '🦇', '🐻', '🐻‍❄️', '🐨', '🐼', '🦥', '🦦', '🦨', '🦘', '🦡', '🦃', '🐔', '🐓',
+      '🐣', '🐤', '🐥', '🐦', '🐧', '🕊️', '🦅', '🦆', '🦢', '🦉', '🦤', '🪶', '🦩', '🦚', '🦜', '🪽',
+      '🐦‍⬛', '🪿', '🐸', '🐊', '🐢', '🦎', '🐍', '🐲', '🐉', '🦕', '🦖', '🐳', '🐋', '🐬', '🦭', '🐟',
+      '🐠', '🐡', '🦈', '🐙', '🐚', '🪸', '🪼', '🦀', '🦞', '🦐', '🦑', '🦪', '🐌', '🦋', '🐛', '🐜',
+      '🐝', '🪲', '🐞', '🦗', '🪳', '🕷️', '🕸️', '🦂', '🦟', '🪰', '🪱', '🦠'
+    ])
+  },
+  comida: {
+    label: 'Comida',
+    emojis: createEmojiItems([
+      '🍏', '🍎', '🍐', '🍊', '🍋', '🍋‍🟩', '🍌', '🍉', '🍇', '🍓', '🫐', '🍈', '🍒', '🍑', '🥭', '🍍',
+      '🥥', '🥝', '🍅', '🍆', '🥑', '🥦', '🫛', '🥬', '🥒', '🌶️', '🫑', '🌽', '🥕', '🫒', '🧄', '🧅',
+      '🥔', '🍠', '🫚', '🥐', '🥯', '🍞', '🥖', '🥨', '🧀', '🥚', '🍳', '🧈', '🥞', '🧇', '🥓', '🥩',
+      '🍗', '🍖', '🌭', '🍔', '🍟', '🍕', '🫓', '🥪', '🥙', '🧆', '🌮', '🌯', '🫔', '🥗', '🥘', '🫕',
+      '🥫', '🍝', '🍜', '🍲', '🍛', '🍣', '🍱', '🥟', '🦪', '🍤', '🍙', '🍚', '🍘', '🍥', '🥠', '🥮',
+      '🍢', '🍡', '🍧', '🍨', '🍦', '🥧', '🧁', '🍰', '🎂', '🍮', '🍭', '🍬', '🍫', '🍿', '🍩', '🍪',
+      '🌰', '🥜', '🍯', '🥛', '🍼', '☕', '🍵', '🧃', '🥤', '🧋', '🍶', '🍺', '🍻', '🥂', '🍷', '🫗',
+      '🥃', '🍸', '🍹', '🧉', '🍾', '🧊', '🥄', '🍴', '🍽️', '🥣', '🥡', '🥢', '🧂'
+    ])
+  },
+  objetos: {
+    label: 'Objetos',
+    emojis: createEmojiItems([
+      '⌚', '📱', '📲', '💻', '⌨️', '🖥️', '🖨️', '🖱️', '🖲️', '🕹️', '💽', '💾', '💿', '📀', '🧮', '🎥',
+      '🎞️', '📷', '📸', '📹', '📼', '🔍', '🔎', '💡', '🔦', '🏮', '🪔', '📔', '📕', '📖', '📗', '📘',
+      '📙', '📚', '📓', '📒', '📃', '📜', '📄', '📰', '🗞️', '📑', '🔖', '🏷️', '💰', '🪙', '💴', '💵',
+      '💶', '💷', '💸', '💳', '🧾', '✉️', '📧', '📨', '📩', '📤', '📥', '📦', '📫', '📪', '📬', '📭',
+      '📮', '🗳️', '✏️', '✒️', '🖋️', '🖊️', '🖌️', '🖍️', '📝', '📁', '📂', '🗂️', '📅', '📆', '🗒️',
+      '🗓️', '📇', '📈', '📉', '📊', '📋', '📌', '📍', '📎', '🖇️', '📏', '📐', '✂️', '🗃️', '🗄️',
+      '🗑️', '🔒', '🔓', '🔏', '🔐', '🔑', '🗝️', '🔨', '🪓', '⛏️', '⚒️', '🛠️', '🗡️', '⚔️', '🔫',
+      '🪃', '🏹', '🛡️', '🪚', '🔧', '🪛', '🔩', '⚙️', '🗜️', '⚖️', '🦯', '🔗', '⛓️', '🪝', '🧰',
+      '🧲', '🪜', '⚗️', '🧪', '🧫', '🧬', '🔬', '🔭', '📡', '💉', '🩸', '💊', '🩹', '🩺', '🚪', '🪞',
+      '🪟', '🛏️', '🛋️', '🪑', '🚽', '🚿', '🛁', '🪤', '🪒', '🧴', '🧷', '🧹', '🧺', '🧻', '🪠', '🧼',
+      '🫧', '🪥', '🧽', '🧯', '🛒', '🚬', '⚰️', '🪦', '⚱️', '🗿', '🪧'
+    ])
+  },
+  simbolos: {
+    label: 'Símbolos',
+    emojis: createEmojiItems([
+      '❤️', '🩷', '🧡', '💛', '💚', '💙', '🩵', '💜', '🤎', '🖤', '🩶', '🤍', '💔', '❣️', '💕', '💞',
+      '💓', '💗', '💖', '💘', '💝', '💟', '☮️', '✝️', '☪️', '🕉️', '☸️', '✡️', '🔯', '🕎', '☯️', '☦️',
+      '🛐', '⛎', '♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓', '🆔', '⚛️', '🉑',
+      '☢️', '☣️', '📴', '📳', '🈶', '🈚', '🈸', '🈺', '🈷️', '✴️', '🆚', '💮', '🉐', '㊙️', '㊗️',
+      '🈴', '🈵', '🈹', '🈲', '🅰️', '🅱️', '🆎', '🆑', '🅾️', '🆘', '❌', '⭕', '🛑', '⛔', '📛', '🚫',
+      '💯', '💢', '♨️', '🚷', '🚯', '🚳', '🚱', '🔞', '📵', '🚭', '❗', '❕', '❓', '❔', '‼️', '⁉️',
+      '🔅', '🔆', '〽️', '⚠️', '🚸', '🔱', '⚜️', '🔰', '♻️', '✅', '🈯', '💹', '❇️', '✳️', '❎', '🌐',
+      '💠', 'Ⓜ️', '🌀', '💤', '🏧', '🚾', '♿', '🅿️', '🛗', '🈳', '🈂️', '🛂', '🛃', '🛄', '🛅', '🚹',
+      '🚺', '🚼', '⚧', '🚻', '🚮', '🎦', '📶', '🈁', '🔣', 'ℹ️', '🔤', '🔡', '🔠', '🆖', '🆗', '🆙',
+      '🆒', '🆕', '🆓', '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟',
+      '🔢', '#️⃣', '*️⃣', '⏏️', '▶️', '⏸️', '⏯️', '⏹️', '⏺️', '⏭️', '⏮️', '⏩', '⏪', '⏫', '⏬',
+      '◀️', '🔼', '🔽', '➡️', '⬅️', '⬆️', '⬇️', '↗️', '↘️', '↙️', '↖️', '↕️', '↔️', '↪️', '↩️', '⤴️',
+      '⤵️', '🔀', '🔁', '🔂', '🔄', '🔃', '🎵', '🎶', '➕', '➖', '➗', '✖️', '🟰', '♾️', '💲', '💱',
+      '™️', '©️', '®️', '〰️', '➰', '➿', '🔚', '🔙', '🔛', '🔝', '🔜', '✔️', '☑️', '🔘', '⚪', '🟠',
+      '🟡', '🟢', '🔵', '🟣', '🟤', '⚫', '🔴', '🟥', '🟧', '🟨', '🟩', '🟦', '🟪', '🟫', '⬛', '⬜',
+      '◼️', '◻️', '◾', '◽', '▪️', '▫️', '🔶', '🔷', '🔸', '🔹', '🔺', '🔻', '💭', '🗯️', '💬', '🗨️'
+    ])
+  }
+};
+const EMOJI_CATEGORY_ORDER: EmojiCategory[] = [
+  'rostos',
+  'gestos',
+  'animais',
+  'comida',
+  'objetos',
+  'simbolos'
+];
+
 export const MessageComposer = ({
   disabled,
   autoFocusKey,
@@ -68,9 +332,8 @@ export const MessageComposer = ({
     y: number;
     hasSelection: boolean;
   } | null>(null);
-  const [emojiCategory, setEmojiCategory] = useState<
-    'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos'
-  >('rostos');
+  const [emojiCategory, setEmojiCategory] = useState<EmojiCategory>('rostos');
+  const [emojiSearch, setEmojiSearch] = useState('');
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const typingStateRef = useRef(false);
@@ -95,65 +358,46 @@ export const MessageComposer = ({
   const removePasteProgressItem = useCallback((id: string) => {
     setPasteProgressItems((current) => current.filter((item) => item.id !== id));
   }, []);
-  const emojiCategories: Record<
-    'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos',
-    { label: string; emojis: string[] }
-  > = {
-    rostos: {
-      label: 'Rostos',
-      emojis: [
-        '🙂', '😀', '😄', '😁', '😂', '🤣', '😊', '😉', '😎', '🤓', '🥳', '🤩',
-        '😍', '😘', '😌', '😇', '🤔', '🫠', '🫡', '😴', '🥹', '😭', '😤', '😅',
-        '😆', '😋', '😏', '😬', '🤭', '🤫', '🫢', '🤗', '🫶', '😵‍💫', '🥶', '🥵',
-        '🤠', '🥸', '😶‍🌫️', '🤯', '😮‍💨', '🤤', '😜', '😺', '😸', '😹', '🙃', '🫥'
-      ]
-    },
-    gestos: {
-      label: 'Gestos',
-      emojis: [
-        '👍', '👎', '👏', '🙌', '🤝', '🙏', '👌', '🤌', '✌️', '🤟', '🫶', '👋',
-        '✍️', '💪', '🫵', '🤙', '🙋', '🙇', '🤦', '🙆', '🤷', '💯', '✅', '❗',
-        '☝️', '👇', '👈', '👉', '🖖', '🫳', '🫴', '🤜', '🤛', '🦾', '🫱🏻‍🫲🏾', '🙌🏻',
-        '🙌🏽', '🙌🏿', '🙏🏻', '🙏🏽', '🙏🏿', '👏🏻', '👏🏽', '👏🏿', '✊', '✊🏽', '🤘', '🧠'
-      ]
-    },
-    animais: {
-      label: 'Animais',
-      emojis: [
-        '🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐷',
-        '🐸', '🐵', '🐔', '🐧', '🐦', '🦄', '🐝', '🦋', '🐢', '🐬', '🦦', '🐙',
-        '🐺', '🦝', '🦔', '🦉', '🦜', '🦩', '🦆', '🦢', '🐘', '🦒', '🦏', '🦛',
-        '🐮', '🐴', '🐑', '🐐', '🦥', '🦭', '🦈', '🐳', '🐡', '🦀', '🐞', '🪲'
-      ]
-    },
-    comida: {
-      label: 'Comida',
-      emojis: [
-        '🍕', '🍔', '🍟', '🌮', '🌯', '🍣', '🍜', '🍛', '🥐', '🥖', '🍞', '🧀',
-        '🍩', '🍪', '🍫', '🍰', '🧁', '🍓', '🍉', '🍍', '🍎', '🥑', '☕', '🧋',
-        '🍗', '🍖', '🥩', '🥓', '🍤', '🍳', '🥞', '🧇', '🍝', '🍲', '🥗', '🍿',
-        '🍱', '🍙', '🍘', '🍥', '🥟', '🫔', '🍠', '🍌', '🍇', '🍒', '🥭', '🧃'
-      ]
-    },
-    objetos: {
-      label: 'Objetos',
-      emojis: [
-        '💡', '📌', '📎', '📝', '📚', '🎧', '💻', '⌨️', '🖱️', '📱', '🔋', '🧠',
-        '🎯', '🧰', '🔧', '🛠️', '🚀', '🎉', '✨', '🔥', '💬', '📢', '🔔', '🧭',
-        '🖨️', '📷', '🎥', '📡', '🧲', '🧪', '🧫', '🧬', '⏱️', '⏰', '🗂️', '📦',
-        '🧳', '🪄', '🪙', '💳', '🪫', '📶', '🧯', '🛎️', '🗝️', '🔐', '📍', '🪟'
-      ]
-    },
-    simbolos: {
-      label: 'Símbolos',
-      emojis: [
-        '❤️', '💙', '💚', '🧡', '💛', '💜', '🤍', '🖤', '💞', '💥', '⭐', '🌟',
-        '⚡', '✔️', '❌', '➕', '➖', '⬆️', '⬇️', '➡️', '⬅️', '🔁', '🕒', '📍',
-        '‼️', '⁉️', '❓', '❕', '⭕', '🔴', '🟢', '🟡', '🔵', '🟣', '⚪', '⚫',
-        '🔺', '🔻', '🔸', '🔹', '🔶', '🔷', '♻️', '☑️', '🔘', '🌀', '♾️', '🆗'
-      ]
+  const normalizedEmojiSearch = useMemo(() => normalizeSearchTerm(emojiSearch), [emojiSearch]);
+  const isEmojiSearching = normalizedEmojiSearch.length > 0;
+  const emojiItems = useMemo(() => {
+    if (!normalizedEmojiSearch) {
+      return EMOJI_CATEGORIES[emojiCategory].emojis;
     }
-  };
+    const found: EmojiItem[] = [];
+    const seen = new Set<string>();
+    for (const category of Object.values(EMOJI_CATEGORIES)) {
+      for (const item of category.emojis) {
+        if (seen.has(item.emoji)) continue;
+        if (item.search.includes(normalizedEmojiSearch)) {
+          seen.add(item.emoji);
+          found.push(item);
+        }
+      }
+    }
+
+    if (found.length > 0) {
+      return found;
+    }
+
+    const exactCategoryMatches = EMOJI_CATEGORY_ORDER.filter((category) =>
+      CATEGORY_EXACT_SEARCH_TERMS[category].some((term) => normalizeSearchTerm(term) === normalizedEmojiSearch)
+    );
+
+    if (exactCategoryMatches.length === 0) {
+      return [];
+    }
+
+    const categoryFallback: EmojiItem[] = [];
+    for (const category of exactCategoryMatches) {
+      for (const item of EMOJI_CATEGORIES[category].emojis) {
+        if (seen.has(item.emoji)) continue;
+        seen.add(item.emoji);
+        categoryFallback.push(item);
+      }
+    }
+    return categoryFallback;
+  }, [emojiCategory, normalizedEmojiSearch]);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -166,6 +410,24 @@ export const MessageComposer = ({
     window.addEventListener('mousedown', onPointerDown);
     return () => window.removeEventListener('mousedown', onPointerDown);
   }, []);
+
+  useEffect(() => {
+    if (!emojiOpen) {
+      setEmojiSearch('');
+      setEmojiCategory('rostos');
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const searchInput = emojiPickerRef.current?.querySelector('input');
+      if (searchInput instanceof HTMLInputElement) {
+        searchInput.focus();
+        searchInput.select();
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [emojiOpen]);
 
   useEffect(() => {
     if (disabled) return;
@@ -959,36 +1221,48 @@ export const MessageComposer = ({
             disabled={disabled}
             onClick={() => setEmojiOpen((open) => !open)}
           />
-          {emojiOpen && (
-            <div className="emoji-picker">
-              <div className="emoji-picker-categories">
-                {(Object.keys(emojiCategories) as Array<keyof typeof emojiCategories>).map((category) => (
-                  <button
-                    key={category}
-                    type="button"
-                    className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
-                    onClick={() => setEmojiCategory(category)}
-                  >
-                    {emojiCategories[category].label}
-                  </button>
-                ))}
-              </div>
-              <div className="emoji-picker-grid">
-                {emojiCategories[emojiCategory].emojis.map((emoji) => (
-                  <button
-                    type="button"
-                    key={emoji}
-                    className="emoji-btn"
-                    onClick={() => {
-                      setText((current) => `${current}${emoji}`);
-                    }}
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
+          <div className={`emoji-picker ${emojiOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!emojiOpen}>
+            <div className="emoji-picker-search">
+              <Input
+                size="small"
+                value={emojiSearch}
+                placeholder="Buscar emoji (ex.: coração, pizza, gato...)"
+                onChange={(_, data) => setEmojiSearch(data.value)}
+                className="emoji-search-input"
+              />
             </div>
-          )}
+            <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
+              {EMOJI_CATEGORY_ORDER.map((category) => (
+                <button
+                  key={category}
+                  type="button"
+                  className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
+                  onClick={() => setEmojiCategory(category)}
+                >
+                  {EMOJI_CATEGORIES[category].label}
+                </button>
+              ))}
+            </div>
+            <div className="emoji-picker-grid">
+              {emojiItems.map((item) => (
+                <button
+                  type="button"
+                  key={item.emoji}
+                  className="emoji-btn"
+                  onClick={() => {
+                    setText((current) => `${current}${item.emoji}`);
+                  }}
+                >
+                  {item.emoji}
+                </button>
+              ))}
+            </div>
+            {emojiItems.length === 0 && (
+              <div className="emoji-picker-empty">
+                Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+              </div>
+            )}
+          </div>
         </div>
         <Textarea
           className="composer-input"
