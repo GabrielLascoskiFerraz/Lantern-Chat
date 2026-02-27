@@ -899,6 +899,7 @@ export const ChatView = ({
           const canShowActions = !isDeleted && !isLocalOnly;
           const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
+          const reactionPickerOpen = reactionPickerMessageId === message.messageId;
           const isImageFile = isFile && isImageName(message.fileName);
           const previewState = previewStateByMessageId[message.messageId];
           const previewDataUrl = previewState?.dataUrl;
@@ -918,7 +919,7 @@ export const ChatView = ({
                 </div>
               )}
               <div
-                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerMessageId === message.messageId ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''}`}
+                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''}`}
                 ref={(node) => {
                   if (matchedMessageIdSet.has(message.messageId)) {
                     matchRowRefs.current[message.messageId] = node;
@@ -1036,7 +1037,7 @@ export const ChatView = ({
                   <>
                     <div
                       className={`bubble-actions-row ${outgoing ? 'out' : 'in'} ${
-                        reactionPickerMessageId === message.messageId ? 'visible' : ''
+                        reactionPickerOpen ? 'visible' : ''
                       }`}
                     >
                     <button
@@ -1055,26 +1056,28 @@ export const ChatView = ({
                       )}
                     </button>
 
-                      {reactionPickerMessageId === message.messageId && (
-                        <div className="reaction-picker">
-                          {REACTIONS.map((reaction) => (
-                            <button
-                              key={reaction}
-                              type="button"
-                              className={`reaction-btn ${summary.myReaction === reaction ? 'active' : ''}`}
-                              onClick={() => {
-                                void onReactToMessage(
-                                  message.messageId,
-                                  summary.myReaction === reaction ? null : reaction
-                                );
-                                setReactionPickerMessageId(null);
-                              }}
-                            >
-                              {reaction}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                      <div
+                        className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
+                        aria-hidden={!reactionPickerOpen}
+                      >
+                        {REACTIONS.map((reaction) => (
+                          <button
+                            key={reaction}
+                            type="button"
+                            tabIndex={reactionPickerOpen ? 0 : -1}
+                            className={`reaction-btn ${summary.myReaction === reaction ? 'active' : ''}`}
+                            onClick={() => {
+                              void onReactToMessage(
+                                message.messageId,
+                                summary.myReaction === reaction ? null : reaction
+                              );
+                              setReactionPickerMessageId(null);
+                            }}
+                          >
+                            {reaction}
+                          </button>
+                        ))}
+                      </div>
 
                       {outgoing && (
                         <Button

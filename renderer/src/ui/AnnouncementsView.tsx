@@ -260,6 +260,7 @@ export const AnnouncementsView = ({
             const senderName = outgoing ? 'Você' : sender?.displayName || message.senderDeviceId;
             const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
+            const reactionPickerOpen = reactionPickerMessageId === message.messageId;
 
             return (
               <div
@@ -289,7 +290,7 @@ export const AnnouncementsView = ({
 
                   <div
                     className={`bubble-actions-row ${outgoing ? 'out' : 'in'} ${
-                      reactionPickerMessageId === message.messageId ? 'visible' : ''
+                      reactionPickerOpen ? 'visible' : ''
                     }`}
                   >
                     <button
@@ -307,26 +308,28 @@ export const AnnouncementsView = ({
                         <Emoji20Regular />
                       )}
                     </button>
-                    {reactionPickerMessageId === message.messageId && (
-                      <div className="reaction-picker">
-                        {REACTIONS.map((reaction) => (
-                          <button
-                            key={reaction}
-                            type="button"
-                            className={`reaction-btn ${summary.myReaction === reaction ? 'active' : ''}`}
-                            onClick={() => {
-                              void onReactToMessage(
-                                message.messageId,
-                                summary.myReaction === reaction ? null : reaction
-                              );
-                              setReactionPickerMessageId(null);
-                            }}
-                          >
-                            {reaction}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    <div
+                      className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
+                      aria-hidden={!reactionPickerOpen}
+                    >
+                      {REACTIONS.map((reaction) => (
+                        <button
+                          key={reaction}
+                          type="button"
+                          tabIndex={reactionPickerOpen ? 0 : -1}
+                          className={`reaction-btn ${summary.myReaction === reaction ? 'active' : ''}`}
+                          onClick={() => {
+                            void onReactToMessage(
+                              message.messageId,
+                              summary.myReaction === reaction ? null : reaction
+                            );
+                            setReactionPickerMessageId(null);
+                          }}
+                        >
+                          {reaction}
+                        </button>
+                      ))}
+                    </div>
                     {outgoing && (
                       <Button
                         appearance="subtle"

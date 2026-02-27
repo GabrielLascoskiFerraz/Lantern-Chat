@@ -1388,7 +1388,7 @@ body {
   top: calc(100% + 4px);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   padding: 2px 4px;
   min-height: 28px;
   flex-wrap: nowrap;
@@ -1397,13 +1397,15 @@ body {
   border-radius: 999px;
   background: color-mix(in srgb, var(--teams-surface) 94%, var(--teams-surface-2));
   box-shadow: var(--teams-shadow-soft);
-  overflow-x: auto;
+  overflow: hidden;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+  transform: translateY(-2px) scale(0.995);
   transition:
-    opacity var(--motion-fast) var(--motion-ease-standard),
-    visibility var(--motion-fast) var(--motion-ease-standard);
+    opacity 160ms var(--motion-ease-standard),
+    visibility 160ms var(--motion-ease-standard),
+    transform 160ms var(--motion-ease-emphasized);
   z-index: 16;
 }
 
@@ -1417,12 +1419,53 @@ body {
   justify-content: flex-start;
 }
 
+.bubble-actions-row.out .reaction-picker {
+  order: 1;
+  transform-origin: right center;
+}
+
+.bubble-actions-row.out .reaction-trigger {
+  order: 2;
+}
+
+.bubble-actions-row.out .fui-Button {
+  order: 3;
+}
+
+.bubble-actions-row.in .reaction-trigger {
+  order: 1;
+}
+
+.bubble-actions-row.in .reaction-picker {
+  order: 2;
+}
+
+.bubble-actions-row.in .fui-Button {
+  order: 3;
+}
+
 .bubble-block:hover .bubble-actions-row,
 .bubble-row.has-actions:hover .bubble-actions-row,
 .bubble-actions-row.visible {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.bubble-actions-row > * {
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 150ms var(--motion-ease-standard),
+    transform 150ms var(--motion-ease-emphasized);
+}
+
+.bubble-block:hover .bubble-actions-row > *,
+.bubble-row.has-actions:hover .bubble-actions-row > *,
+.bubble-actions-row.visible > * {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .bubble-row.search-match .bubble {
@@ -1481,11 +1524,21 @@ body {
   min-width: 32px;
   padding: 0 8px;
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms var(--motion-ease-emphasized),
+    box-shadow 120ms ease;
 }
 
 .reaction-trigger:hover {
   background: var(--teams-row-hover);
+  transform: translateY(-0.5px);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--teams-border) 30%, transparent);
+}
+
+.reaction-trigger:active {
+  transform: translateY(0) scale(0.985);
 }
 
 .reaction-picker {
@@ -1495,24 +1548,72 @@ body {
   border: none;
   border-radius: 999px;
   background: transparent;
+  padding: 0;
+  width: 0;
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transform-origin: left center;
+  transform: translateX(-4px) scale(0.96);
+  margin-inline-start: 0;
+  transition:
+    width 190ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    max-width 190ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    opacity 150ms var(--motion-ease-standard),
+    transform 190ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    margin-inline-start 190ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.reaction-picker.is-open {
+  width: 144px;
+  max-width: 144px;
+  opacity: 1;
+  pointer-events: auto;
   padding: 0 1px;
-  max-width: 100%;
-  overflow-x: auto;
+  transform: translateX(0) scale(1);
+  margin-inline-start: 0;
+  transition:
+    width 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    max-width 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 180ms var(--motion-ease-standard),
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    margin-inline-start 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .reaction-btn {
   width: 22px;
   height: 22px;
+  min-width: 22px;
   border: none;
   border-radius: 999px;
   background: transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 14px;
   cursor: pointer;
   line-height: 1;
+  transform-origin: center center;
+  transition:
+    transform 120ms var(--motion-ease-emphasized),
+    background-color 120ms ease;
 }
 
 .reaction-btn:hover,
 .reaction-btn.active {
   background: var(--teams-row-hover);
+  transform: scale(1.04);
+}
+
+.reaction-picker.is-open .reaction-btn {
+  transform: scale(1);
+}
+
+.reaction-btn:active {
+  transform: scale(0.97);
 }
 
 .announcement-reactions {
@@ -1551,6 +1652,16 @@ body {
   border-radius: 999px;
   padding-inline: 8px;
   font-size: 12px;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.bubble-actions-row .fui-Button:hover {
+  transform: translateY(-0.5px);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--teams-border) 32%, transparent);
+}
+
+.bubble-actions-row .fui-Button:active {
+  transform: translateY(0) scale(0.99);
 }
 
 .announcement-item {
@@ -2008,22 +2119,26 @@ body {
   bottom: calc(100% + 8px);
   z-index: 30;
   width: min(420px, 80vw);
-  padding: 8px;
+  padding: 8px 8px 6px;
   border: 1px solid var(--teams-border);
   border-radius: var(--teams-radius-md);
   background: var(--teams-surface);
   box-shadow: var(--teams-shadow-pop);
-  max-height: 290px;
-  overflow: auto;
+  max-height: 300px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   opacity: 0;
-  transform: translateY(8px) scale(0.985);
+  transform: translateY(6px) scale(0.992);
   visibility: hidden;
   pointer-events: none;
   transform-origin: left bottom;
+  will-change: transform, opacity;
   transition:
-    opacity 170ms var(--motion-ease-standard),
-    transform 200ms var(--motion-ease-standard),
-    visibility 0ms linear 200ms;
+    opacity 170ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 220ms cubic-bezier(0.4, 0, 0.2, 1),
+    visibility 0ms linear 220ms;
 }
 
 .emoji-picker.is-open {
@@ -2032,17 +2147,37 @@ body {
   visibility: visible;
   pointer-events: auto;
   transition:
-    opacity 170ms var(--motion-ease-standard),
-    transform 200ms var(--motion-ease-standard),
+    opacity 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 230ms cubic-bezier(0.16, 1, 0.3, 1),
     visibility 0ms linear 0ms;
 }
 
 .emoji-picker-search {
-  margin-bottom: 8px;
+  margin-bottom: 2px;
 }
 
 .emoji-search-input {
   width: 100%;
+}
+
+.emoji-picker-content {
+  max-height: 236px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.emoji-picker-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.emoji-picker-content::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--teams-border) 72%, transparent);
+  border-radius: 999px;
+}
+
+.emoji-picker-content::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .emoji-picker-categories {

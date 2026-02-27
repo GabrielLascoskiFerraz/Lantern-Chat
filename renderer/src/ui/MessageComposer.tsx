@@ -1231,37 +1231,39 @@ export const MessageComposer = ({
                 className="emoji-search-input"
               />
             </div>
-            <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
-              {EMOJI_CATEGORY_ORDER.map((category) => (
-                <button
-                  key={category}
-                  type="button"
-                  className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
-                  onClick={() => setEmojiCategory(category)}
-                >
-                  {EMOJI_CATEGORIES[category].label}
-                </button>
-              ))}
-            </div>
-            <div className="emoji-picker-grid">
-              {emojiItems.map((item) => (
-                <button
-                  type="button"
-                  key={item.emoji}
-                  className="emoji-btn"
-                  onClick={() => {
-                    setText((current) => `${current}${item.emoji}`);
-                  }}
-                >
-                  {item.emoji}
-                </button>
-              ))}
-            </div>
-            {emojiItems.length === 0 && (
-              <div className="emoji-picker-empty">
-                Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+            <div className="emoji-picker-content">
+              <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
+                {EMOJI_CATEGORY_ORDER.map((category) => (
+                  <button
+                    key={category}
+                    type="button"
+                    className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
+                    onClick={() => setEmojiCategory(category)}
+                  >
+                    {EMOJI_CATEGORIES[category].label}
+                  </button>
+                ))}
               </div>
-            )}
+              <div className="emoji-picker-grid">
+                {emojiItems.map((item) => (
+                  <button
+                    type="button"
+                    key={item.emoji}
+                    className="emoji-btn"
+                    onClick={() => {
+                      setText((current) => `${current}${item.emoji}`);
+                    }}
+                  >
+                    {item.emoji}
+                  </button>
+                ))}
+              </div>
+              {emojiItems.length === 0 && (
+                <div className="emoji-picker-empty">
+                  Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <Textarea
