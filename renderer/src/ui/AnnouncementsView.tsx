@@ -4,6 +4,8 @@ import { Checkmark20Regular } from '@fluentui/react-icons';
 import { Clock20Regular } from '@fluentui/react-icons';
 import { Copy20Regular } from '@fluentui/react-icons';
 import { Delete20Regular } from '@fluentui/react-icons';
+import { Dismiss20Regular } from '@fluentui/react-icons';
+import { Emoji20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
 import { AnnouncementReactionSummary, ipcClient, MessageRow, Peer, Profile } from '../api/ipcClient';
@@ -291,7 +293,11 @@ export const AnnouncementsView = ({
                         )
                       }
                     >
-                      {summary.myReaction || '🙂'}
+                      {reactionPickerMessageId === message.messageId ? (
+                        <Dismiss20Regular />
+                      ) : (
+                        <Emoji20Regular />
+                      )}
                     </button>
                     {reactionPickerMessageId === message.messageId && (
                       <div className="reaction-picker">

@@ -1,9 +1,18 @@
-import { MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
 import {
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
+  Emoji20Regular,
   Copy20Regular,
   Delete20Regular,
   Dismiss20Regular,
@@ -90,6 +99,12 @@ const isImageName = (name: string | null): boolean => {
   if (!name) return false;
   return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
 };
+
+interface ImagePreviewState {
+  dataUrl: string;
+}
+
+const imagePreviewStateCache = new Map<string, ImagePreviewState>();
 
 const transferStageLabel = (
   message: MessageRow,
@@ -205,7 +220,25 @@ export const ChatView = ({
   onLoadOlderMessages,
   onEnsureMessagesLoaded
 }: ChatViewProps) => {
-  const [previewByMessageId, setPreviewByMessageId] = useState<Record<string, string>>({});
+  const [previewStateByMessageId, setPreviewStateByMessageId] = useState<Record<string, ImagePreviewState>>(() => {
+    const seed: Record<string, ImagePreviewState> = {};
+    for (const message of messages) {
+      const cached = imagePreviewStateCache.get(message.messageId);
+      if (cached) {
+        seed[message.messageId] = cached;
+      }
+    }
+    return seed;
+  });
+  const [visiblePreviewByMessageId, setVisiblePreviewByMessageId] = useState<Record<string, boolean>>(() => {
+    const seed: Record<string, boolean> = {};
+    for (const message of messages) {
+      if (imagePreviewStateCache.has(message.messageId)) {
+        seed[message.messageId] = true;
+      }
+    }
+    return seed;
+  });
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -416,7 +449,7 @@ export const ChatView = ({
     forceScrollTimeoutRef.current = window.setTimeout(() => {
       forceScrollOnOpenRef.current = false;
       forceScrollTimeoutRef.current = null;
-    }, 700);
+    }, 1800);
     return () => window.cancelAnimationFrame(frameA);
   }, [peer?.deviceId, normalizedQuery]);
 
@@ -447,24 +480,85 @@ export const ChatView = ({
   useEffect(() => {
     let cancelled = false;
     const loadPreviews = async () => {
-      for (const message of messages) {
-        if (message.type !== 'file' || !message.filePath || !isImageName(message.fileName)) continue;
-        if (previewByMessageId[message.messageId]) continue;
+      const pending = messages.filter(
+        (message) =>
+          message.type === 'file' &&
+          Boolean(message.filePath) &&
+          isImageName(message.fileName) &&
+          !previewStateByMessageId[message.messageId]
+      ).slice(-24);
+      if (pending.length === 0) return;
 
-        const preview = await ipcClient.getFilePreview(message.filePath);
-        if (!preview || cancelled) continue;
+      const resolved = await Promise.all(
+        pending.map(async (message) => {
+          const cached = imagePreviewStateCache.get(message.messageId);
+          if (cached) {
+            return {
+              messageId: message.messageId,
+              previewState: cached
+            };
+          }
 
-        setPreviewByMessageId((current) =>
-          current[message.messageId] ? current : { ...current, [message.messageId]: preview }
-        );
-      }
+          const preview = message.filePath ? await ipcClient.getFilePreview(message.filePath) : null;
+          if (!preview) {
+            return {
+              messageId: message.messageId,
+              previewState: null
+            };
+          }
+          const previewState: ImagePreviewState = {
+            dataUrl: preview
+          };
+          imagePreviewStateCache.set(message.messageId, previewState);
+          return {
+            messageId: message.messageId,
+            previewState
+          };
+        })
+      );
+
+      if (cancelled) return;
+      setPreviewStateByMessageId((current) => {
+        const next = { ...current };
+        let changed = false;
+        for (const item of resolved) {
+          if (item.previewState && !next[item.messageId]) {
+            next[item.messageId] = item.previewState;
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
     };
 
     void loadPreviews();
+
     return () => {
       cancelled = true;
     };
-  }, [messages, previewByMessageId]);
+  }, [messages, previewStateByMessageId]);
+
+  useEffect(() => {
+    const immediateVisible: string[] = [];
+    for (const messageId of Object.keys(previewStateByMessageId)) {
+      if (visiblePreviewByMessageId[messageId]) continue;
+      immediateVisible.push(messageId);
+    }
+
+    if (immediateVisible.length > 0) {
+      setVisiblePreviewByMessageId((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const messageId of immediateVisible) {
+          if (!next[messageId]) {
+            next[messageId] = true;
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+    }
+  }, [previewStateByMessageId, visiblePreviewByMessageId]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -475,7 +569,7 @@ export const ChatView = ({
     if (!lastMessage || lastMessage.type !== 'file' || !isImageName(lastMessage.fileName)) {
       return;
     }
-    if (!previewByMessageId[lastMessage.messageId]) {
+    if (!previewStateByMessageId[lastMessage.messageId]) {
       return;
     }
     const isRecent = Boolean(recentMessageIds[lastMessage.messageId]);
@@ -493,7 +587,20 @@ export const ChatView = ({
       maybeFollowBottom(shouldForce, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [previewByMessageId, messages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
+  }, [previewStateByMessageId, messages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
+
+  useEffect(() => {
+    if (normalizedQuery) return;
+    const frame = window.requestAnimationFrame(() => {
+      // Enquanto a conversa acabou de abrir, força manter no fim mesmo com imagens revelando.
+      if (forceScrollOnOpenRef.current) {
+        maybeFollowBottom(true, 'auto');
+        return;
+      }
+      maybeFollowBottom(false, 'auto');
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [visiblePreviewByMessageId, normalizedQuery]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -774,7 +881,9 @@ export const ChatView = ({
           const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
           const isImageFile = isFile && isImageName(message.fileName);
-          const previewDataUrl = previewByMessageId[message.messageId];
+          const previewState = previewStateByMessageId[message.messageId];
+          const previewDataUrl = previewState?.dataUrl;
+          const previewVisible = Boolean(previewDataUrl && visiblePreviewByMessageId[message.messageId]);
           const progress = message.fileId ? transferByFileId[message.fileId] : undefined;
           const progressPercent =
             progress && progress.total > 0
@@ -790,7 +899,7 @@ export const ChatView = ({
                 </div>
               )}
               <div
-                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''}`}
+                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerMessageId === message.messageId ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''}`}
                 ref={(node) => {
                   if (matchedMessageIdSet.has(message.messageId)) {
                     matchRowRefs.current[message.messageId] = node;
@@ -805,6 +914,8 @@ export const ChatView = ({
                 <div
                   className={`bubble ${outgoing ? 'out' : 'in'} ${isDeleted ? 'deleted' : ''} ${
                     message.status === 'failed' ? 'failed' : ''
+                  } ${isImageFile && !previewDataUrl ? 'media-loading' : ''} ${
+                    isImageFile && previewDataUrl ? 'media-loaded' : ''
                   }`}
                   onContextMenu={handleBubbleContextMenu}
                 >
@@ -813,13 +924,28 @@ export const ChatView = ({
                   ) : isFile ? (
                     <>
                       <div className="message-file-title">📎 {message.fileName}</div>
-                      {isImageFile && previewDataUrl && (
+                      {isImageFile && (
                         <button
                           type="button"
-                          className="message-image-preview-btn"
+                          className={`message-image-preview-btn ${previewDataUrl ? 'is-ready' : ''} ${
+                            previewVisible ? 'is-media-visible' : ''
+                          }`}
                           onClick={() => void onOpenFile(message.filePath!)}
+                          disabled={!previewVisible}
                         >
-                          <img src={previewDataUrl} alt={message.fileName || 'Imagem'} className="message-image-preview" />
+                          {previewDataUrl && (
+                            <img
+                              src={previewDataUrl}
+                              alt={message.fileName || 'Imagem'}
+                              className="message-image-preview"
+                            />
+                          )}
+                          <div
+                            className={`message-image-preview-placeholder ${previewVisible ? 'hidden' : ''}`}
+                            aria-hidden
+                          >
+                            Carregando imagem...
+                          </div>
                         </button>
                       )}
                       <div className="message-file-meta">
@@ -887,17 +1013,21 @@ export const ChatView = ({
                         reactionPickerMessageId === message.messageId ? 'visible' : ''
                       }`}
                     >
-                      <button
-                        type="button"
-                        className="reaction-trigger"
-                        onClick={() =>
-                          setReactionPickerMessageId((current) =>
-                            current === message.messageId ? null : message.messageId
-                          )
-                        }
-                      >
-                        {summary.myReaction || '🙂'}
-                      </button>
+                    <button
+                      type="button"
+                      className="reaction-trigger"
+                      onClick={() =>
+                        setReactionPickerMessageId((current) =>
+                          current === message.messageId ? null : message.messageId
+                        )
+                      }
+                    >
+                      {reactionPickerMessageId === message.messageId ? (
+                        <Dismiss20Regular />
+                      ) : (
+                        <Emoji20Regular />
+                      )}
+                    </button>
 
                       {reactionPickerMessageId === message.messageId && (
                         <div className="reaction-picker">

@@ -56,18 +56,6 @@ export const Shell = () => {
     ensureConversationMessagesLoaded
   } = useLanternStore();
 
-  const selectedPeer = useMemo(() => {
-    if (!selectedConversationId.startsWith('dm:')) return null;
-    const peerId = selectedConversationId.replace('dm:', '');
-    return peers.find((peer) => peer.deviceId === peerId) || null;
-  }, [peers, selectedConversationId]);
-  const selectedPeerOnline = selectedPeer ? onlinePeerIds.includes(selectedPeer.deviceId) : false;
-
-  const selectedHasMoreHistory = Boolean(hasMoreHistoryByConversation[selectedConversationId]);
-  const selectedLoadingOlderHistory = Boolean(loadingOlderByConversation[selectedConversationId]);
-
-  const currentMessages = messagesByConversation[selectedConversationId] || [];
-
   const transferMap = useMemo(() => {
     const map: Record<string, { transferred: number; total: number }> = {};
     for (const transfer of Object.values(transfers)) {
@@ -80,7 +68,7 @@ export const Shell = () => {
   }, [transfers]);
 
   const searchMessageIds = useCallback(
-    async (query: string) => {
+    async (conversationId: string, query: string) => {
       const normalized = query.trim();
       if (!normalized) return [];
       const pageSize = 500;
@@ -90,7 +78,7 @@ export const Shell = () => {
 
       while (offset < maxResults) {
         const chunk = await ipcClient.searchConversationMessageIds(
-          selectedConversationId,
+          conversationId,
           normalized,
           pageSize,
           offset
@@ -102,20 +90,85 @@ export const Shell = () => {
       }
 
       return Array.from(new Set(collected));
-    },
-    [selectedConversationId]
+    }
   );
 
-  const loadOlderForConversation = useCallback(
-    () => loadOlderMessages(selectedConversationId),
-    [loadOlderMessages, selectedConversationId]
-  );
+  const renderConversationPane = (conversationId: string) => {
+    const isAnnouncements = conversationId === ANNOUNCEMENTS_ID;
+    const conversationMessages = messagesByConversation[conversationId] || [];
+    const hasMoreHistory = Boolean(hasMoreHistoryByConversation[conversationId]);
+    const loadingOlderHistory = Boolean(loadingOlderByConversation[conversationId]);
 
-  const ensureMessagesLoaded = useCallback(
-    (messageIds: string[]) =>
-      ensureConversationMessagesLoaded(selectedConversationId, messageIds),
-    [ensureConversationMessagesLoaded, selectedConversationId]
-  );
+    if (isAnnouncements) {
+      return (
+        <AnnouncementsView
+          messages={conversationMessages}
+          loading={loadingConversationId === ANNOUNCEMENTS_ID}
+          profile={profile}
+          peers={peers}
+          reactionsByMessageId={announcementReactionsByMessage}
+          onSend={sendAnnouncement}
+          relayConnected={Boolean(relaySettings?.connected)}
+          onReactToMessage={(messageId, reaction) =>
+            reactToMessage(ANNOUNCEMENTS_ID, messageId, reaction)
+          }
+          onDeleteMessage={(messageId) =>
+            deleteMessageForEveryone(ANNOUNCEMENTS_ID, messageId)
+          }
+          recentMessageIds={recentMessageIds}
+        />
+      );
+    }
+
+    const peerId = conversationId.startsWith('dm:') ? conversationId.replace('dm:', '') : '';
+    const peer = peers.find((candidate) => candidate.deviceId === peerId) || null;
+    const peerOnline = peer ? onlinePeerIds.includes(peer.deviceId) : false;
+
+    return (
+      <ChatView
+        conversationId={conversationId}
+        peer={peer}
+        peerOnline={peerOnline}
+        peerTyping={Boolean(typingByConversation[conversationId])}
+        loading={loadingConversationId === conversationId}
+        localProfile={profile}
+        messages={conversationMessages}
+        reactionsByMessageId={announcementReactionsByMessage}
+        transferByFileId={transferMap}
+        hasMoreOlder={hasMoreHistory}
+        loadingOlder={loadingOlderHistory}
+        onSend={(text) =>
+          peer ? sendText(peer.deviceId, text) : Promise.resolve()
+        }
+        onTyping={(isTyping) =>
+          peer
+            ? sendTyping(peer.deviceId, isTyping)
+            : Promise.resolve()
+        }
+        onSendFile={(filePath) =>
+          peer
+            ? sendFile(peer.deviceId, filePath)
+            : Promise.resolve()
+        }
+        onReactToMessage={(messageId, reaction) =>
+          reactToMessage(conversationId, messageId, reaction)
+        }
+        onDeleteMessage={(messageId) =>
+          deleteMessageForEveryone(conversationId, messageId)
+        }
+        onClearConversation={() => clearConversation(conversationId)}
+        onForgetContactConversation={() => forgetContactConversation(conversationId)}
+        onOpenFile={openFile}
+        onSaveFileAs={saveFileAs}
+        recentMessageIds={recentMessageIds}
+        onSearchMessageIds={(query) => searchMessageIds(conversationId, query)}
+        onLoadOlderMessages={() => loadOlderMessages(conversationId)}
+        onEnsureMessagesLoaded={(messageIds) =>
+          ensureConversationMessagesLoaded(conversationId, messageIds)
+        }
+      />
+    );
+  };
 
   if (!ready || !profile) {
     return (
@@ -157,65 +210,11 @@ export const Shell = () => {
         syncActive={syncActive}
       />
 
-      {selectedConversationId === ANNOUNCEMENTS_ID ? (
-        <AnnouncementsView
-          messages={currentMessages}
-          loading={loadingConversationId === ANNOUNCEMENTS_ID}
-          profile={profile}
-          peers={peers}
-          reactionsByMessageId={announcementReactionsByMessage}
-          onSend={sendAnnouncement}
-          relayConnected={Boolean(relaySettings?.connected)}
-          onReactToMessage={(messageId, reaction) =>
-            reactToMessage(ANNOUNCEMENTS_ID, messageId, reaction)
-          }
-          onDeleteMessage={(messageId) =>
-            deleteMessageForEveryone(ANNOUNCEMENTS_ID, messageId)
-          }
-          recentMessageIds={recentMessageIds}
-        />
-      ) : (
-        <ChatView
-          conversationId={selectedConversationId}
-          peer={selectedPeer}
-          peerOnline={selectedPeerOnline}
-          peerTyping={Boolean(typingByConversation[selectedConversationId])}
-          loading={loadingConversationId === selectedConversationId}
-          localProfile={profile}
-          messages={currentMessages}
-          reactionsByMessageId={announcementReactionsByMessage}
-          transferByFileId={transferMap}
-          hasMoreOlder={selectedHasMoreHistory}
-          loadingOlder={selectedLoadingOlderHistory}
-          onSend={(text) =>
-            selectedPeer ? sendText(selectedPeer.deviceId, text) : Promise.resolve()
-          }
-          onTyping={(isTyping) =>
-            selectedPeer
-              ? sendTyping(selectedPeer.deviceId, isTyping)
-              : Promise.resolve()
-          }
-          onSendFile={(filePath) =>
-            selectedPeer
-              ? sendFile(selectedPeer.deviceId, filePath)
-              : Promise.resolve()
-          }
-          onReactToMessage={(messageId, reaction) =>
-            reactToMessage(selectedConversationId, messageId, reaction)
-          }
-          onDeleteMessage={(messageId) =>
-            deleteMessageForEveryone(selectedConversationId, messageId)
-          }
-          onClearConversation={() => clearConversation(selectedConversationId)}
-          onForgetContactConversation={() => forgetContactConversation(selectedConversationId)}
-          onOpenFile={openFile}
-          onSaveFileAs={saveFileAs}
-          recentMessageIds={recentMessageIds}
-          onSearchMessageIds={searchMessageIds}
-          onLoadOlderMessages={loadOlderForConversation}
-          onEnsureMessagesLoaded={ensureMessagesLoaded}
-        />
-      )}
+      <div className="pane-switcher">
+        <div key={selectedConversationId} className="pane-layer is-entering">
+          {renderConversationPane(selectedConversationId)}
+        </div>
+      </div>
 
       <SettingsModal
         open={settingsOpen}

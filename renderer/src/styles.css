@@ -199,6 +199,39 @@ body {
   background: var(--teams-bg);
 }
 
+.pane-switcher {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pane-layer {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.pane-layer.is-entering {
+  z-index: 2;
+  animation: conversationPaneIn 140ms var(--motion-ease-standard);
+  animation-fill-mode: both;
+  will-change: opacity, transform;
+}
+
+@keyframes conversationPaneIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .sidebar {
   min-width: 0;
   min-height: 0;
@@ -900,6 +933,7 @@ body {
   position: relative;
   overflow: visible;
   isolation: isolate;
+  z-index: 0;
 }
 
 .bubble-row.grouped {
@@ -920,6 +954,12 @@ body {
 
 .bubble-row.grouped.has-actions {
   padding-bottom: 26px;
+}
+
+.bubble-row.has-actions:hover,
+.bubble-row.has-actions:focus-within,
+.bubble-row.actions-open {
+  z-index: 40;
 }
 
 .bubble-row.out {
@@ -968,6 +1008,20 @@ body {
   transform: translateY(-1px);
   box-shadow: 0 6px 18px color-mix(in srgb, var(--teams-muted) 18%, transparent);
   filter: saturate(1.02);
+}
+
+.bubble.media-loading {
+  transition:
+    box-shadow var(--motion-fast) var(--motion-ease-standard),
+    border-color var(--motion-fast) var(--motion-ease-standard),
+    transform var(--motion-fast) var(--motion-ease-standard),
+    filter var(--motion-fast) var(--motion-ease-standard),
+    padding var(--motion-base) var(--motion-ease-standard),
+    min-height 220ms var(--motion-ease-emphasized);
+}
+
+.bubble.media-loaded {
+  animation: none;
 }
 
 .bubble.in::before {
@@ -1174,6 +1228,7 @@ body {
 }
 
 .message-image-preview-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1182,25 +1237,63 @@ body {
   margin: 2px 0;
   border: 1px solid var(--teams-border);
   border-radius: var(--teams-radius-sm);
-  background:
-    linear-gradient(45deg, color-mix(in srgb, var(--teams-surface-2) 88%, transparent) 25%, transparent 25%) 0 0 / 12px 12px,
-    linear-gradient(-45deg, color-mix(in srgb, var(--teams-surface-2) 88%, transparent) 25%, transparent 25%) 0 0 / 12px 12px,
-    linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--teams-surface-2) 88%, transparent) 75%) 0 0 / 12px 12px,
-    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--teams-surface-2) 88%, transparent) 75%) 0 0 / 12px 12px,
-    var(--teams-surface);
+  background: var(--teams-surface);
   cursor: pointer;
   overflow: hidden;
   line-height: 0;
-  max-width: min(360px, 72vw);
+  width: min(360px, 72vw);
+  height: 220px;
 }
 
 .message-image-preview {
   display: block;
-  width: auto;
-  height: auto;
-  max-width: min(360px, 72vw);
-  max-height: 260px;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 170ms var(--motion-ease-standard);
+}
+
+.message-image-preview-btn.is-media-visible .message-image-preview {
+  opacity: 1;
+  visibility: visible;
+}
+
+.message-image-preview-placeholder {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--teams-border);
+  border-radius: var(--teams-radius-sm);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--teams-surface-2) 90%, transparent) 0%,
+      color-mix(in srgb, var(--teams-surface) 78%, transparent) 50%,
+      color-mix(in srgb, var(--teams-surface-2) 90%, transparent) 100%
+    );
+  background-size: 220% 100%;
+  animation: skeletonPulse 1.25s ease-in-out infinite;
+  color: var(--teams-muted);
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 220ms var(--motion-ease-emphasized);
+}
+
+.message-image-preview-placeholder.hidden {
+  opacity: 0;
+  animation: none;
+}
+
+.message-image-preview-btn.is-media-visible .message-image-preview-placeholder {
+  opacity: 0;
+  animation: none;
 }
 
 .inline-status {
@@ -1255,9 +1348,7 @@ body {
 }
 
 .bubble-block:hover .bubble-actions-row,
-.bubble-block:focus-within .bubble-actions-row,
 .bubble-row.has-actions:hover .bubble-actions-row,
-.bubble-row.has-actions:focus-within .bubble-actions-row,
 .bubble-actions-row.visible {
   opacity: 1;
   visibility: visible;
