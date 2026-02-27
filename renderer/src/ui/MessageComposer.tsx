@@ -41,7 +41,16 @@ interface PasteProgressItem {
   stage: PasteProgressStage;
 }
 
-type EmojiCategory = 'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos';
+type EmojiCategory =
+  | 'rostos'
+  | 'gestos'
+  | 'animais'
+  | 'comida'
+  | 'objetos'
+  | 'natureza'
+  | 'atividades'
+  | 'bandeiras'
+  | 'simbolos';
 
 interface EmojiItem {
   emoji: string;
@@ -61,6 +70,9 @@ const CATEGORY_EXACT_SEARCH_TERMS: Record<EmojiCategory, string[]> = {
   animais: ['animal', 'animais', 'bicho', 'bichos', 'pet', 'pets'],
   comida: ['comida', 'comidas', 'bebida', 'bebidas', 'alimento', 'alimentos'],
   objetos: ['objeto', 'objetos', 'ferramenta', 'ferramentas'],
+  natureza: ['natureza', 'planta', 'plantas', 'clima', 'tempo', 'flor', 'flores'],
+  atividades: ['atividade', 'atividades', 'esporte', 'esportes', 'jogo', 'jogos', 'musica', 'música'],
+  bandeiras: ['bandeira', 'bandeiras', 'pais', 'país', 'paises', 'países'],
   simbolos: ['simbolo', 'simbolos', 'símbolo', 'símbolos', 'icone', 'ícone', 'icones', 'ícones']
 };
 
@@ -126,7 +138,89 @@ const EMOJI_ALIAS_MAP: Record<string, string[]> = {
   '🗨️': ['conversa'],
   '📢': ['anuncio', 'broadcast'],
   '⏰': ['alarme', 'relogio'],
-  '🕒': ['hora', 'tempo']
+  '🕒': ['hora', 'tempo'],
+  '🏁': ['bandeira quadriculada', 'corrida', 'chegada'],
+  '🚩': ['bandeira vermelha', 'alerta'],
+  '🎌': ['bandeiras cruzadas', 'japao', 'japão'],
+  '🏴': ['bandeira preta'],
+  '🏳️': ['bandeira branca'],
+  '🏳️‍🌈': ['bandeira arco-iris', 'arco iris', 'lgbt', 'orgulho'],
+  '🏳️‍⚧️': ['bandeira trans', 'transgenero', 'transgênero'],
+  '🏴‍☠️': ['bandeira pirata', 'pirata'],
+  '🇧🇷': ['brasil', 'brazil'],
+  '🇦🇷': ['argentina'],
+  '🇺🇾': ['uruguai', 'uruguay'],
+  '🇵🇾': ['paraguai', 'paraguay'],
+  '🇨🇱': ['chile'],
+  '🇧🇴': ['bolivia', 'bolívia'],
+  '🇵🇪': ['peru', 'perú'],
+  '🇨🇴': ['colombia', 'colômbia'],
+  '🇻🇪': ['venezuela'],
+  '🇪🇨': ['equador', 'ecuador'],
+  '🇲🇽': ['mexico', 'méxico'],
+  '🇵🇦': ['panama', 'panamá'],
+  '🇨🇷': ['costa rica'],
+  '🇨🇺': ['cuba'],
+  '🇺🇸': ['estados unidos', 'eua', 'usa'],
+  '🇨🇦': ['canada', 'canadá'],
+  '🇬🇧': ['reino unido', 'inglaterra', 'uk'],
+  '🇮🇪': ['irlanda', 'ireland'],
+  '🇫🇷': ['franca', 'frança', 'france'],
+  '🇪🇸': ['espanha', 'spain'],
+  '🇵🇹': ['portugal'],
+  '🇩🇪': ['alemanha', 'germany'],
+  '🇮🇹': ['italia', 'itália', 'italy'],
+  '🇳🇱': ['holanda', 'netherlands'],
+  '🇧🇪': ['belgica', 'bélgica', 'belgium'],
+  '🇨🇭': ['suica', 'suíça', 'switzerland'],
+  '🇦🇹': ['austria', 'áustria'],
+  '🇵🇱': ['polonia', 'polônia', 'poland'],
+  '🇨🇿': ['tchequia', 'rep tcheca', 'czechia'],
+  '🇩🇰': ['dinamarca', 'denmark'],
+  '🇳🇴': ['noruega', 'norway'],
+  '🇸🇪': ['suecia', 'suécia', 'sweden'],
+  '🇫🇮': ['finlandia', 'finlândia', 'finland'],
+  '🇺🇦': ['ucrania', 'ucrânia', 'ukraine'],
+  '🇷🇺': ['russia', 'rússia'],
+  '🇬🇷': ['grecia', 'grécia', 'greece'],
+  '🇹🇷': ['turquia', 'turkiye', 'türkiye', 'turkey'],
+  '🇭🇷': ['croacia', 'croácia', 'croatia'],
+  '🇷🇴': ['romenia', 'romênia', 'romania'],
+  '🇭🇺': ['hungria', 'hungary'],
+  '🇯🇵': ['japao', 'japão', 'japan'],
+  '🇰🇷': ['coreia do sul', 'coreia', 'korea'],
+  '🇨🇳': ['china'],
+  '🇹🇼': ['taiwan', 'taiwan'],
+  '🇭🇰': ['hong kong'],
+  '🇮🇳': ['india', 'índia', 'india'],
+  '🇵🇰': ['paquistao', 'paquistão', 'pakistan'],
+  '🇧🇩': ['bangladesh'],
+  '🇸🇬': ['singapura', 'singapore'],
+  '🇲🇾': ['malasia', 'malásia', 'malaysia'],
+  '🇮🇩': ['indonesia', 'indonésia', 'indonesia'],
+  '🇹🇭': ['tailandia', 'tailândia', 'thailand'],
+  '🇻🇳': ['vietnam', 'vietnã', 'vietna'],
+  '🇵🇭': ['filipinas', 'philippines'],
+  '🇦🇺': ['australia', 'austrália', 'australia'],
+  '🇳🇿': ['nova zelandia', 'nova zelândia', 'new zealand'],
+  '🇦🇪': ['emirados arabes', 'emirados árabes', 'uae'],
+  '🇸🇦': ['arabia saudita', 'arábia saudita', 'saudi'],
+  '🇮🇱': ['israel'],
+  '🇪🇬': ['egito', 'egypt'],
+  '🇿🇦': ['africa do sul', 'áfrica do sul', 'south africa'],
+  '🇳🇬': ['nigeria', 'nigéria'],
+  '🇲🇦': ['marrocos', 'morocco'],
+  '🇰🇪': ['quenia', 'kenya', 'quênia'],
+  '🇦🇴': ['angola'],
+  '🇲🇿': ['mocambique', 'moçambique', 'mozambique'],
+  '🇨🇻': ['cabo verde', 'cape verde'],
+  '🇪🇹': ['etiopia', 'etiópia', 'ethiopia'],
+  '🇬🇭': ['gana', 'ghana'],
+  '🇸🇳': ['senegal', 'senegal'],
+  '🇩🇿': ['argelia', 'argélia', 'algeria'],
+  '🇹🇳': ['tunisia', 'tunísia', 'tunisia'],
+  '🇺🇳': ['onu', 'united nations', 'nacoes unidas', 'nações unidas'],
+  '🇪🇺': ['uniao europeia', 'união europeia', 'european union', 'ue']
 };
 
 const EMOJI_ALIAS_GROUPS: Array<{ emojis: string[]; terms: string[] }> = [
@@ -194,11 +288,14 @@ const buildEmojiSearchAliasMap = (): Record<string, string[]> => {
 
 const EMOJI_SEARCH_ALIAS_MAP = buildEmojiSearchAliasMap();
 
-const createEmojiItems = (emojis: string[]): EmojiItem[] =>
+const createEmojiItems = (category: EmojiCategory, emojis: string[]): EmojiItem[] =>
   emojis.map((emoji) => {
+    const categoryTerms = CATEGORY_EXACT_SEARCH_TERMS[category] || [];
     const terms = [
       emoji,
-      ...(EMOJI_SEARCH_ALIAS_MAP[emoji] || [])
+      ...(EMOJI_SEARCH_ALIAS_MAP[emoji] || []),
+      category,
+      ...categoryTerms
     ];
     return {
       emoji,
@@ -209,7 +306,7 @@ const createEmojiItems = (emojis: string[]): EmojiItem[] =>
 const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem[] }> = {
   rostos: {
     label: 'Rostos',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('rostos', [
       '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩',
       '😘', '😗', '☺️', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🫢', '🫣',
       '🤫', '🤔', '🫡', '🤐', '🤨', '😐', '😑', '😶', '🫥', '😶‍🌫️', '😏', '😒', '🙄', '😬', '😮‍💨',
@@ -222,7 +319,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
   },
   gestos: {
     label: 'Gestos',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('gestos', [
       '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙', '👈', '👉',
       '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '🫶', '👐', '🤲', '🤝',
       '🙏', '✍️', '💅', '🤳', '💪', '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷',
@@ -233,7 +330,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
   },
   animais: {
     label: 'Animais',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('animais', [
       '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈', '🐈‍⬛', '🦁', '🐯', '🐅', '🐆', '🐴',
       '🫎', '🫏', '🐎', '🦄', '🦓', '🦌', '🦬', '🐮', '🐂', '🐃', '🐄', '🐷', '🐖', '🐗', '🐽', '🐏',
       '🐑', '🐐', '🐪', '🐫', '🦙', '🦒', '🐘', '🦣', '🦏', '🦛', '🐭', '🐁', '🐀', '🐹', '🐰', '🐇',
@@ -246,7 +343,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
   },
   comida: {
     label: 'Comida',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('comida', [
       '🍏', '🍎', '🍐', '🍊', '🍋', '🍋‍🟩', '🍌', '🍉', '🍇', '🍓', '🫐', '🍈', '🍒', '🍑', '🥭', '🍍',
       '🥥', '🥝', '🍅', '🍆', '🥑', '🥦', '🫛', '🥬', '🥒', '🌶️', '🫑', '🌽', '🥕', '🫒', '🧄', '🧅',
       '🥔', '🍠', '🫚', '🥐', '🥯', '🍞', '🥖', '🥨', '🧀', '🥚', '🍳', '🧈', '🥞', '🧇', '🥓', '🥩',
@@ -259,7 +356,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
   },
   objetos: {
     label: 'Objetos',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('objetos', [
       '⌚', '📱', '📲', '💻', '⌨️', '🖥️', '🖨️', '🖱️', '🖲️', '🕹️', '💽', '💾', '💿', '📀', '🧮', '🎥',
       '🎞️', '📷', '📸', '📹', '📼', '🔍', '🔎', '💡', '🔦', '🏮', '🪔', '📔', '📕', '📖', '📗', '📘',
       '📙', '📚', '📓', '📒', '📃', '📜', '📄', '📰', '🗞️', '📑', '🔖', '🏷️', '💰', '🪙', '💴', '💵',
@@ -273,9 +370,46 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
       '🫧', '🪥', '🧽', '🧯', '🛒', '🚬', '⚰️', '🪦', '⚱️', '🗿', '🪧'
     ])
   },
+  natureza: {
+    label: 'Natureza',
+    emojis: createEmojiItems('natureza', [
+      '🌍', '🌎', '🌏', '🌐', '🗺️', '🗾', '🧭', '🏔️', '⛰️', '🌋', '🗻', '🏕️', '🏞️', '🏜️', '🏝️', '🏖️',
+      '🏛️', '🏟️', '🏞️', '🌅', '🌄', '🌠', '🎑', '🌇', '🌆', '🏙️', '🌃', '🌌', '🌉', '🌁', '🧱', '🌳',
+      '🌲', '🎄', '🌴', '🌵', '🌾', '🌿', '☘️', '🍀', '🍁', '🍂', '🍃', '🪹', '🪺', '🌱', '🌷', '🌸',
+      '🌹', '🥀', '🌺', '🌻', '🌼', '🌞', '🌝', '🌛', '🌜', '🌚', '🌕', '🌖', '🌗', '🌘', '🌑', '🌒',
+      '🌓', '🌔', '🌙', '🌎', '☀️', '⭐', '🌟', '✨', '⚡', '☄️', '💥', '🔥', '🌪️', '🌈', '☁️', '⛅',
+      '⛈️', '🌤️', '🌥️', '🌦️', '🌧️', '🌨️', '🌩️', '❄️', '☃️', '⛄', '🌬️', '💨', '💧', '💦', '☔', '☂️',
+      '🌊', '🫧', '🪨', '🪵', '🛰️'
+    ])
+  },
+  atividades: {
+    label: 'Atividades',
+    emojis: createEmojiItems('atividades', [
+      '⚽', '🏀', '🏈', '⚾', '🥎', '🎾', '🏐', '🏉', '🥏', '🎱', '🪀', '🏓', '🏸', '🏒', '🏑', '🥍',
+      '🏏', '🪃', '🥅', '⛳', '🪁', '🏹', '🎣', '🤿', '🥊', '🥋', '🎽', '🛹', '🛼', '🛷', '⛸️', '🥌',
+      '🎿', '⛷️', '🏂', '🪂', '🏋️', '🤼', '🤸', '⛹️', '🤺', '🤾', '🏌️', '🏇', '🧘', '🏄', '🏊', '🤽',
+      '🚣', '🧗', '🚴', '🚵', '🎯', '🎳', '🎮', '🕹️', '🎲', '♟️', '🧩', '🧸', '🪅', '🪩', '🎨', '🧵',
+      '🪡', '🧶', '🪢', '🎭', '🎪', '🎫', '🎟️', '🎬', '🎤', '🎧', '🎼', '🎹', '🥁', '🪘', '🎷', '🎺',
+      '🪗', '🎸', '🪕', '🎻', '📯', '🎚️', '🎛️', '🎙️', '📻', '📺', '📽️', '🎞️', '🎥', '📸', '📹', '📼',
+      '🕺', '💃', '🪭', '🪇'
+    ])
+  },
+  bandeiras: {
+    label: 'Bandeiras',
+    emojis: createEmojiItems('bandeiras', [
+      '🏁', '🚩', '🎌', '🏴', '🏳️', '🏳️‍🌈', '🏳️‍⚧️', '🏴‍☠️',
+      '🇧🇷', '🇦🇷', '🇺🇾', '🇵🇾', '🇨🇱', '🇧🇴', '🇵🇪', '🇨🇴', '🇻🇪', '🇪🇨', '🇲🇽', '🇵🇦', '🇨🇷', '🇨🇺',
+      '🇺🇸', '🇨🇦', '🇬🇧', '🇮🇪', '🇫🇷', '🇪🇸', '🇵🇹', '🇩🇪', '🇮🇹', '🇳🇱', '🇧🇪', '🇨🇭', '🇦🇹', '🇵🇱',
+      '🇨🇿', '🇩🇰', '🇳🇴', '🇸🇪', '🇫🇮', '🇺🇦', '🇷🇺', '🇬🇷', '🇹🇷', '🇭🇷', '🇷🇴', '🇭🇺',
+      '🇯🇵', '🇰🇷', '🇨🇳', '🇹🇼', '🇭🇰', '🇮🇳', '🇵🇰', '🇧🇩', '🇸🇬', '🇲🇾', '🇮🇩', '🇹🇭', '🇻🇳', '🇵🇭',
+      '🇦🇺', '🇳🇿', '🇦🇪', '🇸🇦', '🇮🇱', '🇪🇬', '🇿🇦', '🇳🇬', '🇲🇦', '🇰🇪',
+      '🇦🇴', '🇲🇿', '🇨🇻', '🇪🇹', '🇬🇭', '🇸🇳', '🇩🇿', '🇹🇳',
+      '🇺🇳', '🇪🇺'
+    ])
+  },
   simbolos: {
     label: 'Símbolos',
-    emojis: createEmojiItems([
+    emojis: createEmojiItems('simbolos', [
       '❤️', '🩷', '🧡', '💛', '💚', '💙', '🩵', '💜', '🤎', '🖤', '🩶', '🤍', '💔', '❣️', '💕', '💞',
       '💓', '💗', '💖', '💘', '💝', '💟', '☮️', '✝️', '☪️', '🕉️', '☸️', '✡️', '🔯', '🕎', '☯️', '☦️',
       '🛐', '⛎', '♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓', '🆔', '⚛️', '🉑',
@@ -301,6 +435,9 @@ const EMOJI_CATEGORY_ORDER: EmojiCategory[] = [
   'animais',
   'comida',
   'objetos',
+  'natureza',
+  'atividades',
+  'bandeiras',
   'simbolos'
 ];
 
