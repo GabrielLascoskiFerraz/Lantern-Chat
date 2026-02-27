@@ -1,9 +1,16 @@
-import { ClipboardEvent, useEffect, useRef, useState } from 'react';
+import { ClipboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
 import {
   Button,
   Textarea
 } from '@fluentui/react-components';
-import { Attach20Regular, Send20Filled, Emoji20Regular } from '@fluentui/react-icons';
+import {
+  Attach20Regular,
+  ClipboardPaste20Regular,
+  Copy20Regular,
+  Cut20Regular,
+  Emoji20Regular,
+  Send20Filled
+} from '@fluentui/react-icons';
 import { ipcClient } from '../api/ipcClient';
 
 interface MessageComposerProps {
@@ -40,6 +47,11 @@ export const MessageComposer = ({
   >({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [textContextMenu, setTextContextMenu] = useState<{
+    x: number;
+    y: number;
+    hasSelection: boolean;
+  } | null>(null);
   const [emojiCategory, setEmojiCategory] = useState<
     'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos'
   >('rostos');
@@ -47,6 +59,7 @@ export const MessageComposer = ({
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const typingStateRef = useRef(false);
   const typingTimeoutRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const emojiCategories: Record<
     'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos',
     { label: string; emojis: string[] }
@@ -155,6 +168,19 @@ export const MessageComposer = ({
       }
     };
   }, [onTypingChange]);
+
+  useEffect(() => {
+    if (!textContextMenu) return;
+    const close = () => setTextContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [textContextMenu]);
 
   useEffect(() => {
     let cancelled = false;
@@ -287,6 +313,106 @@ export const MessageComposer = ({
     void onTypingChange(isTyping);
   };
 
+  const getComposerTextarea = (): HTMLTextAreaElement | null => {
+    const found = composerRootRef.current?.querySelector('textarea');
+    if (found instanceof HTMLTextAreaElement) {
+      textareaRef.current = found;
+      return found;
+    }
+    return textareaRef.current;
+  };
+
+  const copyToClipboard = async (value: string): Promise<void> => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // fallback legado
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  };
+
+  const handleComposerContextMenu = (event: ReactMouseEvent): void => {
+    const target = event.target as HTMLElement | null;
+    const editable = target?.closest('textarea');
+    if (!editable) {
+      setTextContextMenu(null);
+      return;
+    }
+
+    const textarea = getComposerTextarea();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? 0;
+    const hasSelection = end > start;
+
+    event.preventDefault();
+    const menuWidth = 188;
+    const menuHeight = hasSelection ? 96 : 52;
+    const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+    setTextContextMenu({ x, y, hasSelection });
+  };
+
+  const handleCopySelection = async (): Promise<void> => {
+    const textarea = getComposerTextarea();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? 0;
+    if (end <= start) return;
+    const selected = textarea.value.slice(start, end);
+    await copyToClipboard(selected);
+  };
+
+  const handleCutSelection = async (): Promise<void> => {
+    const textarea = getComposerTextarea();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? 0;
+    if (end <= start) return;
+    const selected = textarea.value.slice(start, end);
+    await copyToClipboard(selected);
+    const nextValue = `${textarea.value.slice(0, start)}${textarea.value.slice(end)}`;
+    setText(nextValue);
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start, start);
+    });
+  };
+
+  const handlePasteAtCursor = async (): Promise<void> => {
+    const textarea = getComposerTextarea();
+    if (!textarea) return;
+    let clipboardText = '';
+    try {
+      clipboardText = await navigator.clipboard.readText();
+    } catch {
+      clipboardText = '';
+    }
+    if (!clipboardText) return;
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const nextValue = `${textarea.value.slice(0, start)}${clipboardText}${textarea.value.slice(end)}`;
+    const nextCursor = start + clipboardText.length;
+    setText(nextValue);
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+
   return (
     <div className="composer" ref={composerRootRef}>
       {pendingFilePaths.length > 0 && (
@@ -417,6 +543,7 @@ export const MessageComposer = ({
             }
           }}
           onPaste={handlePasteImage}
+          onContextMenu={handleComposerContextMenu}
         />
         <div className="composer-actions">
           {onSendFile && (
@@ -439,6 +566,59 @@ export const MessageComposer = ({
           </Button>
         </div>
       </div>
+
+      {textContextMenu && (
+        <div
+          className="chat-context-menu"
+          style={{ left: textContextMenu.x, top: textContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {textContextMenu.hasSelection ? (
+            <>
+              <button
+                type="button"
+                className="chat-context-item"
+                onClick={() => {
+                  void handleCopySelection();
+                  setTextContextMenu(null);
+                }}
+              >
+                <span className="menu-item-icon">
+                  <Copy20Regular />
+                </span>
+                <span>Copiar</span>
+              </button>
+              <button
+                type="button"
+                className="chat-context-item"
+                onClick={() => {
+                  void handleCutSelection();
+                  setTextContextMenu(null);
+                }}
+              >
+                <span className="menu-item-icon">
+                  <Cut20Regular />
+                </span>
+                <span>Recortar</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                void handlePasteAtCursor();
+                setTextContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <ClipboardPaste20Regular />
+              </span>
+              <span>Colar</span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };
