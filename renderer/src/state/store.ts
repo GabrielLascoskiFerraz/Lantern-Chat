@@ -69,6 +69,7 @@ interface LanternState {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<void>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<void>;
+  markConversationUnread: (conversationId: string) => Promise<void>;
   clearConversation: (conversationId: string) => Promise<void>;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<void>;
@@ -831,6 +832,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           state.loadingConversationId === conversationId ? null : state.loadingConversationId
       }));
     }
+  },
+  markConversationUnread: async (conversationId) => {
+    if (!conversationId) return;
+    await ipcClient.markConversationUnread(conversationId);
+    set((state) => ({
+      unreadByConversation: {
+        ...state.unreadByConversation,
+        [conversationId]: Math.max(1, state.unreadByConversation[conversationId] || 0)
+      }
+    }));
   },
   loadOlderMessages: async (conversationId, limit = MESSAGES_PAGE_SIZE) => {
     const safeLimit = Number.isFinite(limit)

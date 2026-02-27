@@ -27,7 +27,8 @@ import {
   WeatherSunny20Regular,
   Desktop20Regular,
   Settings20Regular,
-  Chat20Regular
+  Chat20Regular,
+  MailUnread20Regular
 } from '@fluentui/react-icons';
 import { Peer, Profile } from '../api/ipcClient';
 import { Avatar } from './Avatar';
@@ -44,6 +45,7 @@ interface SidebarProps {
   onlinePeerIds: string[];
   onSearch: (value: string) => void;
   onSelectConversation: (id: string) => void;
+  onMarkConversationUnread: (id: string) => Promise<void>;
   onClearConversation: (id: string) => Promise<void>;
   onForgetContactConversation: (id: string) => Promise<void>;
   onOpenSettings: () => void;
@@ -66,6 +68,7 @@ export const Sidebar = ({
   onlinePeerIds,
   onSearch,
   onSelectConversation,
+  onMarkConversationUnread,
   onClearConversation,
   onForgetContactConversation,
   onOpenSettings,
@@ -328,9 +331,10 @@ export const Sidebar = ({
       return;
     }
     event.preventDefault();
-    const menuWidth = 208;
+    const menuWidth = 228;
     const isDm = conversationId.startsWith('dm:');
-    const menuHeight = isDm ? 156 : 44;
+    const actionCount = isDm ? 4 : 2;
+    const menuHeight = actionCount * 44;
     const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
     setContextMenu({ x, y, conversationId });
@@ -465,7 +469,7 @@ export const Sidebar = ({
             </div>
           </div>
         {(unreadByConversation.announcements || 0) > 0 && (
-          <Badge appearance="filled" color="important">
+          <Badge appearance="filled" color="danger">
             {unreadByConversation.announcements}
           </Badge>
         )}
@@ -591,6 +595,19 @@ export const Sidebar = ({
               </span>
             </button>
           )}
+          <button
+            type="button"
+            className="chat-context-item"
+            onClick={() => {
+              void onMarkConversationUnread(contextMenu.conversationId);
+              setContextMenu(null);
+            }}
+          >
+            <span className="menu-item-icon">
+              <MailUnread20Regular />
+            </span>
+            <span>Marcar como não lida</span>
+          </button>
           <button
             type="button"
             className="chat-context-item danger"
