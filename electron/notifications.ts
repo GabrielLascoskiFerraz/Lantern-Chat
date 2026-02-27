@@ -65,6 +65,19 @@ export class NotificationService {
     this.showNotification('📢 Anúncio', preview.slice(0, 120), 'announcements', avatar);
   }
 
+  notifyReaction(
+    senderName: string,
+    reaction: string,
+    conversationId: string,
+    avatar?: NotificationAvatar
+  ): void {
+    if (this.muted) {
+      return;
+    }
+    const safeReaction = (reaction || '').trim() || '👍';
+    this.showNotification(senderName, `Reagiu ${safeReaction} à sua mensagem`, conversationId, avatar);
+  }
+
   private showNotification(
     title: string,
     body: string,

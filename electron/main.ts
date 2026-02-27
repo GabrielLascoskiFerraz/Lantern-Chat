@@ -1138,6 +1138,29 @@ class LanternApp {
           messageId: payload.targetMessageId,
           summary
         });
+
+        if (
+          deliverySource === 'live' &&
+          payload.reaction &&
+          target &&
+          target.senderDeviceId === this.profile.deviceId &&
+          frame.from !== this.profile.deviceId
+        ) {
+          const conversationId = target.conversationId || `dm:${frame.from}`;
+          if (this.notifications.shouldNotify()) {
+            this.notifications.notifyReaction(
+              activePeer?.displayName || 'Contato',
+              payload.reaction,
+              conversationId,
+              activePeer
+                ? {
+                    emoji: activePeer.avatarEmoji,
+                    bg: activePeer.avatarBg
+                  }
+                : undefined
+            );
+          }
+        }
         break;
       }
       case 'chat:delete': {
