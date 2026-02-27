@@ -309,13 +309,36 @@ export class DbService {
   }
 
   updateMessageStatus(messageId: string, status: 'sent' | 'delivered' | 'failed'): void {
-    this.db.prepare('UPDATE messages SET status = ? WHERE messageId = ?').run(status, messageId);
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET status = CASE
+           WHEN status = 'delivered' THEN 'delivered'
+           WHEN ? = 'delivered' THEN 'delivered'
+           ELSE ?
+         END
+         WHERE messageId = ?`
+      )
+      .run(status, status, messageId);
   }
 
   updateFilePath(fileId: string, filePath: string, status: 'delivered' | 'failed'): void {
     this.db
-      .prepare('UPDATE messages SET filePath = ?, status = ? WHERE fileId = ?')
-      .run(filePath, status, fileId);
+      .prepare(
+        `UPDATE messages
+         SET
+           filePath = CASE
+             WHEN status = 'delivered' AND ? = 'failed' THEN filePath
+             ELSE ?
+           END,
+           status = CASE
+             WHEN status = 'delivered' THEN 'delivered'
+             WHEN ? = 'delivered' THEN 'delivered'
+             ELSE ?
+           END
+         WHERE fileId = ?`
+      )
+      .run(status, filePath, status, status, fileId);
   }
 
   getSyncMessagesForPeer(peerId: string, limit = 1000, since?: number): DbMessage[] {
@@ -617,7 +640,11 @@ export class DbService {
              fileName = CASE WHEN ? IS NOT NULL THEN ? ELSE fileName END,
              fileSize = CASE WHEN ? IS NOT NULL THEN ? ELSE fileSize END,
              fileSha256 = CASE WHEN ? IS NOT NULL THEN ? ELSE fileSha256 END,
-             status = COALESCE(?, status),
+             status = CASE
+               WHEN status = 'delivered' THEN 'delivered'
+               WHEN ? = 'delivered' THEN 'delivered'
+               ELSE COALESCE(?, status)
+             END,
              reaction = ?,
              deletedAt = ?
          WHERE messageId = ?`
@@ -632,6 +659,7 @@ export class DbService {
         input.fileSize,
         input.fileSha256,
         input.fileSha256,
+        input.status,
         input.status,
         input.reaction,
         input.deletedAt,

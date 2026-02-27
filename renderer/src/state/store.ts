@@ -1079,8 +1079,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }
   },
   sendFile: async (peerId, filePath) => {
-    const conversationId = `dm:${peerId}`;
-    const fileName = filePath.split(/[\\/]/).pop() || 'Arquivo';
     try {
       const message = await ipcClient.sendFile(peerId, filePath);
       set((state) => ({
@@ -1100,39 +1098,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       const toastMessage =
         error instanceof Error
           ? error.message
-          : 'Contato offline. Não foi possível enviar o anexo.';
+          : 'Não foi possível enviar o anexo.';
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const failedMessage: MessageRow = {
-        messageId: `local-failed-file:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-        conversationId,
-        direction: 'out',
-        senderDeviceId: get().profile?.deviceId || 'local',
-        receiverDeviceId: peerId,
-        type: 'file',
-        bodyText: null,
-        fileId: null,
-        fileName,
-        fileSize: null,
-        fileSha256: null,
-        filePath: null,
-        status: 'failed',
-        reaction: null,
-        deletedAt: null,
-        createdAt: Date.now(),
-        localOnly: true
-      };
       set((state) => ({
-        messagesByConversation: {
-          ...state.messagesByConversation,
-          [conversationId]: appendUniqueMessage(
-            state.messagesByConversation[conversationId] || [],
-            failedMessage
-          )
-        },
-        conversationPreviewById: {
-          ...state.conversationPreviewById,
-          [conversationId]: previewFromMessage(failedMessage)
-        },
         toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
       }));
       window.setTimeout(() => get().dismissToast(id), 4200);

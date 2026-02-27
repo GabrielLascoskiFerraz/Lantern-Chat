@@ -986,7 +986,7 @@ export const ChatView = ({
                           {transferStage.label}
                         </div>
                       )}
-                      {message.filePath && message.status === 'delivered' ? (
+                      {message.filePath && message.status !== 'failed' ? (
                         <div className="message-file-actions">
                           <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
                             Abrir
@@ -1002,6 +1002,11 @@ export const ChatView = ({
                       ) : message.status === 'failed' ? (
                         <div className="inline-status error">
                           <Caption1>Não foi possível enviar este anexo.</Caption1>
+                        </div>
+                      ) : outgoing && (message.status === 'sent' || message.status === null) ? (
+                        <div className="inline-status pending">
+                          <Clock20Regular className="bubble-time-icon pending" />
+                          <Caption1>Anexo pendente. Envia quando o contato voltar.</Caption1>
                         </div>
                       ) : (
                         <div className="inline-status">
@@ -1117,7 +1122,7 @@ export const ChatView = ({
 
       {!peerOnline && (
         <div className="chat-offline-hint">
-          Este contato está offline. Suas mensagens de texto ficarão pendentes e serão enviadas quando ele voltar.
+          Este contato está offline. Suas mensagens e anexos ficarão pendentes e serão enviados quando ele voltar.
         </div>
       )}
       {peerOnline && peerTyping && (
@@ -1137,7 +1142,7 @@ export const ChatView = ({
         autoFocusKey={peer.deviceId}
         onSend={onSend}
         onTypingChange={onTyping}
-        onSendFile={peerOnline ? onSendFile : undefined}
+        onSendFile={onSendFile}
       />
 
       <ConfirmDialog

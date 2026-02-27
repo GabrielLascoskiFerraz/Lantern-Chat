@@ -43,6 +43,7 @@ export class MessageService {
   private readonly getOnlinePeers: () => Peer[];
   private readonly onPeerUnreachable: (peerId: string) => void;
   private readonly emitEvent: (event: AppEvent) => void;
+  private readonly inFlightFileTransfers = new Set<string>();
 
   constructor(deps: MessageServiceDeps) {
     this.db = deps.db;
@@ -66,6 +67,11 @@ export class MessageService {
     offer: FileOfferPayload,
     chunks: FileChunkPayload[]
   ): Promise<void> {
+    const transferKey = `${peer.deviceId}:${message.messageId}`;
+    if (this.inFlightFileTransfers.has(transferKey)) {
+      return;
+    }
+    this.inFlightFileTransfers.add(transferKey);
     try {
       await this.sendToPeer(peer, this.fileTransfer.buildOfferFrame(peer.deviceId, offer, message.createdAt));
 
@@ -96,18 +102,9 @@ export class MessageService {
       });
     } catch {
       this.markUnreachable(peer);
-      this.db.updateMessageStatus(message.messageId, 'failed');
-      this.emitEvent({
-        type: 'message:status',
-        messageId: message.messageId,
-        conversationId: message.conversationId,
-        status: 'failed'
-      });
-      this.emitEvent({
-        type: 'ui:toast',
-        level: 'warning',
-        message: 'Falha no envio do anexo. Contato offline.'
-      });
+      // Mantém como "sent/pendente" para reenvio automático quando o peer voltar online.
+    } finally {
+      this.inFlightFileTransfers.delete(transferKey);
     }
   }
 
@@ -205,9 +202,6 @@ export class MessageService {
 
   async sendFile(peerId: string, filePath: string): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
-    if (!peer) {
-      throw new Error('Contato offline. Não foi possível enviar o anexo.');
-    }
 
     const messageId = randomUUID();
     const conversationId = this.db.ensureDmConversation(
@@ -254,6 +248,9 @@ export class MessageService {
     });
 
     setImmediate(() => {
+      if (!peer) {
+        return;
+      }
       void this.sendFileFramesInBackground(peer, message, offer, chunks);
     });
 
@@ -338,6 +335,11 @@ export class MessageService {
     for (const fileMessage of pendingFiles) {
       if (!fileMessage.filePath || !fileMessage.fileId) continue;
       if (!fs.existsSync(fileMessage.filePath)) continue;
+      const transferKey = `${peer.deviceId}:${fileMessage.messageId}`;
+      if (this.inFlightFileTransfers.has(transferKey)) {
+        continue;
+      }
+      this.inFlightFileTransfers.add(transferKey);
       try {
         const { offer, chunks } = await this.fileTransfer.createOffer(
           peer.deviceId,
@@ -371,13 +373,9 @@ export class MessageService {
         );
       } catch {
         this.markUnreachable(peer);
-        this.db.updateMessageStatus(fileMessage.messageId, 'failed');
-        this.emitEvent({
-          type: 'message:status',
-          messageId: fileMessage.messageId,
-          conversationId: fileMessage.conversationId,
-          status: 'failed'
-        });
+        break;
+      } finally {
+        this.inFlightFileTransfers.delete(transferKey);
       }
     }
   }

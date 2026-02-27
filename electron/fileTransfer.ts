@@ -12,6 +12,7 @@ interface IncomingTransfer {
   expectedSha: string;
   totalChunks: number | null;
   receivedChunks: number;
+  receivedIndices: Set<number>;
   transferredBytes: number;
   hash: ReturnType<typeof createHash>;
   writeStream: fs.WriteStream;
@@ -87,6 +88,24 @@ export class FileTransferService {
   }
 
   startIncoming(fileOffer: FileOfferPayload, peerId: string): string {
+    const existing = this.incoming.get(fileOffer.fileId);
+    if (existing) {
+      if (existing.messageId === fileOffer.messageId && existing.peerId === peerId) {
+        return existing.finalPath;
+      }
+      try {
+        existing.writeStream.destroy();
+      } catch {
+        // ignora
+      }
+      try {
+        fs.unlinkSync(existing.finalPath);
+      } catch {
+        // ignora
+      }
+      this.incoming.delete(fileOffer.fileId);
+    }
+
     const safeName = sanitizeFileName(fileOffer.filename);
     const finalPath = path.join(this.attachmentsDir, `${fileOffer.messageId}_${safeName}`);
     const writeStream = fs.createWriteStream(finalPath, { flags: 'w' });
@@ -99,6 +118,7 @@ export class FileTransferService {
       expectedSha: fileOffer.sha256,
       totalChunks: null,
       receivedChunks: 0,
+      receivedIndices: new Set<number>(),
       transferredBytes: 0,
       hash: createHash('sha256'),
       writeStream,
@@ -114,11 +134,27 @@ export class FileTransferService {
       throw new Error('Transferência desconhecida');
     }
 
+    if (!Number.isInteger(chunk.index) || !Number.isInteger(chunk.total)) {
+      throw new Error('Chunk inválido');
+    }
+    if (chunk.total <= 0 || chunk.index < 0 || chunk.index >= chunk.total) {
+      throw new Error('Índice de chunk inválido');
+    }
+
     transfer.totalChunks = chunk.total;
+    if (transfer.receivedIndices.has(chunk.index)) {
+      return {
+        done: transfer.totalChunks === transfer.receivedChunks,
+        transferred: transfer.transferredBytes,
+        total: transfer.totalBytes
+      };
+    }
+
     const buffer = Buffer.from(chunk.dataBase64, 'base64');
     transfer.hash.update(buffer);
     transfer.writeStream.write(buffer);
-    transfer.receivedChunks += 1;
+    transfer.receivedIndices.add(chunk.index);
+    transfer.receivedChunks = transfer.receivedIndices.size;
     transfer.transferredBytes += buffer.length;
 
     return {

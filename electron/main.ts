@@ -1389,16 +1389,6 @@ class LanternApp {
           );
         }
 
-        if (activePeer) {
-          await this.sendToPeer(activePeer, {
-            type: 'chat:ack',
-            messageId: randomUUID(),
-            from: this.profile.deviceId,
-            to: frame.from,
-            createdAt: Date.now(),
-            payload: { ackMessageId: payload.messageId, status: 'delivered' }
-          });
-        }
         break;
       }
       case 'file:chunk': {
