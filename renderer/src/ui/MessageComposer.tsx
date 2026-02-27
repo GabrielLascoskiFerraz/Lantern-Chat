@@ -1,4 +1,4 @@
-import { ClipboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
+import { ClipboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
   Textarea
@@ -8,6 +8,8 @@ import {
   ClipboardPaste20Regular,
   Copy20Regular,
   Cut20Regular,
+  Dismiss12Regular,
+  Delete16Regular,
   Emoji20Regular,
   Send20Filled
 } from '@fluentui/react-icons';
@@ -29,6 +31,15 @@ interface PendingAttachmentInfo {
   isImage: boolean;
 }
 
+type PasteProgressStage = 'reading' | 'saving' | 'done' | 'error';
+
+interface PasteProgressItem {
+  id: string;
+  name: string;
+  progress: number;
+  stage: PasteProgressStage;
+}
+
 export const MessageComposer = ({
   disabled,
   autoFocusKey,
@@ -45,7 +56,12 @@ export const MessageComposer = ({
   const [pendingAttachmentPreviewByPath, setPendingAttachmentPreviewByPath] = useState<
     Record<string, string | null>
   >({});
+  const [removingFilePaths, setRemovingFilePaths] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isPastingFiles, setIsPastingFiles] = useState(false);
+  const [isDragOverFiles, setIsDragOverFiles] = useState(false);
+  const [pasteFeedback, setPasteFeedback] = useState<string | null>(null);
+  const [pasteProgressItems, setPasteProgressItems] = useState<PasteProgressItem[]>([]);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [textContextMenu, setTextContextMenu] = useState<{
     x: number;
@@ -60,6 +76,25 @@ export const MessageComposer = ({
   const typingStateRef = useRef(false);
   const typingTimeoutRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const dragDepthRef = useRef(0);
+  const dragOverlayVisibleRef = useRef(false);
+  const appendPendingFiles = useCallback((filePaths: string[]) => {
+    if (filePaths.length === 0) return;
+    setPendingFilePaths((current) => {
+      const existing = new Set(current);
+      const merged = [...current];
+      for (const filePath of filePaths) {
+        if (!existing.has(filePath)) {
+          merged.push(filePath);
+          existing.add(filePath);
+        }
+      }
+      return merged;
+    });
+  }, []);
+  const removePasteProgressItem = useCallback((id: string) => {
+    setPasteProgressItems((current) => current.filter((item) => item.id !== id));
+  }, []);
   const emojiCategories: Record<
     'rostos' | 'gestos' | 'animais' | 'comida' | 'objetos' | 'simbolos',
     { label: string; emojis: string[] }
@@ -183,6 +218,264 @@ export const MessageComposer = ({
   }, [textContextMenu]);
 
   useEffect(() => {
+    if (!pasteFeedback) return;
+    const timer = window.setTimeout(() => setPasteFeedback(null), 1800);
+    return () => window.clearTimeout(timer);
+  }, [pasteFeedback]);
+
+  useEffect(() => {
+    if (!onSendFile || disabled || isSubmitting) {
+      setIsDragOverFiles(false);
+      dragDepthRef.current = 0;
+      dragOverlayVisibleRef.current = false;
+      return;
+    }
+
+    const hasFiles = (event: DragEvent): boolean => {
+      const filesLen = event.dataTransfer?.files?.length || 0;
+      if (filesLen > 0) return true;
+      const types = event.dataTransfer?.types;
+      if (!types) return false;
+      const normalized = Array.from(types).map((type) => type.toLowerCase());
+      return normalized.some((type) => type === 'files' || type.includes('file') || type.includes('uri'));
+    };
+
+    const decodeFileUri = (uri: string): string | null => {
+      const value = uri.trim();
+      if (!value.toLowerCase().startsWith('file://')) {
+        return null;
+      }
+      try {
+        const parsed = decodeURI(value.replace(/^file:\/\//i, ''));
+        if (!parsed) return null;
+        if (/^\/[A-Za-z]:\//.test(parsed)) {
+          return parsed.slice(1);
+        }
+        return parsed;
+      } catch {
+        return null;
+      }
+    };
+
+    const collectDroppedFilePaths = (event: DragEvent): string[] => {
+      const files = Array.from(event.dataTransfer?.files || []);
+      const paths: string[] = [];
+      for (const file of files) {
+        const filePath = (file as File & { path?: string }).path;
+        if (typeof filePath === 'string' && filePath.trim()) {
+          paths.push(filePath);
+        }
+      }
+      if (paths.length > 0) {
+        return paths;
+      }
+
+      const uriListRaw = event.dataTransfer?.getData('text/uri-list') || '';
+      if (uriListRaw.trim()) {
+        for (const line of uriListRaw.split(/\r?\n/)) {
+          const entry = line.trim();
+          if (!entry || entry.startsWith('#')) continue;
+          const decoded = decodeFileUri(entry);
+          if (decoded) {
+            paths.push(decoded);
+          }
+        }
+      }
+
+      if (paths.length > 0) {
+        return paths;
+      }
+
+      const plainText = event.dataTransfer?.getData('text/plain') || '';
+      if (plainText.trim()) {
+        for (const line of plainText.split(/\r?\n/)) {
+          const decoded = decodeFileUri(line);
+          if (decoded) {
+            paths.push(decoded);
+          }
+        }
+      }
+      return paths;
+    };
+
+    const addDroppedPaths = (paths: string[]) => {
+      if (paths.length === 0) return;
+      const uniquePathSet = new Set(paths);
+      setPendingFilePaths((current) => {
+        const existing = new Set(current);
+        const merged = [...current];
+        for (const filePath of uniquePathSet) {
+          if (!existing.has(filePath)) {
+            merged.push(filePath);
+            existing.add(filePath);
+          }
+        }
+        return merged;
+      });
+      setPasteFeedback(
+        `${uniquePathSet.size} arquivo${uniquePathSet.size > 1 ? 's' : ''} anexado${uniquePathSet.size > 1 ? 's' : ''}`
+      );
+    };
+
+    const processDroppedFileBlobs = (files: File[]) => {
+      if (files.length === 0) return;
+      setIsPastingFiles(true);
+      setPasteFeedback(null);
+      let pending = files.length;
+      let addedCount = 0;
+
+      const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
+        setPasteProgressItems((current) =>
+          current.map((item) => (item.id === id ? { ...item, ...patch } : item))
+        );
+      };
+
+      const finishOne = () => {
+        pending -= 1;
+        if (pending <= 0) {
+          setIsPastingFiles(false);
+          if (addedCount > 0) {
+            setPasteFeedback(
+              `${addedCount} arquivo${addedCount > 1 ? 's' : ''} anexado${addedCount > 1 ? 's' : ''}`
+            );
+          }
+        }
+      };
+
+      for (const file of files) {
+        const itemName = file.name || 'arquivo';
+        const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${itemName}`;
+        setPasteProgressItems((current) => [
+          ...current,
+          {
+            id: pasteId,
+            name: itemName,
+            progress: 2,
+            stage: 'reading'
+          }
+        ]);
+
+        const reader = new FileReader();
+        reader.onprogress = (progressEvent) => {
+          const total = progressEvent.total || file.size || 0;
+          if (!total) return;
+          const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
+          const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
+          updatePasteItem(pasteId, { progress, stage: 'reading' });
+        };
+        reader.onload = () => {
+          const dataUrl = typeof reader.result === 'string' ? reader.result : null;
+          if (!dataUrl) {
+            updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+            finishOne();
+            return;
+          }
+          updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
+          void ipcClient
+            .saveClipboardFileData(dataUrl, itemName)
+            .then((savedPath) => {
+              if (savedPath) {
+                addedCount += 1;
+                removePasteProgressItem(pasteId);
+                appendPendingFiles([savedPath]);
+              } else {
+                updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+              }
+            })
+            .catch(() => {
+              updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+            })
+            .finally(() => finishOne());
+        };
+        reader.onerror = () => {
+          updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+          finishOne();
+        };
+        reader.readAsDataURL(file);
+      }
+    };
+
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      if (!dragOverlayVisibleRef.current) {
+        dragOverlayVisibleRef.current = true;
+        setIsDragOverFiles(true);
+      }
+    };
+
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'copy';
+      }
+      if (!dragOverlayVisibleRef.current) {
+        dragOverlayVisibleRef.current = true;
+        setIsDragOverFiles(true);
+      }
+    };
+
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0 && dragOverlayVisibleRef.current) {
+        dragOverlayVisibleRef.current = false;
+        setIsDragOverFiles(false);
+      }
+    };
+
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      dragOverlayVisibleRef.current = false;
+      setIsDragOverFiles(false);
+      const droppedFiles = Array.from(event.dataTransfer?.files || []);
+      const filePaths = collectDroppedFilePaths(event);
+      if (filePaths.length > 0) {
+        addDroppedPaths(filePaths);
+        return;
+      }
+      if (droppedFiles.length > 0) {
+        processDroppedFileBlobs(droppedFiles);
+        return;
+      }
+      setPasteFeedback('Não foi possível anexar os arquivos soltos.');
+    };
+
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+      dragDepthRef.current = 0;
+      dragOverlayVisibleRef.current = false;
+    };
+  }, [appendPendingFiles, disabled, isSubmitting, onSendFile, removePasteProgressItem]);
+
+  useEffect(() => {
+    if (pasteProgressItems.length === 0) return;
+    const hasDisposableItems = pasteProgressItems.some(
+      (item) => item.stage === 'done' || item.stage === 'error'
+    );
+    if (!hasDisposableItems) return;
+    const timer = window.setTimeout(() => {
+      setPasteProgressItems((current) =>
+        current.filter((item) => item.stage !== 'done' && item.stage !== 'error')
+      );
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [pasteProgressItems]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadPendingAttachments = async () => {
@@ -257,17 +550,7 @@ export const MessageComposer = ({
     if (!onSendFile || disabled || isSubmitting) return;
     const filePaths = await ipcClient.pickFiles();
     if (!filePaths || filePaths.length === 0) return;
-    setPendingFilePaths((current) => {
-      const existing = new Set(current);
-      const merged = [...current];
-      for (const filePath of filePaths) {
-        if (!existing.has(filePath)) {
-          merged.push(filePath);
-          existing.add(filePath);
-        }
-      }
-      return merged;
-    });
+    appendPendingFiles(filePaths);
   };
 
   const formatFileSize = (size: number): string => {
@@ -278,32 +561,143 @@ export const MessageComposer = ({
     return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   };
 
-  const handlePasteImage = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+  const removePendingAttachment = (filePathToRemove: string): void => {
+    if (isSubmitting) return;
+    setRemovingFilePaths((current) => {
+      if (current.includes(filePathToRemove)) return current;
+      return [...current, filePathToRemove];
+    });
+
+    window.setTimeout(() => {
+      setPendingFilePaths((current) => current.filter((filePath) => filePath !== filePathToRemove));
+      setRemovingFilePaths((current) => current.filter((filePath) => filePath !== filePathToRemove));
+    }, 170);
+  };
+
+  const removeAllPendingAttachments = (): void => {
+    if (isSubmitting || pendingFilePaths.length <= 1) return;
+    setRemovingFilePaths((current) => {
+      const merged = new Set(current);
+      for (const filePath of pendingFilePaths) {
+        merged.add(filePath);
+      }
+      return Array.from(merged);
+    });
+    window.setTimeout(() => {
+      setPendingFilePaths([]);
+      setRemovingFilePaths([]);
+    }, 170);
+  };
+
+  const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
     if (!onSendFile || disabled || isSubmitting) return;
     const items = Array.from(event.clipboardData?.items || []);
-    const imageItem = items.find((item) => item.type.startsWith('image/'));
-    if (!imageItem) return;
-    const file = imageItem.getAsFile();
-    if (!file) return;
-
-    event.preventDefault();
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : null;
-      if (!dataUrl) return;
-      const ext = (file.type.split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
-      void ipcClient
-        .saveClipboardImage(dataUrl, ext)
-        .then((savedPath) => {
-          if (savedPath) {
-            setPendingFilePaths((current) =>
-              current.includes(savedPath) ? current : [...current, savedPath]
+    const fileItems = items.filter((item) => item.kind === 'file');
+    if (fileItems.length > 0) {
+      event.preventDefault();
+      setIsPastingFiles(true);
+      setPasteFeedback(null);
+      let pending = fileItems.length;
+      let addedCount = 0;
+      const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
+        setPasteProgressItems((current) =>
+          current.map((item) => (item.id === id ? { ...item, ...patch } : item))
+        );
+      };
+      const finishOne = () => {
+        pending -= 1;
+        if (pending <= 0) {
+          setIsPastingFiles(false);
+          if (addedCount > 0) {
+            setPasteFeedback(
+              `${addedCount} arquivo${addedCount > 1 ? 's' : ''} colado${addedCount > 1 ? 's' : ''}`
             );
           }
-        })
-        .catch(() => undefined);
-    };
-    reader.readAsDataURL(file);
+        }
+      };
+      for (const item of fileItems) {
+        const file = item.getAsFile();
+        if (!file) {
+          finishOne();
+          continue;
+        }
+        const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${file.name}`;
+        setPasteProgressItems((current) => [
+          ...current,
+          {
+            id: pasteId,
+            name: file.name || 'arquivo',
+            progress: 2,
+            stage: 'reading'
+          }
+        ]);
+        const reader = new FileReader();
+        reader.onprogress = (progressEvent) => {
+          const total = progressEvent.total || file.size || 0;
+          if (!total) return;
+          const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
+          const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
+          updatePasteItem(pasteId, { progress, stage: 'reading' });
+        };
+        reader.onload = () => {
+          const dataUrl = typeof reader.result === 'string' ? reader.result : null;
+          if (!dataUrl) {
+            updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+            finishOne();
+            return;
+          }
+          updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
+          const isImage = file.type.startsWith('image/');
+          const extension =
+            (file.type.split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
+          const fileName = file.name && file.name.trim() ? file.name.trim() : undefined;
+          const savePromise = isImage
+            ? ipcClient.saveClipboardImage(dataUrl, extension)
+            : ipcClient.saveClipboardFileData(dataUrl, fileName);
+          void savePromise
+            .then((savedPath) => {
+              if (savedPath) {
+                addedCount += 1;
+                removePasteProgressItem(pasteId);
+                appendPendingFiles([savedPath]);
+              } else {
+                updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+              }
+              finishOne();
+            })
+            .catch(() => {
+              updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+              finishOne();
+            });
+        };
+        reader.onerror = () => {
+          updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+          finishOne();
+        };
+        reader.readAsDataURL(file);
+      }
+      return;
+    }
+
+    // Fallback para macOS/Windows quando Finder/Explorer copia como file-url.
+    const plainText = event.clipboardData?.getData('text/plain') || '';
+    if (!/(^|\n)\s*file:\/\//i.test(plainText)) {
+      return;
+    }
+    event.preventDefault();
+    setIsPastingFiles(true);
+    setPasteFeedback(null);
+    void ipcClient
+      .getClipboardFilePaths()
+      .then((paths) => {
+        if (!paths || paths.length === 0) return;
+        setPasteFeedback(
+          `${paths.length} arquivo${paths.length > 1 ? 's' : ''} colado${paths.length > 1 ? 's' : ''}`
+        );
+        appendPendingFiles(paths);
+      })
+      .catch(() => undefined)
+      .finally(() => setIsPastingFiles(false));
   };
 
   const setTyping = (isTyping: boolean): void => {
@@ -395,6 +789,28 @@ export const MessageComposer = ({
   const handlePasteAtCursor = async (): Promise<void> => {
     const textarea = getComposerTextarea();
     if (!textarea) return;
+
+    // Prioriza arquivo copiado no Finder/Explorer (menu de contexto "Colar").
+    if (onSendFile && !disabled && !isSubmitting) {
+      try {
+        const hasFileLikeData = await ipcClient.clipboardHasFileLikeData();
+        const paths = await ipcClient.getClipboardFilePaths();
+        if (paths && paths.length > 0) {
+          appendPendingFiles(paths);
+          setPasteFeedback(
+            `${paths.length} arquivo${paths.length > 1 ? 's' : ''} colado${paths.length > 1 ? 's' : ''}`
+          );
+          return;
+        }
+        if (hasFileLikeData) {
+          setPasteFeedback('Arquivo detectado no clipboard, mas não foi possível anexar.');
+          return;
+        }
+      } catch {
+        // fallback para texto
+      }
+    }
+
     let clipboardText = '';
     try {
       clipboardText = await navigator.clipboard.readText();
@@ -413,17 +829,67 @@ export const MessageComposer = ({
     });
   };
 
+  const showAttachmentPanel =
+    pendingFilePaths.length > 0 ||
+    pasteProgressItems.length > 0 ||
+    isPastingFiles ||
+    Boolean(pasteFeedback);
+
   return (
-    <div className="composer" ref={composerRootRef}>
-      {pendingFilePaths.length > 0 && (
-        <div className={`composer-attachment-pending ${isSubmitting ? 'sending' : ''}`}>
+    <div className={`composer ${isDragOverFiles ? 'drag-over' : ''}`} ref={composerRootRef}>
+      {showAttachmentPanel && (
+        <div
+          className={`composer-attachment-pending ${isSubmitting ? 'sending' : ''} ${
+            isPastingFiles || pasteProgressItems.length > 0 ? 'attaching' : ''
+          }`}
+        >
           <div className="composer-attachments-list">
+            {(isPastingFiles || pasteProgressItems.length > 0 || pasteFeedback) && (
+              <div className="composer-paste-progress-list" aria-live="polite">
+                {isPastingFiles && pasteProgressItems.length === 0 && (
+                  <div className="composer-paste-progress-item reading">
+                    <div className="composer-paste-progress-top">
+                      <span className="composer-paste-progress-name">Lendo clipboard…</span>
+                      <span className="composer-paste-progress-state">lendo</span>
+                    </div>
+                    <div className="composer-paste-progress-bar">
+                      <span style={{ width: '24%' }} />
+                    </div>
+                  </div>
+                )}
+                {pasteProgressItems.map((item) => (
+                  <div key={item.id} className={`composer-paste-progress-item ${item.stage}`}>
+                    <div className="composer-paste-progress-top">
+                      <span className="composer-paste-progress-name">{item.name}</span>
+                      <span className="composer-paste-progress-state">
+                        {item.stage === 'reading' ? 'lendo' : ''}
+                        {item.stage === 'saving' ? 'salvando' : ''}
+                        {item.stage === 'done' ? 'pronto' : ''}
+                        {item.stage === 'error' ? 'falha' : ''}
+                      </span>
+                    </div>
+                    <div className="composer-paste-progress-bar">
+                      <span style={{ width: `${item.progress}%` }} />
+                    </div>
+                  </div>
+                ))}
+                {pasteFeedback && !isPastingFiles && (
+                  <div className="composer-attachment-sub composer-attachment-total">
+                    {pasteFeedback}
+                  </div>
+                )}
+              </div>
+            )}
             {pendingFilePaths.map((pendingFilePath) => {
               const pendingAttachment = pendingAttachmentByPath[pendingFilePath] || null;
               const pendingAttachmentPreview = pendingAttachmentPreviewByPath[pendingFilePath] || null;
               const pendingAttachmentLabel = pendingAttachment?.name || getFileName(pendingFilePath) || 'Anexo';
+              const isRemoving = removingFilePaths.includes(pendingFilePath);
               return (
-                <div key={pendingFilePath} className="composer-attachment-item">
+                <div
+                  key={pendingFilePath}
+                  className={`composer-attachment-item ${isRemoving ? 'removing' : ''}`}
+                >
                   <div className="composer-attachment-main">
                     {pendingAttachmentPreview && (
                       <img
@@ -444,19 +910,37 @@ export const MessageComposer = ({
                   <button
                     type="button"
                     className="composer-attachment-remove"
-                    onClick={() =>
-                      setPendingFilePaths((current) => current.filter((filePath) => filePath !== pendingFilePath))
-                    }
-                    disabled={isSubmitting}
+                    onClick={() => removePendingAttachment(pendingFilePath)}
+                    disabled={isSubmitting || isRemoving}
                   >
-                    remover
+                    <span className="composer-attachment-remove-icon">
+                      <Dismiss12Regular />
+                    </span>
+                    <span>Remover</span>
                   </button>
                 </div>
               );
             })}
-            <div className="composer-attachment-sub composer-attachment-total">
-              {pendingFilePaths.length} arquivo(s) pronto(s) para envio
-            </div>
+            {pendingFilePaths.length > 0 && (
+              <div className="composer-attachment-sub composer-attachment-total">
+                {pendingFilePaths.length} arquivo(s) pronto(s) para envio
+              </div>
+            )}
+            {pendingFilePaths.length > 1 && (
+              <div className="composer-attachment-bulk-actions">
+                <button
+                  type="button"
+                  className="composer-attachment-remove-all"
+                  onClick={removeAllPendingAttachments}
+                  disabled={isSubmitting}
+                >
+                  <span className="composer-attachment-remove-icon">
+                    <Delete16Regular />
+                  </span>
+                  <span>Remover todos</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -542,7 +1026,7 @@ export const MessageComposer = ({
               void submit();
             }
           }}
-          onPaste={handlePasteImage}
+          onPaste={handlePasteAttachment}
           onContextMenu={handleComposerContextMenu}
         />
         <div className="composer-actions">
@@ -566,6 +1050,14 @@ export const MessageComposer = ({
           </Button>
         </div>
       </div>
+      {isDragOverFiles && (
+        <div className="composer-drop-overlay" aria-hidden>
+          <div className="composer-drop-overlay-card">
+            <span className="composer-drop-overlay-icon">📎</span>
+            <span>Solte os arquivos para anexar</span>
+          </div>
+        </div>
+      )}
 
       {textContextMenu && (
         <div

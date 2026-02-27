@@ -73,8 +73,13 @@ const api = {
     ext: string;
     isImage: boolean;
   } | null> => ipcRenderer.invoke('lantern:getFileInfo', filePath),
+  getClipboardFilePaths: (): Promise<string[]> => ipcRenderer.invoke('lantern:getClipboardFilePaths'),
+  clipboardHasFileLikeData: (): Promise<boolean> =>
+    ipcRenderer.invoke('lantern:clipboardHasFileLikeData'),
   saveClipboardImage: (dataUrl: string, extension?: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:saveClipboardImage', dataUrl, extension),
+  saveClipboardFileData: (dataUrl: string, fileName?: string): Promise<string | null> =>
+    ipcRenderer.invoke('lantern:saveClipboardFileData', dataUrl, fileName),
   onEvent: (callback: EventCallback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: AppEvent) => callback(payload);
     ipcRenderer.on('lantern:event', listener);

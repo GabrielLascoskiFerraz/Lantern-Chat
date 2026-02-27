@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import { AnnouncementReactionSummary, AppEvent, DbMessage, Peer, Profile } from './types';
 
 export interface IpcBindings {
@@ -73,6 +73,137 @@ export const registerIpc = (
   window: BrowserWindow,
   bindings: IpcBindings
 ): { emitEvent: (event: AppEvent) => void } => {
+  const CLIPBOARD_TEMP_DIR = path.join(os.tmpdir(), 'lantern-paste');
+  const CLIPBOARD_MAX_FILE_AGE_MS = 24 * 60 * 60 * 1000;
+  const CLIPBOARD_MAX_FILES = 300;
+
+  const cleanupClipboardTempDir = async (): Promise<void> => {
+    try {
+      await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
+      const names = await fs.promises.readdir(CLIPBOARD_TEMP_DIR);
+      const now = Date.now();
+      const files: Array<{ name: string; fullPath: string; mtimeMs: number }> = [];
+
+      for (const name of names) {
+        const fullPath = path.join(CLIPBOARD_TEMP_DIR, name);
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          if (!stat.isFile()) continue;
+          files.push({ name, fullPath, mtimeMs: stat.mtimeMs });
+        } catch {
+          // ignora arquivo removido em paralelo
+        }
+      }
+
+      const stale = files.filter((file) => now - file.mtimeMs > CLIPBOARD_MAX_FILE_AGE_MS);
+      for (const file of stale) {
+        await fs.promises.unlink(file.fullPath).catch(() => undefined);
+      }
+
+      const fresh = files
+        .filter((file) => now - file.mtimeMs <= CLIPBOARD_MAX_FILE_AGE_MS)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      if (fresh.length > CLIPBOARD_MAX_FILES) {
+        const overflow = fresh.slice(CLIPBOARD_MAX_FILES);
+        for (const file of overflow) {
+          await fs.promises.unlink(file.fullPath).catch(() => undefined);
+        }
+      }
+    } catch {
+      // cleanup best effort
+    }
+  };
+
+  const parseFileUri = (value: string): string | null => {
+    const trimmed = value.trim();
+    if (!trimmed.toLowerCase().startsWith('file://')) return null;
+    try {
+      const url = new URL(trimmed);
+      if (url.protocol !== 'file:') return null;
+      let pathname = decodeURIComponent(url.pathname || '');
+      if (process.platform === 'win32' && /^\/[a-zA-Z]:\//.test(pathname)) {
+        pathname = pathname.slice(1);
+      }
+      return pathname || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseUriList = (value: string): string[] => {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'))
+      .map((line) => parseFileUri(line))
+      .filter((line): line is string => Boolean(line));
+  };
+
+  const parseAbsolutePathsFromText = (value: string): string[] => {
+    const paths: string[] = [];
+    const lines = value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      if (line.startsWith('/')) {
+        paths.push(line);
+        continue;
+      }
+      if (/^[a-zA-Z]:[\\/]/.test(line)) {
+        paths.push(line);
+      }
+    }
+    return paths;
+  };
+
+  const parsePathsFromXmlLikeString = (value: string): string[] => {
+    const paths: string[] = [];
+    const matches = value.match(/<string>([^<]+)<\/string>/g) || [];
+    for (const raw of matches) {
+      const inner = raw.replace(/^<string>/, '').replace(/<\/string>$/, '').trim();
+      if (!inner) continue;
+      const uri = parseFileUri(inner);
+      if (uri) {
+        paths.push(uri);
+        continue;
+      }
+      if (inner.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(inner)) {
+        paths.push(inner);
+      }
+    }
+    return paths;
+  };
+
+  const looksLikeFileClipboard = (formats: string[], text: string): boolean => {
+    const hasFileFormat = formats.some((format) => {
+      const lower = format.toLowerCase();
+      return (
+        lower.includes('file') ||
+        lower.includes('uri') ||
+        lower.includes('nsfilenamespboardtype') ||
+        lower.includes('public.file-url')
+      );
+    });
+    if (hasFileFormat) return true;
+    if (/(^|\n)\s*file:\/\//i.test(text || '')) return true;
+    return false;
+  };
+
+  const normalizeClipboardPaths = async (candidates: string[]): Promise<string[]> => {
+    const dedupe = new Set<string>();
+    for (const candidate of candidates) {
+      const resolved = path.resolve(candidate);
+      try {
+        const stat = await fs.promises.stat(resolved);
+        if (stat.isFile()) dedupe.add(resolved);
+      } catch {
+        // ignora caminhos inválidos do clipboard
+      }
+    }
+    return Array.from(dedupe);
+  };
+
   ipcMain.handle('lantern:getProfile', () => bindings.getProfile());
   ipcMain.handle('lantern:updateProfile', (_event, input) => bindings.updateProfile(input));
   ipcMain.handle('lantern:getKnownPeers', () => bindings.getKnownPeers());
@@ -242,6 +373,67 @@ export const registerIpc = (
     }
   });
 
+  ipcMain.handle('lantern:getClipboardFilePaths', async () => {
+    await cleanupClipboardTempDir();
+    const candidates: string[] = [];
+    const formats = clipboard.availableFormats();
+
+    const text = clipboard.readText();
+    if (text) {
+      candidates.push(...parseUriList(text));
+      candidates.push(...parseAbsolutePathsFromText(text));
+      const fromSingle = parseFileUri(text);
+      if (fromSingle) candidates.push(fromSingle);
+    }
+
+    for (const format of formats) {
+      const lower = format.toLowerCase();
+      if (!(lower.includes('file') || lower.includes('uri'))) continue;
+
+      try {
+        const typedText = clipboard.read(format);
+        if (typedText) {
+          candidates.push(...parseUriList(typedText));
+          candidates.push(...parseAbsolutePathsFromText(typedText));
+          candidates.push(...parsePathsFromXmlLikeString(typedText));
+          const fromSingle = parseFileUri(typedText);
+          if (fromSingle) candidates.push(fromSingle);
+        }
+      } catch {
+        // alguns formatos não suportam read(string)
+      }
+
+      try {
+        const raw = clipboard.readBuffer(format);
+        if (raw.length > 0) {
+          const utf8 = raw.toString('utf8');
+          candidates.push(...parseUriList(utf8));
+          candidates.push(...parseAbsolutePathsFromText(utf8));
+          candidates.push(...parsePathsFromXmlLikeString(utf8));
+          const utf16 = raw.toString('utf16le');
+          const utf16Parts = utf16.split('\u0000').map((part) => part.trim()).filter(Boolean);
+          for (const part of utf16Parts) {
+            const fromSingle = parseFileUri(part);
+            if (fromSingle) candidates.push(fromSingle);
+            if (part.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(part)) {
+              candidates.push(part);
+            }
+          }
+        }
+      } catch {
+        // ignora formatos sem buffer textual
+      }
+    }
+
+    return normalizeClipboardPaths(candidates);
+  });
+
+  ipcMain.handle('lantern:clipboardHasFileLikeData', () => {
+    const formats = clipboard.availableFormats();
+    const text = clipboard.readText();
+    return looksLikeFileClipboard(formats, text);
+  });
+
   ipcMain.handle(
     'lantern:saveClipboardImage',
     async (_event, dataUrl: string, extension?: string) => {
@@ -249,16 +441,42 @@ export const registerIpc = (
       const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
       if (!match) return null;
 
-      const tempDir = path.join(os.tmpdir(), 'lantern-paste');
-      await fs.promises.mkdir(tempDir, { recursive: true });
+      await cleanupClipboardTempDir();
+      await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
       const safeExt =
         (extension || match[1].split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
-      const filePath = path.join(tempDir, `clipboard-${Date.now()}-${randomUUID()}.${safeExt}`);
+      const filePath = path.join(
+        CLIPBOARD_TEMP_DIR,
+        `clipboard-${Date.now()}-${randomUUID()}.${safeExt}`
+      );
       const buffer = Buffer.from(match[2], 'base64');
       await fs.promises.writeFile(filePath, buffer);
       return filePath;
     }
   );
+
+  ipcMain.handle('lantern:saveClipboardFileData', async (_event, dataUrl: string, fileName?: string) => {
+    if (!dataUrl || typeof dataUrl !== 'string') return null;
+    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) return null;
+
+    await cleanupClipboardTempDir();
+    await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
+
+    const rawName = (fileName || '').trim();
+    const safeName = rawName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 180);
+    const extFromName = path.extname(safeName).replace(/[^a-zA-Z0-9.]/g, '');
+    const extFromMime = `.${(match[1].split('/')[1] || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin'}`;
+    const ext = extFromName || extFromMime;
+    const baseName = safeName ? path.basename(safeName, extFromName || undefined) : 'clipboard-file';
+    const filePath = path.join(
+      CLIPBOARD_TEMP_DIR,
+      `${baseName}-${Date.now()}-${randomUUID()}${ext}`
+    );
+    const buffer = Buffer.from(match[2], 'base64');
+    await fs.promises.writeFile(filePath, buffer);
+    return filePath;
+  });
 
   return {
     emitEvent: (event: AppEvent) => {

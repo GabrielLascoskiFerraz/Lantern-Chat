@@ -722,7 +722,10 @@ class LanternApp {
   }
 
   private notifyIncomingIfNeeded(
-    message: Pick<DbMessage, 'type' | 'bodyText' | 'conversationId' | 'senderDeviceId' | 'createdAt'>,
+    message: Pick<
+      DbMessage,
+      'type' | 'bodyText' | 'conversationId' | 'senderDeviceId' | 'createdAt' | 'fileName'
+    >,
     source: 'live' | 'sync',
     sender?: Pick<Peer, 'displayName' | 'avatarEmoji' | 'avatarBg'>
   ): void {
@@ -750,6 +753,22 @@ class LanternApp {
       this.notifications.notifyMessage(
         sender?.displayName || 'Nova mensagem',
         message.bodyText || 'Nova mensagem',
+        message.conversationId,
+        sender
+          ? {
+              emoji: sender.avatarEmoji,
+              bg: sender.avatarBg
+            }
+          : undefined
+      );
+      return;
+    }
+
+    if (message.type === 'file') {
+      const fileLabel = (message.fileName || '').trim() || 'arquivo';
+      this.notifications.notifyMessage(
+        sender?.displayName || 'Novo anexo',
+        `Enviou um arquivo: ${fileLabel}`,
         message.conversationId,
         sender
           ? {
@@ -1357,6 +1376,17 @@ class LanternApp {
         if (inserted) {
           this.bumpUnreadIfBackground(conversationId);
           this.emitEvent({ type: 'message:received', message: row });
+          this.notifyIncomingIfNeeded(
+            row,
+            deliverySource,
+            activePeer
+              ? {
+                  displayName: activePeer.displayName || 'Novo anexo',
+                  avatarEmoji: activePeer.avatarEmoji,
+                  avatarBg: activePeer.avatarBg
+                }
+              : undefined
+          );
         }
 
         if (activePeer) {

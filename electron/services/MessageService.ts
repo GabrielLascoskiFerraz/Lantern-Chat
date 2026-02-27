@@ -1,6 +1,12 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ANNOUNCEMENTS_CONVERSATION_ID, MAX_FILE_SIZE_BYTES } from '../config';
+import {
+  ANNOUNCEMENTS_CONVERSATION_ID,
+  MAX_FILE_SIZE_BYTES,
+  sanitizeFileName
+} from '../config';
 import { DbService } from '../db';
 import { FileTransferService } from '../fileTransfer';
 import {
@@ -211,7 +217,9 @@ export class MessageService {
       peer?.displayName || `Contato ${peerId.slice(0, 6)}`
     );
     const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
-    const { offer, chunks } = await this.fileTransfer.createOffer(peerId, filePath, messageId);
+    const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
+    const { offer, chunks } = await this.fileTransfer.createOffer(peerId, managedFilePath, messageId);
+    this.deleteClipboardTempFile(filePath);
 
     if (offer.size > MAX_FILE_SIZE_BYTES) {
       throw new Error('Arquivo acima do limite de 200MB');
@@ -229,7 +237,7 @@ export class MessageService {
       fileName: offer.filename,
       fileSize: offer.size,
       fileSha256: offer.sha256,
-      filePath,
+      filePath: managedFilePath,
       status: 'sent',
       reaction: null,
       deletedAt: null,
@@ -256,6 +264,43 @@ export class MessageService {
 
   async retryFailedMessagesForPeer(peer: Peer): Promise<void> {
     void peer;
+  }
+
+  private isClipboardTempFile(filePath: string): boolean {
+    if (!filePath) return false;
+    const tempDir = path.join(os.tmpdir(), 'lantern-paste');
+    const resolvedFile = path.resolve(filePath);
+    const resolvedTemp = path.resolve(tempDir) + path.sep;
+    return resolvedFile.startsWith(resolvedTemp);
+  }
+
+  private deleteClipboardTempFile(filePath: string): void {
+    if (!this.isClipboardTempFile(filePath)) return;
+    fs.promises.unlink(filePath).catch(() => undefined);
+  }
+
+  private async ensureManagedOutgoingFileCopy(filePath: string, messageId: string): Promise<string> {
+    const resolvedSource = path.resolve(filePath);
+    const sourceStat = await fs.promises.stat(resolvedSource);
+    if (!sourceStat.isFile()) {
+      throw new Error('Caminho inválido: não é arquivo');
+    }
+    if (sourceStat.size > MAX_FILE_SIZE_BYTES) {
+      throw new Error('Arquivo acima do limite de 200MB');
+    }
+    const attachmentsDir = this.fileTransfer.getAttachmentsDir();
+    const resolvedAttachmentsDir = path.resolve(attachmentsDir);
+    const normalizedAttachmentsPrefix = resolvedAttachmentsDir + path.sep;
+
+    if (resolvedSource.startsWith(normalizedAttachmentsPrefix)) {
+      return resolvedSource;
+    }
+
+    await fs.promises.mkdir(resolvedAttachmentsDir, { recursive: true });
+    const safeName = sanitizeFileName(path.basename(resolvedSource) || 'arquivo');
+    const managedPath = path.join(resolvedAttachmentsDir, `${messageId}_${safeName}`);
+    await fs.promises.copyFile(resolvedSource, managedPath);
+    return managedPath;
   }
 
   async replayPendingFilesForPeer(peer: Peer): Promise<void> {

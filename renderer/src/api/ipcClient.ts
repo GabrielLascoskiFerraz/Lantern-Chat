@@ -155,7 +155,10 @@ interface LanternApi {
     ext: string;
     isImage: boolean;
   } | null>;
+  getClipboardFilePaths: () => Promise<string[]>;
+  clipboardHasFileLikeData: () => Promise<boolean>;
   saveClipboardImage: (dataUrl: string, extension?: string) => Promise<string | null>;
+  saveClipboardFileData: (dataUrl: string, fileName?: string) => Promise<string | null>;
   onEvent: (callback: (event: AppEvent) => void) => () => void;
 }
 
@@ -220,7 +223,11 @@ export const ipcClient = {
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),
   getFileInfo: (filePath: string) => window.lantern.getFileInfo(filePath),
+  getClipboardFilePaths: () => window.lantern.getClipboardFilePaths(),
+  clipboardHasFileLikeData: () => window.lantern.clipboardHasFileLikeData(),
   saveClipboardImage: (dataUrl: string, extension?: string) =>
     window.lantern.saveClipboardImage(dataUrl, extension),
+  saveClipboardFileData: (dataUrl: string, fileName?: string) =>
+    window.lantern.saveClipboardFileData(dataUrl, fileName),
   onEvent: (callback: (event: AppEvent) => void) => window.lantern.onEvent(callback)
 };
