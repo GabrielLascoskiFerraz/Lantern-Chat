@@ -1,9 +1,10 @@
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
 import {
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
+  Copy20Regular,
   Delete20Regular,
   Dismiss20Regular,
   MoreHorizontal20Regular,
@@ -215,10 +216,67 @@ export const ChatView = ({
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmForgetOpen, setConfirmForgetOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
+  const [selectionContextMenu, setSelectionContextMenu] = useState<{
+    x: number;
+    y: number;
+    text: string;
+  } | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const closeSelectionContextMenu = useCallback(() => {
+    setSelectionContextMenu(null);
+  }, []);
+
+  const copySelectedText = useCallback(async (text: string) => {
+    const value = text.trim();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // fallback legado para ambientes sem permissão de clipboard API
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }, []);
+
+  const handleBubbleContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      const selection = window.getSelection();
+      const selectedText = selection?.toString().trim() || '';
+      if (!selectedText || !selection || selection.rangeCount === 0) {
+        setSelectionContextMenu(null);
+        return;
+      }
+
+      const container = event.currentTarget;
+      const range = selection.getRangeAt(0);
+      if (!container.contains(range.commonAncestorContainer)) {
+        return;
+      }
+
+      event.preventDefault();
+      const menuWidth = 188;
+      const menuHeight = 52;
+      const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
+      const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+      setSelectionContextMenu({ x, y, text: selectedText });
+    },
+    []
+  );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
   const forceScrollOnOpenRef = useRef(false);
@@ -496,6 +554,19 @@ export const ChatView = ({
   }, [searchOpen]);
 
   useEffect(() => {
+    if (!selectionContextMenu) return;
+    const close = () => setSelectionContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [selectionContextMenu]);
+
+  useEffect(() => {
     if (!searchOpen) {
       setSearchQuery((current) => (current === '' ? current : ''));
       setActiveMatchIndex((current) => (current === -1 ? current : -1));
@@ -735,6 +806,7 @@ export const ChatView = ({
                   className={`bubble ${outgoing ? 'out' : 'in'} ${isDeleted ? 'deleted' : ''} ${
                     message.status === 'failed' ? 'failed' : ''
                   }`}
+                  onContextMenu={handleBubbleContextMenu}
                 >
                   {isDeleted ? (
                     <div className="message-deleted">Esta mensagem foi apagada.</div>
@@ -954,6 +1026,28 @@ export const ChatView = ({
           void onForgetContactConversation();
         }}
       />
+
+      {selectionContextMenu && (
+        <div
+          className="chat-context-menu"
+          style={{ left: selectionContextMenu.x, top: selectionContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="chat-context-item"
+            onClick={() => {
+              void copySelectedText(selectionContextMenu.text);
+              closeSelectionContextMenu();
+            }}
+          >
+            <span className="menu-item-icon">
+              <Copy20Regular />
+            </span>
+            <span>Copiar texto</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };

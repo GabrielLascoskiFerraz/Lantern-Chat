@@ -1,7 +1,8 @@
-import { ReactNode } from 'react';
+import { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { Button, Caption1, Text } from '@fluentui/react-components';
 import { Checkmark20Regular } from '@fluentui/react-icons';
 import { Clock20Regular } from '@fluentui/react-icons';
+import { Copy20Regular } from '@fluentui/react-icons';
 import { Delete20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
@@ -80,9 +81,59 @@ export const AnnouncementsView = ({
 }: AnnouncementsViewProps) => {
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [selectionContextMenu, setSelectionContextMenu] = useState<{
+    x: number;
+    y: number;
+    text: string;
+  } | null>(null);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+
+  const copySelectedText = async (text: string): Promise<void> => {
+    const value = text.trim();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // fallback legado para ambientes sem permissão de clipboard API
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  };
+
+  const handleBubbleContextMenu = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim() || '';
+    if (!selectedText || !selection || selection.rangeCount === 0) {
+      setSelectionContextMenu(null);
+      return;
+    }
+
+    const container = event.currentTarget;
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) {
+      return;
+    }
+
+    event.preventDefault();
+    const menuWidth = 188;
+    const menuHeight = 52;
+    const x = Math.min(event.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(event.clientY, window.innerHeight - menuHeight - 12);
+    setSelectionContextMenu({ x, y, text: selectedText });
+  };
 
   const isNearBottom = (): boolean => {
     const node = messagesScrollRef.current;
@@ -107,6 +158,19 @@ export const AnnouncementsView = ({
     node.addEventListener('scroll', onScroll, { passive: true });
     return () => node.removeEventListener('scroll', onScroll);
   }, []);
+
+  useEffect(() => {
+    if (!selectionContextMenu) return;
+    const close = () => setSelectionContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [selectionContextMenu]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -195,6 +259,7 @@ export const AnnouncementsView = ({
                 {!outgoing && <Avatar emoji={emoji} bg={bg} size={30} />}
                 <div className={`bubble-block ${outgoing ? 'out' : 'in'}`}>
                   <div className={`bubble ${outgoing ? 'out' : 'in'}`}>
+                    <div onContextMenu={handleBubbleContextMenu}>
                     <div className="announcement-meta">
                       <span className="announcement-sender">{senderName}</span>
                       <span className="announcement-expiry-clock">
@@ -208,6 +273,7 @@ export const AnnouncementsView = ({
                         <Checkmark20Regular />
                         <span>{formatTime(message.createdAt)}</span>
                       </span>
+                    </div>
                     </div>
                   </div>
 
@@ -310,6 +376,28 @@ export const AnnouncementsView = ({
           setPendingDeleteMessageId(null);
         }}
       />
+
+      {selectionContextMenu && (
+        <div
+          className="chat-context-menu"
+          style={{ left: selectionContextMenu.x, top: selectionContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="chat-context-item"
+            onClick={() => {
+              void copySelectedText(selectionContextMenu.text);
+              setSelectionContextMenu(null);
+            }}
+          >
+            <span className="menu-item-icon">
+              <Copy20Regular />
+            </span>
+            <span>Copiar texto</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };
