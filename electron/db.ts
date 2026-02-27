@@ -277,6 +277,14 @@ export class DbService {
       .run(Date.now(), conversationId);
   }
 
+  markConversationUnread(conversationId: string): void {
+    this.db
+      .prepare(
+        'UPDATE conversations SET unreadCount = CASE WHEN unreadCount < 1 THEN 1 ELSE unreadCount END, updatedAt = ? WHERE id = ?'
+      )
+      .run(Date.now(), conversationId);
+  }
+
   saveMessage(message: DbMessage): boolean {
     const insert = this.db.prepare(
       `INSERT OR IGNORE INTO messages

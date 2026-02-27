@@ -137,6 +137,7 @@ interface LanternApi {
   getAnnouncementReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
   setActiveConversation: (conversationId: string) => Promise<void>;
   markConversationRead: (conversationId: string) => Promise<void>;
+  markConversationUnread: (conversationId: string) => Promise<void>;
   clearConversation: (conversationId: string) => Promise<void>;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Promise<Record<string, number>>;
@@ -205,6 +206,7 @@ export const ipcClient = {
     window.lantern.getAnnouncementReactions(messageIds),
   setActiveConversation: (conversationId: string) => window.lantern.setActiveConversation(conversationId),
   markConversationRead: (conversationId: string) => window.lantern.markConversationRead(conversationId),
+  markConversationUnread: (conversationId: string) => window.lantern.markConversationUnread(conversationId),
   clearConversation: (conversationId: string) => window.lantern.clearConversation(conversationId),
   forgetContactConversation: (conversationId: string) =>
     window.lantern.forgetContactConversation(conversationId),

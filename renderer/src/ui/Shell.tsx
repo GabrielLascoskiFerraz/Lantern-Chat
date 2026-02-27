@@ -35,6 +35,7 @@ export const Shell = () => {
     sendFile,
     reactToMessage,
     deleteMessageForEveryone,
+    markConversationUnread,
     clearConversation,
     forgetContactConversation,
     openFile,
@@ -137,6 +138,7 @@ export const Shell = () => {
         onlinePeerIds={onlinePeerIds}
         onSearch={setSearch}
         onSelectConversation={(id) => void selectConversation(id)}
+        onMarkConversationUnread={markConversationUnread}
         onClearConversation={clearConversation}
         onForgetContactConversation={forgetContactConversation}
         onOpenSettings={() => setSettingsOpen(true)}

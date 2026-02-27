@@ -268,6 +268,7 @@ class LanternApp {
         this.db.markConversationRead(conversationId);
       },
       markConversationRead: (conversationId) => this.db.markConversationRead(conversationId),
+      markConversationUnread: (conversationId) => this.db.markConversationUnread(conversationId),
       clearConversation: (conversationId) => this.clearConversation(conversationId),
       forgetContactConversation: (conversationId) => this.forgetContactConversation(conversationId),
       getConversations: () =>

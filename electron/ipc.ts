@@ -61,6 +61,7 @@ export interface IpcBindings {
   getAnnouncementReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
   setActiveConversation: (conversationId: string) => void;
   markConversationRead: (conversationId: string) => void;
+  markConversationUnread: (conversationId: string) => void;
   clearConversation: (conversationId: string) => void;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Record<string, number>;
@@ -131,6 +132,9 @@ export const registerIpc = (
   );
   ipcMain.handle('lantern:markConversationRead', (_event, conversationId: string) =>
     bindings.markConversationRead(conversationId)
+  );
+  ipcMain.handle('lantern:markConversationUnread', (_event, conversationId: string) =>
+    bindings.markConversationUnread(conversationId)
   );
   ipcMain.handle('lantern:clearConversation', (_event, conversationId: string) =>
     bindings.clearConversation(conversationId)

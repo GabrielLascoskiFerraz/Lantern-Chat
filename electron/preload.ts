@@ -48,6 +48,8 @@ const api = {
     ipcRenderer.invoke('lantern:setActiveConversation', conversationId),
   markConversationRead: (conversationId: string) =>
     ipcRenderer.invoke('lantern:markConversationRead', conversationId),
+  markConversationUnread: (conversationId: string) =>
+    ipcRenderer.invoke('lantern:markConversationUnread', conversationId),
   clearConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:clearConversation', conversationId),
   forgetContactConversation: (conversationId: string) =>
