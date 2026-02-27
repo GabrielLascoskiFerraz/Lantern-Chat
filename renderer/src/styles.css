@@ -2352,6 +2352,23 @@ body {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 6px;
+  max-height: 152px;
+  overflow-y: auto;
+  padding-right: 4px;
+  align-content: start;
+}
+
+.emoji-grid::-webkit-scrollbar {
+  width: 8px;
+}
+
+.emoji-grid::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--teams-border) 70%, transparent);
+  border-radius: 999px;
+}
+
+.emoji-grid::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .emoji-choice {
@@ -2629,6 +2646,7 @@ body {
 
   .emoji-grid {
     grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+    max-height: 128px;
   }
 
   .emoji-group-tabs {
