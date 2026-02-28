@@ -65,6 +65,7 @@ const api = {
   saveFileAs: (filePath: string, fileName?: string): Promise<void> =>
     ipcRenderer.invoke('lantern:saveFileAs', filePath, fileName),
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('lantern:openExternalUrl', url),
+  nativePaste: (): Promise<boolean> => ipcRenderer.invoke('lantern:nativePaste'),
   getFilePreview: (filePath: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:getFilePreview', filePath),
   getFileInfo: (filePath: string): Promise<{

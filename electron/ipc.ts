@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
 import { AnnouncementReactionSummary, AppEvent, DbMessage, Peer, Profile } from './types';
 
 export interface IpcBindings {
@@ -114,8 +114,14 @@ export const registerIpc = (
     }
   };
 
+  const sanitizeClipboardText = (value: string): string =>
+    (value || '').replace(/\u0000+/g, '\n');
+
   const parseFileUri = (value: string): string | null => {
-    const trimmed = value.trim();
+    const trimmed = sanitizeClipboardText(value)
+      .trim()
+      .replace(/^['"<(]+/, '')
+      .replace(/[>'"),;]+$/, '');
     if (!trimmed.toLowerCase().startsWith('file://')) return null;
     try {
       const url = new URL(trimmed);
@@ -131,17 +137,27 @@ export const registerIpc = (
   };
 
   const parseUriList = (value: string): string[] => {
-    return value
+    const sanitized = sanitizeClipboardText(value);
+    const fromLines = sanitized
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'))
       .map((line) => parseFileUri(line))
       .filter((line): line is string => Boolean(line));
+
+    const fromInlineMatches =
+      sanitized
+        .match(/file:\/\/[^\s<>"'\u0000]+/gi)
+        ?.map((match) => parseFileUri(match))
+        .filter((line): line is string => Boolean(line)) || [];
+
+    return [...fromLines, ...fromInlineMatches];
   };
 
   const parseAbsolutePathsFromText = (value: string): string[] => {
     const paths: string[] = [];
-    const lines = value
+    const sanitized = sanitizeClipboardText(value);
+    const lines = sanitized
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
@@ -154,12 +170,33 @@ export const registerIpc = (
         paths.push(line);
       }
     }
+
+    const quotedPathMatches =
+      sanitized.match(/["']((?:\/|[a-zA-Z]:[\\/])[^"']+)["']/g)?.map((match) => {
+        const value = match.slice(1, -1).trim();
+        return value;
+      }) || [];
+    for (const match of quotedPathMatches) {
+      if (match.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(match)) {
+        paths.push(match);
+      }
+    }
+
+    const genericPathTokens =
+      sanitized.match(/(?:\/|[a-zA-Z]:[\\/])[^\s<>"'`|*?]+/g)?.map((token) => token.trim()) || [];
+    for (const token of genericPathTokens) {
+      if (token.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(token)) {
+        paths.push(token);
+      }
+    }
+
     return paths;
   };
 
   const parsePathsFromXmlLikeString = (value: string): string[] => {
     const paths: string[] = [];
-    const matches = value.match(/<string>([^<]+)<\/string>/g) || [];
+    const sanitized = sanitizeClipboardText(value);
+    const matches = sanitized.match(/<string>([^<]+)<\/string>/g) || [];
     for (const raw of matches) {
       const inner = raw.replace(/^<string>/, '').replace(/<\/string>$/, '').trim();
       if (!inner) continue;
@@ -202,6 +239,89 @@ export const registerIpc = (
       }
     }
     return Array.from(dedupe);
+  };
+
+  const saveClipboardBufferToTemp = async (
+    buffer: Buffer,
+    extension: string,
+    prefix = 'clipboard'
+  ): Promise<string | null> => {
+    if (!buffer || buffer.length === 0) return null;
+    await cleanupClipboardTempDir();
+    await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
+    const safeExt = (extension || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin';
+    const filePath = path.join(
+      CLIPBOARD_TEMP_DIR,
+      `${prefix}-${Date.now()}-${randomUUID()}.${safeExt}`
+    );
+    await fs.promises.writeFile(filePath, buffer);
+    return filePath;
+  };
+
+  const extractClipboardPathCandidates = (): string[] => {
+    const candidates: string[] = [];
+    const formats = clipboard.availableFormats();
+
+    const collectFromText = (value: string) => {
+      if (!value) return;
+      candidates.push(...parseUriList(value));
+      candidates.push(...parseAbsolutePathsFromText(value));
+      candidates.push(...parsePathsFromXmlLikeString(value));
+      const fromSingle = parseFileUri(value);
+      if (fromSingle) candidates.push(fromSingle);
+    };
+
+    collectFromText(clipboard.readText());
+
+    try {
+      const bookmark = clipboard.readBookmark() as unknown;
+      if (typeof bookmark === 'string') {
+        collectFromText(bookmark);
+      } else if (
+        bookmark &&
+        typeof bookmark === 'object' &&
+        'url' in (bookmark as Record<string, unknown>)
+      ) {
+        const url = (bookmark as Record<string, unknown>).url;
+        if (typeof url === 'string') {
+          collectFromText(url);
+        }
+      }
+    } catch {
+      // bookmark opcional
+    }
+
+    for (const format of formats) {
+      const lower = format.toLowerCase();
+      if (!(lower.includes('file') || lower.includes('uri'))) continue;
+
+      try {
+        const typedText = clipboard.read(format);
+        collectFromText(typedText);
+      } catch {
+        // alguns formatos não suportam read(string)
+      }
+
+      try {
+        const raw = clipboard.readBuffer(format);
+        if (raw.length <= 0) continue;
+        const utf8 = raw.toString('utf8');
+        const utf16 = raw.toString('utf16le');
+        collectFromText(utf8);
+        collectFromText(utf16);
+
+        for (const part of sanitizeClipboardText(utf8).split(/\r?\n/)) {
+          const trimmed = part.trim();
+          if (!trimmed) continue;
+          const fromSingle = parseFileUri(trimmed);
+          if (fromSingle) candidates.push(fromSingle);
+        }
+      } catch {
+        // ignora formatos sem buffer textual
+      }
+    }
+
+    return candidates;
   };
 
   ipcMain.handle('lantern:getProfile', () => bindings.getProfile());
@@ -325,6 +445,18 @@ export const registerIpc = (
     await shell.openExternal(url);
   });
 
+  ipcMain.handle('lantern:nativePaste', () => {
+    try {
+      if (!window.isDestroyed()) {
+        window.webContents.paste();
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  });
+
   ipcMain.handle('lantern:getFilePreview', async (_event, filePath: string) => {
     if (!filePath) return null;
     const resolved = path.resolve(filePath);
@@ -375,63 +507,21 @@ export const registerIpc = (
 
   ipcMain.handle('lantern:getClipboardFilePaths', async () => {
     await cleanupClipboardTempDir();
-    const candidates: string[] = [];
-    const formats = clipboard.availableFormats();
-
-    const text = clipboard.readText();
-    if (text) {
-      candidates.push(...parseUriList(text));
-      candidates.push(...parseAbsolutePathsFromText(text));
-      const fromSingle = parseFileUri(text);
-      if (fromSingle) candidates.push(fromSingle);
-    }
-
-    for (const format of formats) {
-      const lower = format.toLowerCase();
-      if (!(lower.includes('file') || lower.includes('uri'))) continue;
-
-      try {
-        const typedText = clipboard.read(format);
-        if (typedText) {
-          candidates.push(...parseUriList(typedText));
-          candidates.push(...parseAbsolutePathsFromText(typedText));
-          candidates.push(...parsePathsFromXmlLikeString(typedText));
-          const fromSingle = parseFileUri(typedText);
-          if (fromSingle) candidates.push(fromSingle);
-        }
-      } catch {
-        // alguns formatos não suportam read(string)
-      }
-
-      try {
-        const raw = clipboard.readBuffer(format);
-        if (raw.length > 0) {
-          const utf8 = raw.toString('utf8');
-          candidates.push(...parseUriList(utf8));
-          candidates.push(...parseAbsolutePathsFromText(utf8));
-          candidates.push(...parsePathsFromXmlLikeString(utf8));
-          const utf16 = raw.toString('utf16le');
-          const utf16Parts = utf16.split('\u0000').map((part) => part.trim()).filter(Boolean);
-          for (const part of utf16Parts) {
-            const fromSingle = parseFileUri(part);
-            if (fromSingle) candidates.push(fromSingle);
-            if (part.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(part)) {
-              candidates.push(part);
-            }
-          }
-        }
-      } catch {
-        // ignora formatos sem buffer textual
-      }
-    }
-
+    const candidates = extractClipboardPathCandidates();
     return normalizeClipboardPaths(candidates);
   });
 
-  ipcMain.handle('lantern:clipboardHasFileLikeData', () => {
-    const formats = clipboard.availableFormats();
-    const text = clipboard.readText();
-    return looksLikeFileClipboard(formats, text);
+  ipcMain.handle('lantern:clipboardHasFileLikeData', async () => {
+    const paths = await normalizeClipboardPaths(extractClipboardPathCandidates());
+    if (paths.length > 0) {
+      return true;
+    }
+    try {
+      const image = clipboard.readImage();
+      return !image.isEmpty();
+    } catch {
+      return false;
+    }
   });
 
   ipcMain.handle(
@@ -441,17 +531,29 @@ export const registerIpc = (
       const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
       if (!match) return null;
 
-      await cleanupClipboardTempDir();
-      await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
-      const safeExt =
-        (extension || match[1].split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
-      const filePath = path.join(
-        CLIPBOARD_TEMP_DIR,
-        `clipboard-${Date.now()}-${randomUUID()}.${safeExt}`
-      );
+      // Normaliza imagem de clipboard em PNG para manter preview consistente
+      // (alguns caminhos de paste entregam tipos não suportados pelo preview, ex: tiff/heic).
+      try {
+        const image = nativeImage.createFromDataURL(dataUrl);
+        if (!image.isEmpty()) {
+          const png = image.toPNG();
+          if (png.length > 0) {
+            return saveClipboardBufferToTemp(png, 'png', 'clipboard-image');
+          }
+        }
+      } catch {
+        // fallback abaixo
+      }
+
       const buffer = Buffer.from(match[2], 'base64');
-      await fs.promises.writeFile(filePath, buffer);
-      return filePath;
+      const requestedExt =
+        (extension || match[1].split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
+      const safeExt = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(
+        requestedExt.toLowerCase()
+      )
+        ? requestedExt
+        : 'png';
+      return saveClipboardBufferToTemp(buffer, safeExt, 'clipboard-image');
     }
   );
 

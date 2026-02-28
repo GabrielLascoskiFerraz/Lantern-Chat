@@ -148,6 +148,7 @@ interface LanternApi {
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
+  nativePaste: () => Promise<boolean>;
   getFilePreview: (filePath: string) => Promise<string | null>;
   getFileInfo: (filePath: string) => Promise<{
     name: string;
@@ -221,6 +222,7 @@ export const ipcClient = {
   openFile: (filePath: string) => window.lantern.openFile(filePath),
   saveFileAs: (filePath: string, fileName?: string) => window.lantern.saveFileAs(filePath, fileName),
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
+  nativePaste: () => window.lantern.nativePaste(),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),
   getFileInfo: (filePath: string) => window.lantern.getFileInfo(filePath),
   getClipboardFilePaths: () => window.lantern.getClipboardFilePaths(),

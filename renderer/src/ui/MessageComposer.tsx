@@ -988,93 +988,110 @@ export const MessageComposer = ({
     }, 170);
   };
 
-  const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
-    if (!onSendFile || disabled || isSubmitting) return;
-    const items = Array.from(event.clipboardData?.items || []);
-    const fileItems = items.filter((item) => item.kind === 'file');
-    if (fileItems.length > 0) {
-      event.preventDefault();
+  const processClipboardFiles = useCallback(
+    async (files: File[]): Promise<boolean> => {
+      if (files.length === 0 || !onSendFile || disabled || isSubmitting) {
+        return false;
+      }
+
       setIsPastingFiles(true);
       setPasteFeedback(null);
-      let pending = fileItems.length;
       let addedCount = 0;
+
       const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
         setPasteProgressItems((current) =>
           current.map((item) => (item.id === id ? { ...item, ...patch } : item))
         );
       };
-      const finishOne = () => {
-        pending -= 1;
-        if (pending <= 0) {
-          setIsPastingFiles(false);
-          if (addedCount > 0) {
-            setPasteFeedback(
-              `${addedCount} arquivo${addedCount > 1 ? 's' : ''} colado${addedCount > 1 ? 's' : ''}`
-            );
-          }
-        }
-      };
-      for (const item of fileItems) {
-        const file = item.getAsFile();
-        if (!file) {
-          finishOne();
-          continue;
-        }
-        const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${file.name}`;
-        setPasteProgressItems((current) => [
-          ...current,
-          {
-            id: pasteId,
-            name: file.name || 'arquivo',
-            progress: 2,
-            stage: 'reading'
-          }
-        ]);
-        const reader = new FileReader();
-        reader.onprogress = (progressEvent) => {
-          const total = progressEvent.total || file.size || 0;
-          if (!total) return;
-          const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
-          const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
-          updatePasteItem(pasteId, { progress, stage: 'reading' });
-        };
-        reader.onload = () => {
-          const dataUrl = typeof reader.result === 'string' ? reader.result : null;
-          if (!dataUrl) {
-            updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-            finishOne();
-            return;
-          }
-          updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
-          const isImage = file.type.startsWith('image/');
-          const extension =
-            (file.type.split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
-          const fileName = file.name && file.name.trim() ? file.name.trim() : undefined;
-          const savePromise = isImage
-            ? ipcClient.saveClipboardImage(dataUrl, extension)
-            : ipcClient.saveClipboardFileData(dataUrl, fileName);
-          void savePromise
-            .then((savedPath) => {
-              if (savedPath) {
-                addedCount += 1;
-                removePasteProgressItem(pasteId);
-                appendPendingFiles([savedPath]);
-              } else {
+
+      await Promise.all(
+        files.map(
+          (file) =>
+            new Promise<void>((resolve) => {
+              const itemName = (file.name || '').trim() || 'arquivo';
+              const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${itemName}`;
+              setPasteProgressItems((current) => [
+                ...current,
+                {
+                  id: pasteId,
+                  name: itemName,
+                  progress: 2,
+                  stage: 'reading'
+                }
+              ]);
+
+              const reader = new FileReader();
+              reader.onprogress = (progressEvent) => {
+                const total = progressEvent.total || file.size || 0;
+                if (!total) return;
+                const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
+                const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
+                updatePasteItem(pasteId, { progress, stage: 'reading' });
+              };
+
+              reader.onload = () => {
+                const dataUrl = typeof reader.result === 'string' ? reader.result : null;
+                if (!dataUrl) {
+                  updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                  resolve();
+                  return;
+                }
+                updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
+                const isImage = (file.type || '').startsWith('image/');
+                const extension =
+                  ((file.type || '').split('/')[1] || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin';
+                const fileName = itemName || undefined;
+                const savePromise = isImage
+                  ? ipcClient.saveClipboardImage(dataUrl, extension)
+                  : ipcClient.saveClipboardFileData(dataUrl, fileName);
+
+                void savePromise
+                  .then((savedPath) => {
+                    if (savedPath) {
+                      addedCount += 1;
+                      removePasteProgressItem(pasteId);
+                      appendPendingFiles([savedPath]);
+                    } else {
+                      updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                    }
+                  })
+                  .catch(() => {
+                    updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                  })
+                  .finally(() => resolve());
+              };
+
+              reader.onerror = () => {
                 updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-              }
-              finishOne();
+                resolve();
+              };
+
+              reader.readAsDataURL(file);
             })
-            .catch(() => {
-              updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-              finishOne();
-            });
-        };
-        reader.onerror = () => {
-          updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-          finishOne();
-        };
-        reader.readAsDataURL(file);
+        )
+      );
+
+      setIsPastingFiles(false);
+      if (addedCount > 0) {
+        setPasteFeedback(
+          `${addedCount} arquivo${addedCount > 1 ? 's' : ''} colado${addedCount > 1 ? 's' : ''}`
+        );
       }
+      return addedCount > 0;
+    },
+    [appendPendingFiles, disabled, isSubmitting, onSendFile, removePasteProgressItem]
+  );
+
+  const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    if (!onSendFile || disabled || isSubmitting) return;
+    const items = Array.from(event.clipboardData?.items || []);
+    const files = items
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length > 0) {
+      event.preventDefault();
+      void processClipboardFiles(files);
       return;
     }
 
@@ -1153,7 +1170,7 @@ export const MessageComposer = ({
 
     event.preventDefault();
     const menuWidth = 188;
-    const menuHeight = hasSelection ? 116 : 68;
+    const menuHeight = hasSelection ? 164 : 68;
     const rootRect = composerRootRef.current?.getBoundingClientRect();
     const rootLeft = rootRect?.left ?? 0;
     const rootTop = rootRect?.top ?? 0;
@@ -1195,44 +1212,8 @@ export const MessageComposer = ({
   const handlePasteAtCursor = async (): Promise<void> => {
     const textarea = getComposerTextarea();
     if (!textarea) return;
-
-    // Prioriza arquivo copiado no Finder/Explorer (menu de contexto "Colar").
-    if (onSendFile && !disabled && !isSubmitting) {
-      try {
-        const hasFileLikeData = await ipcClient.clipboardHasFileLikeData();
-        const paths = await ipcClient.getClipboardFilePaths();
-        if (paths && paths.length > 0) {
-          appendPendingFiles(paths);
-          setPasteFeedback(
-            `${paths.length} arquivo${paths.length > 1 ? 's' : ''} colado${paths.length > 1 ? 's' : ''}`
-          );
-          return;
-        }
-        if (hasFileLikeData) {
-          setPasteFeedback('Arquivo detectado no clipboard, mas não foi possível anexar.');
-          return;
-        }
-      } catch {
-        // fallback para texto
-      }
-    }
-
-    let clipboardText = '';
-    try {
-      clipboardText = await navigator.clipboard.readText();
-    } catch {
-      clipboardText = '';
-    }
-    if (!clipboardText) return;
-    const start = textarea.selectionStart ?? textarea.value.length;
-    const end = textarea.selectionEnd ?? start;
-    const nextValue = `${textarea.value.slice(0, start)}${clipboardText}${textarea.value.slice(end)}`;
-    const nextCursor = start + clipboardText.length;
-    setText(nextValue);
-    window.requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(nextCursor, nextCursor);
-    });
+    textarea.focus();
+    await ipcClient.nativePaste();
   };
 
   const showAttachmentPanel =
@@ -1485,7 +1466,7 @@ export const MessageComposer = ({
           style={{ left: textContextMenu.x, top: textContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          {textContextMenu.hasSelection ? (
+          {textContextMenu.hasSelection && (
             <>
               <button
                 type="button"
@@ -1514,21 +1495,20 @@ export const MessageComposer = ({
                 <span>Recortar</span>
               </button>
             </>
-          ) : (
-            <button
-              type="button"
-              className="chat-context-item"
-              onClick={() => {
-                void handlePasteAtCursor();
-                setTextContextMenu(null);
-              }}
-            >
-              <span className="menu-item-icon">
-                <ClipboardPaste20Regular />
-              </span>
-              <span>Colar</span>
-            </button>
           )}
+          <button
+            type="button"
+            className="chat-context-item"
+            onClick={() => {
+              void handlePasteAtCursor();
+              setTextContextMenu(null);
+            }}
+          >
+            <span className="menu-item-icon">
+              <ClipboardPaste20Regular />
+            </span>
+            <span>Colar</span>
+          </button>
         </div>
       )}
     </div>
