@@ -944,8 +944,21 @@ class LanternApp {
       this.removeManagedAttachment(existing.filePath);
     }
 
+    // Mensagens ainda não entregues funcionam como "cancelar envio":
+    // remove localmente e impede qualquer reenvio futuro (retry/sync).
+    const isPendingDelivery = existing.status !== 'delivered';
+
     const updated = this.db.deleteMessageForEveryone(messageId);
     if (!updated) return null;
+
+    if (isPendingDelivery) {
+      this.emitEvent({
+        type: 'message:removed',
+        conversationId: updated.conversationId,
+        messageId: updated.messageId
+      });
+      return updated;
+    }
 
     if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
       await this.sendBroadcast({
