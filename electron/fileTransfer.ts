@@ -41,13 +41,34 @@ export class FileTransferService {
     return this.attachmentsDir;
   }
 
+  private getChunkCount(totalBytes: number): number {
+    return Math.max(1, Math.ceil(totalBytes / FILE_CHUNK_SIZE_BYTES));
+  }
+
+  getChunkCountForSize(totalBytes: number): number {
+    return this.getChunkCount(totalBytes);
+  }
+
+  private async hashFileSha256(filePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const hash = createHash('sha256');
+      const stream = fs.createReadStream(filePath);
+
+      stream.on('data', (chunk) => {
+        hash.update(chunk);
+      });
+      stream.on('error', (error) => reject(error));
+      stream.on('end', () => resolve(hash.digest('hex')));
+    });
+  }
+
   async createOffer(
     _peerId: string,
     filePath: string,
     messageId: string,
     preferredFileId?: string,
     preferredFileName?: string
-  ): Promise<{ offer: FileOfferPayload; chunks: FileChunkPayload[] }> {
+  ): Promise<{ offer: FileOfferPayload }> {
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) {
       throw new Error('Caminho inválido: não é arquivo');
@@ -56,24 +77,9 @@ export class FileTransferService {
       throw new Error('Arquivo excede o limite de 200MB');
     }
 
-    const fileBuffer = await fs.promises.readFile(filePath);
-    const hash = createHash('sha256').update(fileBuffer).digest('hex');
+    const hash = await this.hashFileSha256(filePath);
     const fileId = preferredFileId || randomUUID();
     const filename = preferredFileName || path.basename(filePath);
-
-    const total = Math.ceil(fileBuffer.length / FILE_CHUNK_SIZE_BYTES);
-    const chunks: FileChunkPayload[] = [];
-
-    for (let i = 0; i < total; i += 1) {
-      const start = i * FILE_CHUNK_SIZE_BYTES;
-      const end = Math.min(start + FILE_CHUNK_SIZE_BYTES, fileBuffer.length);
-      chunks.push({
-        fileId,
-        index: i,
-        total,
-        dataBase64: fileBuffer.subarray(start, end).toString('base64')
-      });
-    }
 
     return {
       offer: {
@@ -82,9 +88,60 @@ export class FileTransferService {
         filename,
         size: stat.size,
         sha256: hash
-      },
-      chunks
+      }
     };
+  }
+
+  async *createChunkStream(
+    filePath: string,
+    fileId: string,
+    startIndex = 0
+  ): AsyncGenerator<FileChunkPayload, void, void> {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      throw new Error('Caminho inválido: não é arquivo');
+    }
+    if (stat.size > MAX_FILE_SIZE_BYTES) {
+      throw new Error('Arquivo excede o limite de 200MB');
+    }
+
+    const total = this.getChunkCount(stat.size);
+    const normalizedStart = Math.max(0, Math.min(startIndex, total));
+    if (normalizedStart >= total) {
+      return;
+    }
+
+    if (stat.size === 0) {
+      yield {
+        fileId,
+        index: 0,
+        total,
+        dataBase64: ''
+      };
+      return;
+    }
+
+    const startOffset = normalizedStart * FILE_CHUNK_SIZE_BYTES;
+    let index = normalizedStart;
+    const stream = fs.createReadStream(filePath, {
+      start: startOffset,
+      highWaterMark: FILE_CHUNK_SIZE_BYTES
+    });
+
+    try {
+      for await (const rawChunk of stream) {
+        const buffer = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        yield {
+          fileId,
+          index,
+          total,
+          dataBase64: buffer.toString('base64')
+        };
+        index += 1;
+      }
+    } finally {
+      stream.destroy();
+    }
   }
 
   startIncoming(fileOffer: FileOfferPayload, peerId: string): string {

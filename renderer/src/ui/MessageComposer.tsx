@@ -497,6 +497,99 @@ export const MessageComposer = ({
   const removePasteProgressItem = useCallback((id: string) => {
     setPasteProgressItems((current) => current.filter((item) => item.id !== id));
   }, []);
+  const processFileBlobsAsPending = useCallback(
+    async (files: File[], successVerb: 'anexado' | 'colado'): Promise<number> => {
+      if (files.length === 0 || !onSendFile || disabled || isSubmitting) {
+        return 0;
+      }
+
+      setIsPastingFiles(true);
+      setPasteFeedback(null);
+      let addedCount = 0;
+
+      const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
+        setPasteProgressItems((current) =>
+          current.map((item) => (item.id === id ? { ...item, ...patch } : item))
+        );
+      };
+
+      await Promise.all(
+        files.map(
+          (file) =>
+            new Promise<void>((resolve) => {
+              const itemName = (file.name || '').trim() || 'arquivo';
+              const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${itemName}`;
+              setPasteProgressItems((current) => [
+                ...current,
+                {
+                  id: pasteId,
+                  name: itemName,
+                  progress: 2,
+                  stage: 'reading'
+                }
+              ]);
+
+              const reader = new FileReader();
+              reader.onprogress = (progressEvent) => {
+                const total = progressEvent.total || file.size || 0;
+                if (!total) return;
+                const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
+                const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
+                updatePasteItem(pasteId, { progress, stage: 'reading' });
+              };
+
+              reader.onload = () => {
+                const dataUrl = typeof reader.result === 'string' ? reader.result : null;
+                if (!dataUrl) {
+                  updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                  resolve();
+                  return;
+                }
+                updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
+                const isImage = (file.type || '').startsWith('image/');
+                const extension =
+                  ((file.type || '').split('/')[1] || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin';
+                const fileName = itemName || undefined;
+                const savePromise = isImage
+                  ? ipcClient.saveClipboardImage(dataUrl, extension)
+                  : ipcClient.saveClipboardFileData(dataUrl, fileName);
+
+                void savePromise
+                  .then((savedPath) => {
+                    if (savedPath) {
+                      addedCount += 1;
+                      removePasteProgressItem(pasteId);
+                      appendPendingFiles([savedPath]);
+                    } else {
+                      updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                    }
+                  })
+                  .catch(() => {
+                    updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                  })
+                  .finally(() => resolve());
+              };
+
+              reader.onerror = () => {
+                updatePasteItem(pasteId, { progress: 100, stage: 'error' });
+                resolve();
+              };
+
+              reader.readAsDataURL(file);
+            })
+        )
+      );
+
+      setIsPastingFiles(false);
+      if (addedCount > 0) {
+        setPasteFeedback(
+          `${addedCount} arquivo${addedCount > 1 ? 's' : ''} ${successVerb}${addedCount > 1 ? 's' : ''}`
+        );
+      }
+      return addedCount;
+    },
+    [appendPendingFiles, disabled, isSubmitting, onSendFile, removePasteProgressItem]
+  );
   const normalizedEmojiSearch = useMemo(() => normalizeSearchTerm(emojiSearch), [emojiSearch]);
   const isEmojiSearching = normalizedEmojiSearch.length > 0;
   const emojiItems = useMemo(() => {
@@ -702,98 +795,10 @@ export const MessageComposer = ({
     const addDroppedPaths = (paths: string[]) => {
       if (paths.length === 0) return;
       const uniquePathSet = new Set(paths);
-      setPendingFilePaths((current) => {
-        const existing = new Set(current);
-        const merged = [...current];
-        for (const filePath of uniquePathSet) {
-          if (!existing.has(filePath)) {
-            merged.push(filePath);
-            existing.add(filePath);
-          }
-        }
-        return merged;
-      });
+      appendPendingFiles(Array.from(uniquePathSet));
       setPasteFeedback(
         `${uniquePathSet.size} arquivo${uniquePathSet.size > 1 ? 's' : ''} anexado${uniquePathSet.size > 1 ? 's' : ''}`
       );
-    };
-
-    const processDroppedFileBlobs = (files: File[]) => {
-      if (files.length === 0) return;
-      setIsPastingFiles(true);
-      setPasteFeedback(null);
-      let pending = files.length;
-      let addedCount = 0;
-
-      const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
-        setPasteProgressItems((current) =>
-          current.map((item) => (item.id === id ? { ...item, ...patch } : item))
-        );
-      };
-
-      const finishOne = () => {
-        pending -= 1;
-        if (pending <= 0) {
-          setIsPastingFiles(false);
-          if (addedCount > 0) {
-            setPasteFeedback(
-              `${addedCount} arquivo${addedCount > 1 ? 's' : ''} anexado${addedCount > 1 ? 's' : ''}`
-            );
-          }
-        }
-      };
-
-      for (const file of files) {
-        const itemName = file.name || 'arquivo';
-        const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${itemName}`;
-        setPasteProgressItems((current) => [
-          ...current,
-          {
-            id: pasteId,
-            name: itemName,
-            progress: 2,
-            stage: 'reading'
-          }
-        ]);
-
-        const reader = new FileReader();
-        reader.onprogress = (progressEvent) => {
-          const total = progressEvent.total || file.size || 0;
-          if (!total) return;
-          const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
-          const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
-          updatePasteItem(pasteId, { progress, stage: 'reading' });
-        };
-        reader.onload = () => {
-          const dataUrl = typeof reader.result === 'string' ? reader.result : null;
-          if (!dataUrl) {
-            updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-            finishOne();
-            return;
-          }
-          updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
-          void ipcClient
-            .saveClipboardFileData(dataUrl, itemName)
-            .then((savedPath) => {
-              if (savedPath) {
-                addedCount += 1;
-                removePasteProgressItem(pasteId);
-                appendPendingFiles([savedPath]);
-              } else {
-                updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-              }
-            })
-            .catch(() => {
-              updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-            })
-            .finally(() => finishOne());
-        };
-        reader.onerror = () => {
-          updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-          finishOne();
-        };
-        reader.readAsDataURL(file);
-      }
     };
 
     const onDragEnter = (event: DragEvent) => {
@@ -841,7 +846,11 @@ export const MessageComposer = ({
         return;
       }
       if (droppedFiles.length > 0) {
-        processDroppedFileBlobs(droppedFiles);
+        void processFileBlobsAsPending(droppedFiles, 'anexado').then((addedCount) => {
+          if (addedCount <= 0) {
+            setPasteFeedback('Não foi possível anexar os arquivos soltos.');
+          }
+        });
         return;
       }
       setPasteFeedback('Não foi possível anexar os arquivos soltos.');
@@ -860,7 +869,7 @@ export const MessageComposer = ({
       dragDepthRef.current = 0;
       dragOverlayVisibleRef.current = false;
     };
-  }, [appendPendingFiles, disabled, isSubmitting, onSendFile, removePasteProgressItem]);
+  }, [appendPendingFiles, disabled, isSubmitting, onSendFile, processFileBlobsAsPending]);
 
   useEffect(() => {
     if (pasteProgressItems.length === 0) return;
@@ -992,96 +1001,13 @@ export const MessageComposer = ({
 
   const processClipboardFiles = useCallback(
     async (files: File[]): Promise<boolean> => {
-      if (files.length === 0 || !onSendFile || disabled || isSubmitting) {
+      if (files.length === 0) {
         return false;
       }
-
-      setIsPastingFiles(true);
-      setPasteFeedback(null);
-      let addedCount = 0;
-
-      const updatePasteItem = (id: string, patch: Partial<PasteProgressItem>) => {
-        setPasteProgressItems((current) =>
-          current.map((item) => (item.id === id ? { ...item, ...patch } : item))
-        );
-      };
-
-      await Promise.all(
-        files.map(
-          (file) =>
-            new Promise<void>((resolve) => {
-              const itemName = (file.name || '').trim() || 'arquivo';
-              const pasteId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${itemName}`;
-              setPasteProgressItems((current) => [
-                ...current,
-                {
-                  id: pasteId,
-                  name: itemName,
-                  progress: 2,
-                  stage: 'reading'
-                }
-              ]);
-
-              const reader = new FileReader();
-              reader.onprogress = (progressEvent) => {
-                const total = progressEvent.total || file.size || 0;
-                if (!total) return;
-                const fraction = Math.max(0, Math.min(1, progressEvent.loaded / total));
-                const progress = Math.max(4, Math.min(86, Math.round(fraction * 86)));
-                updatePasteItem(pasteId, { progress, stage: 'reading' });
-              };
-
-              reader.onload = () => {
-                const dataUrl = typeof reader.result === 'string' ? reader.result : null;
-                if (!dataUrl) {
-                  updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-                  resolve();
-                  return;
-                }
-                updatePasteItem(pasteId, { progress: 92, stage: 'saving' });
-                const isImage = (file.type || '').startsWith('image/');
-                const extension =
-                  ((file.type || '').split('/')[1] || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin';
-                const fileName = itemName || undefined;
-                const savePromise = isImage
-                  ? ipcClient.saveClipboardImage(dataUrl, extension)
-                  : ipcClient.saveClipboardFileData(dataUrl, fileName);
-
-                void savePromise
-                  .then((savedPath) => {
-                    if (savedPath) {
-                      addedCount += 1;
-                      removePasteProgressItem(pasteId);
-                      appendPendingFiles([savedPath]);
-                    } else {
-                      updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-                    }
-                  })
-                  .catch(() => {
-                    updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-                  })
-                  .finally(() => resolve());
-              };
-
-              reader.onerror = () => {
-                updatePasteItem(pasteId, { progress: 100, stage: 'error' });
-                resolve();
-              };
-
-              reader.readAsDataURL(file);
-            })
-        )
-      );
-
-      setIsPastingFiles(false);
-      if (addedCount > 0) {
-        setPasteFeedback(
-          `${addedCount} arquivo${addedCount > 1 ? 's' : ''} colado${addedCount > 1 ? 's' : ''}`
-        );
-      }
+      const addedCount = await processFileBlobsAsPending(files, 'colado');
       return addedCount > 0;
     },
-    [appendPendingFiles, disabled, isSubmitting, onSendFile, removePasteProgressItem]
+    [processFileBlobsAsPending]
   );
 
   const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {

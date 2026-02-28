@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
+  FILE_CHUNK_SIZE_BYTES,
   MAX_FILE_SIZE_BYTES,
   sanitizeFileName
 } from '../config';
@@ -14,7 +15,6 @@ import {
   AppEvent,
   ChatTextPayload,
   DbMessage,
-  FileChunkPayload,
   FileOfferPayload,
   Peer,
   Profile,
@@ -61,11 +61,45 @@ export class MessageService {
     this.onPeerUnreachable(peer.deviceId);
   }
 
+  private async streamFileChunksToPeer(
+    peer: Peer,
+    messageId: string,
+    offer: FileOfferPayload,
+    filePath: string,
+    startIndex = 0
+  ): Promise<void> {
+    let transferred = Math.min(offer.size, Math.max(0, startIndex) * FILE_CHUNK_SIZE_BYTES);
+    for await (const chunk of this.fileTransfer.createChunkStream(filePath, offer.fileId, startIndex)) {
+      transferred = Math.min(offer.size, transferred + Buffer.byteLength(chunk.dataBase64, 'base64'));
+      await this.sendToPeer(peer, this.fileTransfer.buildChunkFrame(peer.deviceId, chunk));
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'send',
+        fileId: offer.fileId,
+        messageId,
+        peerId: peer.deviceId,
+        transferred,
+        total: offer.size
+      });
+    }
+
+    await this.sendToPeer(peer, this.fileTransfer.buildCompleteFrame(peer.deviceId, offer.fileId));
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'send',
+      fileId: offer.fileId,
+      messageId,
+      peerId: peer.deviceId,
+      transferred: offer.size,
+      total: offer.size
+    });
+  }
+
   private async sendFileFramesInBackground(
     peer: Peer,
     message: DbMessage,
     offer: FileOfferPayload,
-    chunks: FileChunkPayload[]
+    filePath: string
   ): Promise<void> {
     const transferKey = `${peer.deviceId}:${message.messageId}`;
     if (this.inFlightFileTransfers.has(transferKey)) {
@@ -74,32 +108,7 @@ export class MessageService {
     this.inFlightFileTransfers.add(transferKey);
     try {
       await this.sendToPeer(peer, this.fileTransfer.buildOfferFrame(peer.deviceId, offer, message.createdAt));
-
-      let transferred = 0;
-      for (const chunk of chunks) {
-        transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
-        await this.sendToPeer(peer, this.fileTransfer.buildChunkFrame(peer.deviceId, chunk));
-        this.emitEvent({
-          type: 'transfer:progress',
-          direction: 'send',
-          fileId: offer.fileId,
-          messageId: message.messageId,
-          peerId: peer.deviceId,
-          transferred,
-          total: offer.size
-        });
-      }
-
-      await this.sendToPeer(peer, this.fileTransfer.buildCompleteFrame(peer.deviceId, offer.fileId));
-      this.emitEvent({
-        type: 'transfer:progress',
-        direction: 'send',
-        fileId: offer.fileId,
-        messageId: message.messageId,
-        peerId: peer.deviceId,
-        transferred: offer.size,
-        total: offer.size
-      });
+      await this.streamFileChunksToPeer(peer, message.messageId, offer, filePath, 0);
     } catch {
       this.markUnreachable(peer);
       // Mantém como "sent/pendente" para reenvio automático quando o peer voltar online.
@@ -210,7 +219,7 @@ export class MessageService {
     );
     const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
     const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
-    const { offer, chunks } = await this.fileTransfer.createOffer(peerId, managedFilePath, messageId);
+    const { offer } = await this.fileTransfer.createOffer(peerId, managedFilePath, messageId);
     this.deleteClipboardTempFile(filePath);
 
     if (offer.size > MAX_FILE_SIZE_BYTES) {
@@ -251,7 +260,7 @@ export class MessageService {
       if (!peer) {
         return;
       }
-      void this.sendFileFramesInBackground(peer, message, offer, chunks);
+      void this.sendFileFramesInBackground(peer, message, offer, managedFilePath);
     });
 
     return message;
@@ -341,7 +350,7 @@ export class MessageService {
       }
       this.inFlightFileTransfers.add(transferKey);
       try {
-        const { offer, chunks } = await this.fileTransfer.createOffer(
+        const { offer } = await this.fileTransfer.createOffer(
           peer.deviceId,
           fileMessage.filePath,
           fileMessage.messageId,
@@ -353,24 +362,7 @@ export class MessageService {
           peer,
           this.fileTransfer.buildOfferFrame(peer.deviceId, offer, fileMessage.createdAt)
         );
-        let transferred = 0;
-        for (const chunk of chunks) {
-          transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
-          await this.sendToPeer(peer, this.fileTransfer.buildChunkFrame(peer.deviceId, chunk));
-          this.emitEvent({
-            type: 'transfer:progress',
-            direction: 'send',
-            fileId: offer.fileId,
-            messageId: fileMessage.messageId,
-            peerId: peer.deviceId,
-            transferred,
-            total: offer.size
-          });
-        }
-        await this.sendToPeer(
-          peer,
-          this.fileTransfer.buildCompleteFrame(peer.deviceId, offer.fileId)
-        );
+        await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, 0);
       } catch {
         this.markUnreachable(peer);
         break;
@@ -385,31 +377,15 @@ export class MessageService {
       return;
     }
 
-    const { offer, chunks } = await this.fileTransfer.createOffer(
+    const { offer } = await this.fileTransfer.createOffer(
       peer.deviceId,
       fileMessage.filePath,
       fileMessage.messageId,
       fileMessage.fileId,
       fileMessage.fileName || undefined
     );
-
-    const startIndex = Math.max(0, Math.min(nextIndex, chunks.length));
-    let transferred = 0;
-    for (let i = startIndex; i < chunks.length; i += 1) {
-      const chunk = chunks[i];
-      transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
-      await this.sendToPeer(peer, this.fileTransfer.buildChunkFrame(peer.deviceId, chunk));
-      this.emitEvent({
-        type: 'transfer:progress',
-        direction: 'send',
-        fileId: offer.fileId,
-        messageId: fileMessage.messageId,
-        peerId: peer.deviceId,
-        transferred,
-        total: offer.size
-      });
-    }
-
-    await this.sendToPeer(peer, this.fileTransfer.buildCompleteFrame(peer.deviceId, offer.fileId));
+    const totalChunks = this.fileTransfer.getChunkCountForSize(offer.size);
+    const startIndex = Math.max(0, Math.min(nextIndex, totalChunks));
+    await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, startIndex);
   }
 }

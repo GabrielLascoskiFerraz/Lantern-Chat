@@ -165,7 +165,7 @@ No cliente (`app.getPath("userData")`):
 - `lantern.db`
 
 Anexos baixados (default):
-- `Downloads/Lantern Attachments`
+- `Documentos/Lantern Attachments`
 
 ## Comportamento do app
 
