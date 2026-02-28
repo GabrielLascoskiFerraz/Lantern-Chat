@@ -32,6 +32,7 @@
     "build:dist:linux": "node ./scripts/build-dist.cjs linux",
     "build:win": "npm run build:renderer && npm run build:electron && npm run build:dist:win",
     "build:mac": "npm run build:renderer && npm run build:electron && npm run build:dist:mac",
+    "build:mac-win:from-mac": "node ./scripts/build-mac-win-from-mac.cjs",
     "build:linux": "npm run build:renderer && npm run build:electron && npm run build:dist:linux",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",

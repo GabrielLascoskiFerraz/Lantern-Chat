@@ -75,21 +75,31 @@ class LanternApp {
   }
 
   private resolveAppIconPath(): string | null {
-    const iconFile = process.platform === 'darwin' ? 'icon.icns' : 'icon.png';
-    const candidates = [
-      path.join(app.getAppPath(), 'assets', iconFile),
-      path.join(__dirname, '..', 'assets', iconFile),
-      path.join(process.cwd(), 'assets', iconFile),
-      path.join(process.resourcesPath, 'assets', iconFile),
-      path.join(process.resourcesPath, 'app.asar', 'assets', iconFile),
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', iconFile),
-      path.join(app.getAppPath(), 'build', 'icon.png'),
-      path.join(__dirname, '..', 'build', 'icon.png'),
-      path.join(process.cwd(), 'build', 'icon.png'),
-      path.join(process.resourcesPath, 'build', 'icon.png'),
-      path.join(process.resourcesPath, 'app.asar', 'build', 'icon.png'),
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'build', 'icon.png')
-    ];
+    const preferredIconFiles =
+      process.platform === 'darwin'
+        ? ['icon.icns', 'icon.png']
+        : process.platform === 'win32'
+        ? ['icon.ico', 'icon.png']
+        : ['icon.png'];
+
+    const candidates: string[] = [];
+    for (const iconFile of preferredIconFiles) {
+      candidates.push(
+        path.join(app.getAppPath(), 'assets', iconFile),
+        path.join(__dirname, '..', 'assets', iconFile),
+        path.join(process.cwd(), 'assets', iconFile),
+        path.join(process.resourcesPath, 'assets', iconFile),
+        path.join(process.resourcesPath, 'app.asar', 'assets', iconFile),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', iconFile),
+        path.join(app.getAppPath(), 'build', iconFile),
+        path.join(__dirname, '..', 'build', iconFile),
+        path.join(process.cwd(), 'build', iconFile),
+        path.join(process.resourcesPath, 'build', iconFile),
+        path.join(process.resourcesPath, 'app.asar', 'build', iconFile),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'build', iconFile)
+      );
+    }
+
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
         return candidate;

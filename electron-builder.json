@@ -13,7 +13,7 @@
   ],
   "asar": true,
   "win": {
-    "icon": "assets/icon.png",
+    "icon": "assets/icon.ico",
     "target": ["nsis"],
     "artifactName": "Lantern-Setup-${version}.${ext}"
   },
@@ -25,8 +25,8 @@
   },
   "nsis": {
     "oneClick": false,
-    "installerIcon": "assets/icon.png",
-    "uninstallerIcon": "assets/icon.png",
+    "installerIcon": "assets/icon.ico",
+    "uninstallerIcon": "assets/icon.ico",
     "allowToChangeInstallationDirectory": true,
     "perMachine": false
   }
