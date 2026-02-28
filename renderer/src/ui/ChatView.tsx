@@ -270,6 +270,11 @@ export const ChatView = ({
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const scrollMetricsRef = useRef<{ top: number; height: number; client: number }>({
+    top: 0,
+    height: 0,
+    client: 0
+  });
 
   const closeSelectionContextMenu = useCallback(() => {
     setSelectionContextMenu(null);
@@ -333,6 +338,8 @@ export const ChatView = ({
   const stickToBottomRef = useRef(true);
   const forceScrollOnOpenRef = useRef(false);
   const forceScrollTimeoutRef = useRef<number | null>(null);
+  const forceFollowAfterPasteRef = useRef(false);
+  const forceFollowAfterPasteTimeoutRef = useRef<number | null>(null);
   const hasMoreOlderRef = useRef(hasMoreOlder);
   const loadingOlderRef = useRef(loadingOlder);
   const searchJumpInFlightRef = useRef(false);
@@ -412,6 +419,39 @@ export const ChatView = ({
     }
   };
 
+  const isComposerFocused = (): boolean => {
+    const root = paneRootRef.current;
+    if (!root) return false;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return false;
+    const textarea = root.querySelector('.composer textarea');
+    return textarea instanceof HTMLTextAreaElement && active === textarea;
+  };
+
+  const handleComposerPaste = useCallback(() => {
+    const node = messagesScrollRef.current;
+    if (!node) return;
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    if (gap <= 160) {
+      stickToBottomRef.current = true;
+    }
+    forceFollowAfterPasteRef.current = true;
+    if (forceFollowAfterPasteTimeoutRef.current) {
+      window.clearTimeout(forceFollowAfterPasteTimeoutRef.current);
+      forceFollowAfterPasteTimeoutRef.current = null;
+    }
+    forceFollowAfterPasteTimeoutRef.current = window.setTimeout(() => {
+      forceFollowAfterPasteRef.current = false;
+      forceFollowAfterPasteTimeoutRef.current = null;
+    }, 2800);
+    window.requestAnimationFrame(() => {
+      maybeFollowBottom(true, 'auto');
+      window.requestAnimationFrame(() => {
+        maybeFollowBottom(true, 'auto');
+      });
+    });
+  }, []);
+
   const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
     const node = messagesScrollRef.current;
     if (!node) return 0;
@@ -438,17 +478,62 @@ export const ChatView = ({
     const node = messagesScrollRef.current;
     if (!node) return;
 
+    const snapshotMetrics = () => {
+      scrollMetricsRef.current = {
+        top: node.scrollTop,
+        height: node.scrollHeight,
+        client: node.clientHeight
+      };
+    };
+
     const onScroll = () => {
-      stickToBottomRef.current = isNearBottom();
+      const previous = scrollMetricsRef.current;
+      const current = {
+        top: node.scrollTop,
+        height: node.scrollHeight,
+        client: node.clientHeight
+      };
+      const layoutShiftOnly =
+        stickToBottomRef.current &&
+        Math.abs(current.top - previous.top) <= 1 &&
+        (Math.abs(current.client - previous.client) > 1 || Math.abs(current.height - previous.height) > 1);
+
+      stickToBottomRef.current = layoutShiftOnly ? true : isNearBottom();
       if (node.scrollTop <= 56 && hasMoreOlderRef.current && !loadingOlderRef.current) {
         void loadOlderWithViewportLock();
       }
+      scrollMetricsRef.current = current;
     };
 
     stickToBottomRef.current = isNearBottom();
+    snapshotMetrics();
     node.addEventListener('scroll', onScroll, { passive: true });
     return () => node.removeEventListener('scroll', onScroll);
   }, [peer?.deviceId, loadOlderWithViewportLock]);
+
+  useEffect(() => {
+    if (normalizedQuery) return;
+    const node = messagesScrollRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (!(stickToBottomRef.current || isNearBottom())) return;
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+      }
+      frame = window.requestAnimationFrame(() => {
+        maybeFollowBottom(true, 'auto');
+        frame = null;
+      });
+    });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, [normalizedQuery]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -475,6 +560,7 @@ export const ChatView = ({
   useEffect(() => {
     if (normalizedQuery) return;
     const lastMessage = messages[messages.length - 1];
+    const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
     const isOutgoingFileTransfer =
       Boolean(lastMessage) &&
       lastMessage.type === 'file' &&
@@ -482,7 +568,7 @@ export const ChatView = ({
       (lastMessage.direction === 'out' || lastMessage.senderDeviceId === localProfile.deviceId) &&
       Boolean(lastMessage.fileId && transferByFileId[lastMessage.fileId]);
     const frame = window.requestAnimationFrame(() => {
-      maybeFollowBottom(isOutgoingFileTransfer, 'auto');
+      maybeFollowBottom(isOutgoingFileTransfer || forceForComposer, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
   }, [transferByFileId, normalizedQuery, messages, localProfile.deviceId]);
@@ -612,7 +698,7 @@ export const ChatView = ({
     if (normalizedQuery) return;
     const frame = window.requestAnimationFrame(() => {
       // Enquanto a conversa acabou de abrir, força manter no fim mesmo com imagens revelando.
-      if (forceScrollOnOpenRef.current) {
+      if (forceScrollOnOpenRef.current || forceFollowAfterPasteRef.current) {
         maybeFollowBottom(true, 'auto');
         return;
       }
@@ -627,10 +713,12 @@ export const ChatView = ({
     const currentLastId = messages.length > 0 ? messages[messages.length - 1].messageId : null;
     const previousLastId = lastMessageIdRef.current;
     const hasNewTailMessage = currentLastId !== null && currentLastId !== previousLastId;
+    const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
 
-    if (forceScrollOnOpenRef.current || hasNewTailMessage) {
+    if (forceScrollOnOpenRef.current || hasNewTailMessage || forceForComposer) {
       const shouldForceFollow =
         forceScrollOnOpenRef.current ||
+        forceForComposer ||
         Boolean(
           hasNewTailMessage &&
             currentLastMessage &&
@@ -653,6 +741,10 @@ export const ChatView = ({
       if (forceScrollTimeoutRef.current) {
         window.clearTimeout(forceScrollTimeoutRef.current);
         forceScrollTimeoutRef.current = null;
+      }
+      if (forceFollowAfterPasteTimeoutRef.current) {
+        window.clearTimeout(forceFollowAfterPasteTimeoutRef.current);
+        forceFollowAfterPasteTimeoutRef.current = null;
       }
     },
     []
@@ -1146,6 +1238,7 @@ export const ChatView = ({
         onSend={onSend}
         onTypingChange={onTyping}
         onSendFile={onSendFile}
+        onPaste={handleComposerPaste}
       />
 
       <ConfirmDialog

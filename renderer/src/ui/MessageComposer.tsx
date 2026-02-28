@@ -22,6 +22,7 @@ interface MessageComposerProps {
   onSend: (text: string) => Promise<void>;
   onTypingChange?: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string) => Promise<void>;
+  onPaste?: () => void;
   placeholder: string;
 }
 
@@ -447,6 +448,7 @@ export const MessageComposer = ({
   onSend,
   onTypingChange,
   onSendFile,
+  onPaste,
   placeholder
 }: MessageComposerProps) => {
   const [text, setText] = useState('');
@@ -1083,6 +1085,7 @@ export const MessageComposer = ({
   );
 
   const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    onPaste?.();
     if (!onSendFile || disabled || isSubmitting) return;
     const items = Array.from(event.clipboardData?.items || []);
     const files = items
@@ -1212,8 +1215,16 @@ export const MessageComposer = ({
   const handlePasteAtCursor = async (): Promise<void> => {
     const textarea = getComposerTextarea();
     if (!textarea) return;
+    onPaste?.();
     textarea.focus();
     await ipcClient.nativePaste();
+    window.requestAnimationFrame(() => {
+      const target = getComposerTextarea();
+      if (!target) return;
+      target.focus();
+      const end = target.value.length;
+      target.setSelectionRange(end, end);
+    });
   };
 
   const showAttachmentPanel =
@@ -1500,8 +1511,8 @@ export const MessageComposer = ({
             type="button"
             className="chat-context-item"
             onClick={() => {
-              void handlePasteAtCursor();
               setTextContextMenu(null);
+              void handlePasteAtCursor();
             }}
           >
             <span className="menu-item-icon">
