@@ -117,14 +117,53 @@ Opções úteis:
 - `npm run build:mac-win:from-mac -- --win-skip-rcedit` (use apenas se houver falha de Wine/rcedit no build Windows)
 
 Saídas esperadas:
-- `dist-installers/Lantern-<versão>-<arch>.dmg`
-- `dist-installers/Lantern-<versão>-<arch>.zip`
+- `dist-installers/Lantern-<versão>-universal.dmg`
+- `dist-installers/Lantern-<versão>-universal.zip`
 - `dist-installers/Lantern-Setup-<versão>.exe`
 - `dist-relay/LanternRelay-mac-<arch>`
 - `dist-relay/LanternRelay.exe`
 
 Observação:
 - Durante o build do Relay, mensagens como `No available node version satisfies 'node20'` podem aparecer. O script tenta fallback automático (ex.: `node18`) e segue normalmente se houver target compatível.
+
+### Build + publicação automática no GitHub Release (macOS)
+
+Se quiser compilar e publicar tudo em uma release do GitHub no mesmo fluxo:
+
+```bash
+npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+```
+
+Pré-requisitos:
+
+```bash
+brew install gh
+gh auth login
+```
+
+Esse comando:
+- roda o build completo macOS + Windows + Relay
+- prepara artefatos nomeados para release:
+  - `client-lantern-windows-setup.exe`
+  - `server-relay-windows.zip`
+  - `client-lantern-mac-universal.dmg`
+  - `server-relay-mac.zip`
+- cria/atualiza a release no GitHub
+- faz upload dos arquivos automaticamente
+
+Opções úteis:
+- simular sem executar:  
+  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --dry-run`
+- publicar com artefatos já gerados:  
+  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --skip-build`
+- usar notas customizadas:  
+  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --notes-file ./RELEASE_NOTES.md`
+
+Se o `gh` não estiver no PATH, force o binário manualmente:
+
+```bash
+GH_BIN=/opt/homebrew/bin/gh npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+```
 
 ### Build explícito por plataforma
 
@@ -218,6 +257,18 @@ Anexos baixados (default):
 ```bash
 npm install
 ```
+
+### macOS mostra "app danificado" / "mover para o lixo"
+
+Isso normalmente é bloqueio do Gatekeeper em app não notarizado baixado da internet (ex.: GitHub Release).
+
+Opção rápida (máquina de teste/local):
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Lantern.app"
+```
+
+Para distribuição pública sem alerta no macOS, é necessário assinar e notarizar com certificado Apple.
 
 ### Erros de dependência nativa (`better-sqlite3`)
 

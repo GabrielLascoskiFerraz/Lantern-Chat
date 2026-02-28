@@ -18,8 +18,8 @@ Opcoes:
   --help                Exibe esta ajuda.
 
 Saida esperada:
-  dist-installers/Lantern-<versao>-<arch>.dmg
-  dist-installers/Lantern-<versao>-<arch>.zip
+  dist-installers/Lantern-<versao>-universal.dmg
+  dist-installers/Lantern-<versao>-universal.zip
   dist-installers/Lantern-Setup-<versao>.exe
   dist-relay/LanternRelay-mac-<arch>
   dist-relay/LanternRelay.exe
@@ -43,7 +43,6 @@ const winSkipRcedit = args.has('--win-skip-rcedit');
 
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-const macArchFlag = process.arch === 'arm64' ? '--arm64' : '--x64';
 const relayMacTargetArg = process.arch === 'arm64' ? 'mac-arm64' : 'mac-x64';
 
 const run = (label, command, commandArgs) => {
@@ -87,7 +86,7 @@ const main = () => {
     '--yes',
     'electron-builder',
     '--mac',
-    macArchFlag,
+    '--universal',
     '--publish',
     'never'
   ]);
