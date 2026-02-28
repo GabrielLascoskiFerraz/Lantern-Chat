@@ -94,6 +94,38 @@ http://<IP_DO_RELAY>:43190/health
 npm run build
 ```
 
+### Build completo no macOS (cliente + relay para macOS e Windows)
+
+Se você estiver no macOS e quiser gerar tudo em um comando (app + relay para as duas plataformas):
+
+```bash
+npm run build:mac-win:from-mac
+```
+
+Esse script executa:
+- build do renderer e Electron
+- instalador do cliente macOS
+- instalador do cliente Windows x64
+- binário do Relay para macOS
+- binário do Relay para Windows x64
+- `npm run rebuild:native` no final (para manter o ambiente de desenvolvimento no Mac funcionando)
+
+Opções úteis:
+- `npm run build:mac-win:from-mac -- --dry-run`
+- `npm run build:mac-win:from-mac -- --skip-install`
+- `npm run build:mac-win:from-mac -- --skip-native-repair`
+- `npm run build:mac-win:from-mac -- --win-skip-rcedit` (use apenas se houver falha de Wine/rcedit no build Windows)
+
+Saídas esperadas:
+- `dist-installers/Lantern-<versão>-<arch>.dmg`
+- `dist-installers/Lantern-<versão>-<arch>.zip`
+- `dist-installers/Lantern-Setup-<versão>.exe`
+- `dist-relay/LanternRelay-mac-<arch>`
+- `dist-relay/LanternRelay.exe`
+
+Observação:
+- Durante o build do Relay, mensagens como `No available node version satisfies 'node20'` podem aparecer. O script tenta fallback automático (ex.: `node18`) e segue normalmente se houver target compatível.
+
 ### Build explícito por plataforma
 
 - Windows: `npm run build:win`
