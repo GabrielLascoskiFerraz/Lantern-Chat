@@ -968,7 +968,28 @@ body {
   display: flex;
   justify-content: center;
   margin: 8px 0 6px;
+  max-height: 40px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 220ms var(--motion-ease-standard),
+    transform 220ms var(--motion-ease-standard),
+    max-height 220ms var(--motion-ease-standard),
+    margin 220ms var(--motion-ease-standard);
+}
+
+.messages-new-separator.is-visible {
   animation: fadeUpIn 180ms ease;
+}
+
+.messages-new-separator.is-leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+  max-height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  pointer-events: none;
 }
 
 .messages-new-separator span {

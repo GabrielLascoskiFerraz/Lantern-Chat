@@ -564,6 +564,7 @@ export class RelayClient {
     return new Promise<RelaySendResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingAcks.delete(frame.messageId);
+        this.forceSocketDisconnect();
         reject(new Error('Timeout aguardando confirmação do relay.'));
       }, ACK_TIMEOUT_MS);
       timeout.unref?.();

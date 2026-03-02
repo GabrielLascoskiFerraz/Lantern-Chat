@@ -308,7 +308,7 @@ export const ChatView = ({
     selectedText: string;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
-  const [showUnreadSeparator, setShowUnreadSeparator] = useState(false);
+  const [unreadSeparatorState, setUnreadSeparatorState] = useState<'hidden' | 'visible' | 'leaving'>('hidden');
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -316,7 +316,8 @@ export const ChatView = ({
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const jumpHighlightTimeoutRef = useRef<number | null>(null);
-  const unreadSeparatorTimeoutRef = useRef<number | null>(null);
+  const unreadSeparatorHideTimeoutRef = useRef<number | null>(null);
+  const unreadSeparatorUnmountTimeoutRef = useRef<number | null>(null);
   const scrollMetricsRef = useRef<{ top: number; height: number; client: number }>({
     top: 0,
     height: 0,
@@ -504,23 +505,37 @@ export const ChatView = ({
   }, [conversationId]);
 
   useEffect(() => {
-    if (unreadSeparatorTimeoutRef.current) {
-      window.clearTimeout(unreadSeparatorTimeoutRef.current);
-      unreadSeparatorTimeoutRef.current = null;
+    if (unreadSeparatorHideTimeoutRef.current) {
+      window.clearTimeout(unreadSeparatorHideTimeoutRef.current);
+      unreadSeparatorHideTimeoutRef.current = null;
+    }
+    if (unreadSeparatorUnmountTimeoutRef.current) {
+      window.clearTimeout(unreadSeparatorUnmountTimeoutRef.current);
+      unreadSeparatorUnmountTimeoutRef.current = null;
     }
     if (!unreadAnchorMessageId || unreadAtOpen <= 0) {
-      setShowUnreadSeparator(false);
+      setUnreadSeparatorState('hidden');
       return;
     }
-    setShowUnreadSeparator(true);
-    unreadSeparatorTimeoutRef.current = window.setTimeout(() => {
-      setShowUnreadSeparator(false);
-      unreadSeparatorTimeoutRef.current = null;
+
+    setUnreadSeparatorState('visible');
+    unreadSeparatorHideTimeoutRef.current = window.setTimeout(() => {
+      setUnreadSeparatorState('leaving');
+      unreadSeparatorHideTimeoutRef.current = null;
+      unreadSeparatorUnmountTimeoutRef.current = window.setTimeout(() => {
+        setUnreadSeparatorState('hidden');
+        unreadSeparatorUnmountTimeoutRef.current = null;
+      }, 260);
     }, 6200);
+
     return () => {
-      if (unreadSeparatorTimeoutRef.current) {
-        window.clearTimeout(unreadSeparatorTimeoutRef.current);
-        unreadSeparatorTimeoutRef.current = null;
+      if (unreadSeparatorHideTimeoutRef.current) {
+        window.clearTimeout(unreadSeparatorHideTimeoutRef.current);
+        unreadSeparatorHideTimeoutRef.current = null;
+      }
+      if (unreadSeparatorUnmountTimeoutRef.current) {
+        window.clearTimeout(unreadSeparatorUnmountTimeoutRef.current);
+        unreadSeparatorUnmountTimeoutRef.current = null;
       }
     };
   }, [conversationId, unreadAtOpen, unreadAnchorMessageId]);
@@ -1206,10 +1221,14 @@ export const ChatView = ({
                   <span>{formatDateSeparator(message.createdAt)}</span>
                 </div>
               )}
-              {showUnreadSeparator &&
+              {unreadSeparatorState !== 'hidden' &&
                 !normalizedQuery &&
                 unreadAnchorMessageId === message.messageId && (
-                  <div className="messages-new-separator">
+                  <div
+                    className={`messages-new-separator ${
+                      unreadSeparatorState === 'leaving' ? 'is-leaving' : 'is-visible'
+                    }`}
+                  >
                     <span>Novas mensagens</span>
                   </div>
                 )}

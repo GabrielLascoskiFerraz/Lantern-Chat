@@ -166,7 +166,20 @@ class LanternApp {
 
     this.relay = new RelayClient(this.profile, {
       onFrame: (frame) => {
-        void this.handleIncomingFrame(frame);
+        void this.handleIncomingFrame(frame).catch((error) => {
+          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+            console.warn(
+              '[Lantern][Relay] falha ao processar frame recebido:',
+              JSON.stringify({
+                type: frame.type,
+                messageId: frame.messageId,
+                from: frame.from,
+                to: frame.to,
+                error: error instanceof Error ? error.message : String(error)
+              })
+            );
+          }
+        });
       },
       onPresence: (peers) => {
         this.handleRelayPresence(peers);
@@ -175,7 +188,14 @@ class LanternApp {
         this.handleRelayAnnouncementExpiry(messageIds);
       },
       onAnnouncementSnapshot: (frames, reactions) => {
-        void this.handleRelayAnnouncementSnapshot(frames, reactions);
+        void this.handleRelayAnnouncementSnapshot(frames, reactions).catch((error) => {
+          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+            console.warn(
+              '[Lantern][Relay] falha ao aplicar snapshot de anúncios:',
+              error instanceof Error ? error.message : String(error)
+            );
+          }
+        });
       },
       onAnnouncementReactions: (messageId, reactions) => {
         this.handleRelayAnnouncementReactionUpdate(messageId, reactions);
@@ -289,11 +309,20 @@ class LanternApp {
             .map((conversation) => [conversation.id, conversation.unreadCount])
         ),
       addManualPeer: (address, port) => {
-        void this.updateRelaySettings({
-          automatic: false,
-          host: address,
-          port
-        });
+        try {
+          this.updateRelaySettings({
+            automatic: false,
+            host: address,
+            port
+          });
+        } catch (error) {
+          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+            console.warn(
+              '[Lantern] falha ao atualizar relay manual:',
+              error instanceof Error ? error.message : String(error)
+            );
+          }
+        }
       },
       saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
     });
@@ -1165,14 +1194,18 @@ class LanternApp {
         }
 
         if (deliverySource === 'live' && activePeer) {
-          await this.sendToPeer(activePeer, {
-            type: 'chat:ack',
-            messageId: randomUUID(),
-            from: this.profile.deviceId,
-            to: frame.from,
-            createdAt: Date.now(),
-            payload: { ackMessageId: frame.messageId, status: 'delivered' }
-          });
+          try {
+            await this.sendToPeer(activePeer, {
+              type: 'chat:ack',
+              messageId: randomUUID(),
+              from: this.profile.deviceId,
+              to: frame.from,
+              createdAt: Date.now(),
+              payload: { ackMessageId: frame.messageId, status: 'delivered' }
+            });
+          } catch {
+            // ACK best-effort: evita quebrar o fluxo da mensagem recebida.
+          }
         }
         break;
       }
@@ -1226,14 +1259,18 @@ class LanternApp {
         }
 
         if (deliverySource === 'live' && activePeer) {
-          await this.sendToPeer(activePeer, {
-            type: 'chat:ack',
-            messageId: randomUUID(),
-            from: this.profile.deviceId,
-            to: frame.from,
-            createdAt: Date.now(),
-            payload: { ackMessageId: frame.messageId, status: 'delivered' }
-          });
+          try {
+            await this.sendToPeer(activePeer, {
+              type: 'chat:ack',
+              messageId: randomUUID(),
+              from: this.profile.deviceId,
+              to: frame.from,
+              createdAt: Date.now(),
+              payload: { ackMessageId: frame.messageId, status: 'delivered' }
+            });
+          } catch {
+            // ACK best-effort: evita quebrar o fluxo do anúncio recebido.
+          }
         }
         break;
       }
@@ -1346,7 +1383,11 @@ class LanternApp {
           };
 
           if (activePeer) {
-            await this.sendToPeer(activePeer, syncFrame);
+            try {
+              await this.sendToPeer(activePeer, syncFrame);
+            } catch {
+              // sync-response best-effort durante oscilação de presença.
+            }
           }
           if (activePeer) {
             await this.messageService.retryFailedMessagesForPeer(activePeer);
@@ -1424,7 +1465,11 @@ class LanternApp {
               }
             };
             if (activePeer) {
-              await this.sendToPeer(activePeer, ackFrame);
+              try {
+                await this.sendToPeer(activePeer, ackFrame);
+              } catch {
+                // ACK best-effort durante sync.
+              }
             }
           }
         } finally {
@@ -1560,14 +1605,18 @@ class LanternApp {
 
         if (result.ok) {
           if (activePeer) {
-            await this.sendToPeer(activePeer, {
-              type: 'chat:ack',
-              messageId: randomUUID(),
-              from: this.profile.deviceId,
-              to: frame.from,
-              createdAt: Date.now(),
-              payload: { ackMessageId: result.messageId, status: 'delivered' }
-            });
+            try {
+              await this.sendToPeer(activePeer, {
+                type: 'chat:ack',
+                messageId: randomUUID(),
+                from: this.profile.deviceId,
+                to: frame.from,
+                createdAt: Date.now(),
+                payload: { ackMessageId: result.messageId, status: 'delivered' }
+              });
+            } catch {
+              // ACK best-effort: recebimento do arquivo já foi persistido localmente.
+            }
           }
         }
         break;
