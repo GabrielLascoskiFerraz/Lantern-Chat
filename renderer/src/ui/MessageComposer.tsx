@@ -935,7 +935,7 @@ export const MessageComposer = ({
         return;
       }
 
-      const results = await Promise.all(
+      const results = await Promise.allSettled(
         pendingFilePaths.map(async (filePath) => {
           const [info, preview] = await Promise.all([
             ipcClient.getFileInfo(filePath),
@@ -948,9 +948,19 @@ export const MessageComposer = ({
       if (cancelled) return;
       const nextInfo: Record<string, PendingAttachmentInfo | null> = {};
       const nextPreview: Record<string, string | null> = {};
-      for (const result of results) {
-        nextInfo[result.filePath] = result.info;
-        nextPreview[result.filePath] = result.preview;
+      for (let i = 0; i < results.length; i += 1) {
+        const fallbackPath = pendingFilePaths[i];
+        const result = results[i];
+        if (result.status === 'fulfilled') {
+          nextInfo[result.value.filePath] = result.value.info;
+          nextPreview[result.value.filePath] = result.value.preview;
+          continue;
+        }
+        // Mantém os outros anexos carregando mesmo que um único arquivo falhe.
+        if (fallbackPath) {
+          nextInfo[fallbackPath] = null;
+          nextPreview[fallbackPath] = null;
+        }
       }
       setPendingAttachmentByPath(nextInfo);
       setPendingAttachmentPreviewByPath(nextPreview);
@@ -1014,9 +1024,38 @@ export const MessageComposer = ({
 
   const pickAttachment = async (): Promise<void> => {
     if (!onSendFile || disabled || isSubmitting) return;
-    const filePaths = await ipcClient.pickFiles();
-    if (!filePaths || filePaths.length === 0) return;
-    appendPendingFiles(filePaths);
+    try {
+      const filePaths = await ipcClient.pickFiles();
+      if (!filePaths || filePaths.length === 0) return;
+      const normalized = filePaths
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value) => value.length > 0)
+        .map((value) => {
+          if (!value.toLowerCase().startsWith('file://')) {
+            return value;
+          }
+          try {
+            const decoded = decodeURI(value.replace(/^file:\/\//i, ''));
+            if (/^\/[A-Za-z]:\//.test(decoded)) {
+              return decoded.slice(1);
+            }
+            return decoded;
+          } catch {
+            return value;
+          }
+        });
+      const unique = Array.from(new Set(normalized));
+      if (unique.length === 0) {
+        setPasteFeedback('Nenhum arquivo válido foi selecionado.');
+        return;
+      }
+      appendPendingFiles(unique);
+      setPasteFeedback(
+        `${unique.length} arquivo${unique.length > 1 ? 's' : ''} anexado${unique.length > 1 ? 's' : ''}`
+      );
+    } catch {
+      setPasteFeedback('Falha ao selecionar arquivos.');
+    }
   };
 
   const formatFileSize = (size: number): string => {

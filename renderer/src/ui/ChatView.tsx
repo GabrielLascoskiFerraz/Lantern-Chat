@@ -124,7 +124,7 @@ const formatBytes = (bytes: number | null | undefined): string => {
 
 const isImageName = (name: string | null): boolean => {
   if (!name) return false;
-  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+  return /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(name);
 };
 
 interface ImagePreviewState {
@@ -768,7 +768,7 @@ export const ChatView = ({
       ).slice(-24);
       if (pending.length === 0) return;
 
-      const resolved = await Promise.all(
+      const resolved = await Promise.allSettled(
         pending.map(async (message) => {
           const cached = imagePreviewStateCache.get(message.messageId);
           if (cached) {
@@ -800,7 +800,11 @@ export const ChatView = ({
       setPreviewStateByMessageId((current) => {
         const next = { ...current };
         let changed = false;
-        for (const item of resolved) {
+        for (const result of resolved) {
+          if (result.status !== 'fulfilled') {
+            continue;
+          }
+          const item = result.value;
           if (item.previewState && !next[item.messageId]) {
             next[item.messageId] = item.previewState;
             changed = true;

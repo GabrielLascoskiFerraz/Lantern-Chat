@@ -490,9 +490,25 @@ export const registerIpc = (
     try {
       const stat = await fs.promises.stat(resolved);
       if (!stat.isFile()) return null;
-      if (stat.size > 8 * 1024 * 1024) return null;
-
       const ext = path.extname(resolved).toLowerCase();
+      const imageExt = new Set([
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.gif',
+        '.webp',
+        '.bmp',
+        '.svg',
+        '.avif',
+        '.heic',
+        '.heif',
+        '.tif',
+        '.tiff'
+      ]);
+      if (!imageExt.has(ext)) return null;
+
+      // Evita estourar memória em arquivos muito grandes.
+      if (stat.size > 80 * 1024 * 1024) return null;
       const mimeByExt: Record<string, string> = {
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
@@ -500,13 +516,47 @@ export const registerIpc = (
         '.gif': 'image/gif',
         '.webp': 'image/webp',
         '.bmp': 'image/bmp',
-        '.svg': 'image/svg+xml'
+        '.svg': 'image/svg+xml',
+        '.avif': 'image/avif',
+        '.heic': 'image/heic',
+        '.heif': 'image/heif',
+        '.tif': 'image/tiff',
+        '.tiff': 'image/tiff'
       };
-      const mime = mimeByExt[ext];
-      if (!mime) return null;
 
-      const file = await fs.promises.readFile(resolved);
-      return `data:${mime};base64,${file.toString('base64')}`;
+      const image = nativeImage.createFromPath(resolved);
+      if (!image.isEmpty()) {
+        const size = image.getSize();
+        const maxSide = 420;
+        const width = Math.max(1, size.width || 1);
+        const height = Math.max(1, size.height || 1);
+        const scale = Math.min(1, maxSide / Math.max(width, height));
+        const resized =
+          scale < 1
+            ? image.resize({
+                width: Math.max(1, Math.round(width * scale)),
+                height: Math.max(1, Math.round(height * scale)),
+                quality: 'good'
+              })
+            : image;
+        return resized.toDataURL();
+      }
+
+      // Fallback binário para formatos em que nativeImage pode falhar em alguns ambientes.
+      if (stat.size <= 20 * 1024 * 1024) {
+        const mimeType = mimeByExt[ext] || 'application/octet-stream';
+        const file = await fs.promises.readFile(resolved);
+        if (file.length > 0) {
+          return `data:${mimeType};base64,${file.toString('base64')}`;
+        }
+      }
+
+      // Fallback para alguns SVGs que podem não abrir com createFromPath.
+      if (ext === '.svg' && stat.size <= 8 * 1024 * 1024) {
+        const file = await fs.promises.readFile(resolved);
+        return `data:image/svg+xml;base64,${file.toString('base64')}`;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -520,7 +570,7 @@ export const registerIpc = (
       if (!stat.isFile()) return null;
       const ext = path.extname(resolved).toLowerCase();
       const name = path.basename(resolved);
-      const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+      const isImage = /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(name);
       return {
         name,
         size: stat.size,
