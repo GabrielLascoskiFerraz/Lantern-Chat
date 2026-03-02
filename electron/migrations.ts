@@ -51,6 +51,11 @@ export const runMigrations = (db: Database.Database): void => {
       status TEXT,
       reaction TEXT,
       deletedAt INTEGER,
+      replyToMessageId TEXT,
+      replyToSenderDeviceId TEXT,
+      replyToType TEXT,
+      replyToPreviewText TEXT,
+      replyToFileName TEXT,
       createdAt INTEGER NOT NULL
     );
 
@@ -92,5 +97,20 @@ export const runMigrations = (db: Database.Database): void => {
   }
   if (!messageColumns.some((column) => column.name === 'deletedAt')) {
     db.exec('ALTER TABLE messages ADD COLUMN deletedAt INTEGER;');
+  }
+  if (!messageColumns.some((column) => column.name === 'replyToMessageId')) {
+    db.exec('ALTER TABLE messages ADD COLUMN replyToMessageId TEXT;');
+  }
+  if (!messageColumns.some((column) => column.name === 'replyToSenderDeviceId')) {
+    db.exec('ALTER TABLE messages ADD COLUMN replyToSenderDeviceId TEXT;');
+  }
+  if (!messageColumns.some((column) => column.name === 'replyToType')) {
+    db.exec('ALTER TABLE messages ADD COLUMN replyToType TEXT;');
+  }
+  if (!messageColumns.some((column) => column.name === 'replyToPreviewText')) {
+    db.exec('ALTER TABLE messages ADD COLUMN replyToPreviewText TEXT;');
+  }
+  if (!messageColumns.some((column) => column.name === 'replyToFileName')) {
+    db.exec('ALTER TABLE messages ADD COLUMN replyToFileName TEXT;');
   }
 };

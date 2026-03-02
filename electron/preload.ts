@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AppEvent } from './types';
+import { AppEvent, MessageReplyPayload } from './types';
 
 type EventCallback = (event: AppEvent) => void;
 
@@ -16,10 +16,12 @@ const api = {
     ipcRenderer.invoke('lantern:updateRelaySettings', input),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
-  sendText: (peerId: string, text: string) => ipcRenderer.invoke('lantern:sendText', peerId, text),
+  sendText: (peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendText', peerId, text, replyTo),
   sendTyping: (peerId: string, isTyping: boolean) =>
     ipcRenderer.invoke('lantern:sendTyping', peerId, isTyping),
-  sendAnnouncement: (text: string) => ipcRenderer.invoke('lantern:sendAnnouncement', text),
+  sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
   sendFile: (peerId: string, filePath: string) => ipcRenderer.invoke('lantern:sendFile', peerId, filePath),
   reactToMessage: (
     conversationId: string,

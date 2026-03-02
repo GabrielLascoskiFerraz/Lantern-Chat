@@ -21,6 +21,11 @@ export class SyncService {
         status: row.status,
         reaction: row.reaction,
         deletedAt: row.deletedAt,
+        replyToMessageId: row.replyToMessageId,
+        replyToSenderDeviceId: row.replyToSenderDeviceId,
+        replyToType: row.replyToType,
+        replyToPreviewText: row.replyToPreviewText,
+        replyToFileName: row.replyToFileName,
         createdAt: row.createdAt
       }));
   }
@@ -71,6 +76,11 @@ export class SyncService {
       status: message.status,
       reaction: message.reaction,
       deletedAt: message.deletedAt,
+      replyToMessageId: message.replyToMessageId,
+      replyToSenderDeviceId: message.replyToSenderDeviceId,
+      replyToType: message.replyToType,
+      replyToPreviewText: message.replyToPreviewText,
+      replyToFileName: message.replyToFileName,
       createdAt: normalizedCreatedAt
     };
 
@@ -85,7 +95,12 @@ export class SyncService {
         fileSha256: message.fileSha256,
         status: message.status,
         reaction: message.reaction,
-        deletedAt: message.deletedAt
+        deletedAt: message.deletedAt,
+        replyToMessageId: message.replyToMessageId,
+        replyToSenderDeviceId: message.replyToSenderDeviceId,
+        replyToType: message.replyToType,
+        replyToPreviewText: message.replyToPreviewText,
+        replyToFileName: message.replyToFileName
       });
       return { inserted: false, row: merged };
     }

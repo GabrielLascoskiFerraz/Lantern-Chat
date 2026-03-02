@@ -16,6 +16,7 @@ import {
   ChatTextPayload,
   DbMessage,
   FileOfferPayload,
+  MessageReplyPayload,
   Peer,
   Profile,
   ProtocolFrame
@@ -59,6 +60,28 @@ export class MessageService {
 
   private markUnreachable(peer: Peer): void {
     this.onPeerUnreachable(peer.deviceId);
+  }
+
+  private sanitizeReplyPayload(
+    input: MessageReplyPayload | null | undefined
+  ): MessageReplyPayload | null {
+    if (!input) return null;
+    const messageId = (input.messageId || '').trim();
+    const senderDeviceId = (input.senderDeviceId || '').trim();
+    const type = input.type;
+    if (!messageId || !senderDeviceId) return null;
+    if (type !== 'text' && type !== 'announcement' && type !== 'file') {
+      return null;
+    }
+    const previewText = (input.previewText || '').trim();
+    const fileName = (input.fileName || '').trim();
+    return {
+      messageId,
+      senderDeviceId,
+      type,
+      previewText: previewText.length > 0 ? previewText.slice(0, 300) : null,
+      fileName: fileName.length > 0 ? fileName.slice(0, 260) : null
+    };
   }
 
   private async streamFileChunksToPeer(
@@ -117,20 +140,28 @@ export class MessageService {
     }
   }
 
-  async sendText(peerId: string, text: string): Promise<DbMessage> {
+  async sendText(
+    peerId: string,
+    text: string,
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
     const conversationId = this.db.ensureDmConversation(
       peerId,
       peer?.displayName || `Contato ${peerId.slice(0, 6)}`
     );
     const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
+    const sanitizedReply = this.sanitizeReplyPayload(replyTo);
     const frame: ProtocolFrame<ChatTextPayload> = {
       type: 'chat:text',
       messageId: randomUUID(),
       from: this.profile.deviceId,
       to: peerId,
       createdAt,
-      payload: { text }
+      payload: {
+        text,
+        replyTo: sanitizedReply
+      }
     };
 
     const message: DbMessage = {
@@ -149,6 +180,11 @@ export class MessageService {
       status: 'sent',
       reaction: null,
       deletedAt: null,
+      replyToMessageId: sanitizedReply?.messageId || null,
+      replyToSenderDeviceId: sanitizedReply?.senderDeviceId || null,
+      replyToType: sanitizedReply?.type || null,
+      replyToPreviewText: sanitizedReply?.previewText || null,
+      replyToFileName: sanitizedReply?.fileName || null,
       createdAt
     };
 
@@ -165,18 +201,25 @@ export class MessageService {
     return message;
   }
 
-  async sendAnnouncement(text: string): Promise<DbMessage> {
+  async sendAnnouncement(
+    text: string,
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage> {
     const createdAt = this.db.reserveConversationTimestamp(
       ANNOUNCEMENTS_CONVERSATION_ID,
       Date.now()
     );
+    const sanitizedReply = this.sanitizeReplyPayload(replyTo);
     const frame: ProtocolFrame<AnnouncementPayload> = {
       type: 'announce',
       messageId: randomUUID(),
       from: this.profile.deviceId,
       to: null,
       createdAt,
-      payload: { text }
+      payload: {
+        text,
+        replyTo: sanitizedReply
+      }
     };
 
     const message: DbMessage = {
@@ -195,6 +238,11 @@ export class MessageService {
       status: 'sent',
       reaction: null,
       deletedAt: null,
+      replyToMessageId: sanitizedReply?.messageId || null,
+      replyToSenderDeviceId: sanitizedReply?.senderDeviceId || null,
+      replyToType: sanitizedReply?.type || null,
+      replyToPreviewText: sanitizedReply?.previewText || null,
+      replyToFileName: sanitizedReply?.fileName || null,
       createdAt
     };
 
@@ -242,6 +290,11 @@ export class MessageService {
       status: 'sent',
       reaction: null,
       deletedAt: null,
+      replyToMessageId: null,
+      replyToSenderDeviceId: null,
+      replyToType: null,
+      replyToPreviewText: null,
+      replyToFileName: null,
       createdAt
     };
 

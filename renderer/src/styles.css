@@ -1222,6 +1222,52 @@ body {
   font-size: 14px;
 }
 
+.reply-reference {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin: 0 0 2px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 84%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--teams-surface) 72%, transparent);
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    transform 120ms var(--motion-ease-emphasized);
+}
+
+.reply-reference:hover {
+  border-color: color-mix(in srgb, var(--teams-accent) 40%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-surface) 56%, var(--teams-row-hover));
+  transform: translateY(-0.5px);
+}
+
+.reply-reference-author {
+  display: block;
+  font-size: 12px;
+  line-height: 1.15;
+  color: color-mix(in srgb, var(--teams-accent) 58%, var(--teams-text));
+  font-weight: 600;
+}
+
+.reply-reference-preview {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--teams-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .message-highlight {
   background: color-mix(in srgb, #ffe082 72%, transparent);
   color: inherit;
@@ -1474,6 +1520,22 @@ body {
 
 .bubble-row.search-match-active .bubble {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--teams-accent) 42%, transparent);
+}
+
+.bubble-row.reply-jump-highlight .bubble {
+  animation: replyJumpHighlight 1.25s var(--motion-ease-emphasized);
+}
+
+@keyframes replyJumpHighlight {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--teams-accent) 0%, transparent);
+  }
+  28% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--teams-accent) 42%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--teams-accent) 0%, transparent);
+  }
 }
 
 .bubble-reaction-static {
@@ -1812,6 +1874,70 @@ body {
 
 .composer.drag-over {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teams-accent) 48%, transparent);
+}
+
+.composer-reply-draft {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--teams-accent) 34%, var(--teams-border));
+  border-radius: var(--teams-radius-sm);
+  background: color-mix(in srgb, var(--teams-accent) 8%, var(--teams-surface));
+  animation: fadeUpIn 160ms var(--motion-ease-emphasized);
+}
+
+.composer-reply-draft-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--teams-accent) 65%, var(--teams-text));
+}
+
+.composer-reply-draft-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-reply-draft-title {
+  font-size: 12px;
+  line-height: 1.1;
+  font-weight: 600;
+  color: var(--teams-text);
+}
+
+.composer-reply-draft-preview {
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--teams-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-reply-draft-cancel {
+  border: 1px solid var(--teams-border);
+  background: color-mix(in srgb, var(--teams-surface) 86%, transparent);
+  color: var(--teams-text);
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.composer-reply-draft-cancel:hover {
+  background: var(--teams-row-hover);
+  border-color: color-mix(in srgb, var(--teams-accent) 30%, var(--teams-border));
 }
 
 .composer-drop-overlay {

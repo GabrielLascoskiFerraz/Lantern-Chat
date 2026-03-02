@@ -3,7 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
-import { AnnouncementReactionSummary, AppEvent, DbMessage, Peer, Profile } from './types';
+import {
+  AnnouncementReactionSummary,
+  AppEvent,
+  DbMessage,
+  MessageReplyPayload,
+  Peer,
+  Profile
+} from './types';
 
 export interface IpcBindings {
   getProfile: () => Profile;
@@ -38,9 +45,13 @@ export interface IpcBindings {
     openAtLogin: boolean;
     downloadsDir: string;
   };
-  sendText: (peerId: string, text: string) => Promise<DbMessage>;
+  sendText: (
+    peerId: string,
+    text: string,
+    replyTo?: MessageReplyPayload | null
+  ) => Promise<DbMessage>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
-  sendAnnouncement: (text: string) => Promise<DbMessage>;
+  sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) => Promise<DbMessage>;
   sendFile: (peerId: string, filePath: string) => Promise<DbMessage>;
   reactToMessage: (
     conversationId: string,
@@ -336,13 +347,19 @@ export const registerIpc = (
   ipcMain.handle('lantern:updateStartupSettings', (_event, input) =>
     bindings.updateStartupSettings(input)
   );
-  ipcMain.handle('lantern:sendText', (_event, peerId: string, text: string) =>
-    bindings.sendText(peerId, text)
+  ipcMain.handle(
+    'lantern:sendText',
+    (_event, peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
+      bindings.sendText(peerId, text, replyTo)
   );
   ipcMain.handle('lantern:sendTyping', (_event, peerId: string, isTyping: boolean) =>
     bindings.sendTyping(peerId, isTyping)
   );
-  ipcMain.handle('lantern:sendAnnouncement', (_event, text: string) => bindings.sendAnnouncement(text));
+  ipcMain.handle(
+    'lantern:sendAnnouncement',
+    (_event, text: string, replyTo?: MessageReplyPayload | null) =>
+      bindings.sendAnnouncement(text, replyTo)
+  );
   ipcMain.handle('lantern:sendFile', (_event, peerId: string, filePath: string) =>
     bindings.sendFile(peerId, filePath)
   );

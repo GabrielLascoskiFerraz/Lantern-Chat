@@ -28,6 +28,7 @@ import {
   FileCompletePayload,
   ForgetPeerPayload,
   FileOfferPayload,
+  MessageReplyPayload,
   Peer,
   Profile,
   ProtocolFrame,
@@ -256,9 +257,9 @@ class LanternApp {
       getStartupSettings: () => this.getStartupSettingsSnapshot(),
       updateRelaySettings: (input) => this.updateRelaySettings(input),
       updateStartupSettings: (input) => this.updateStartupSettings(input),
-      sendText: (peerId, text) => this.messageService.sendText(peerId, text),
+      sendText: (peerId, text, replyTo) => this.messageService.sendText(peerId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
-      sendAnnouncement: (text) => this.messageService.sendAnnouncement(text),
+      sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
       sendFile: (peerId, filePath) => this.messageService.sendFile(peerId, filePath),
       reactToMessage: (conversationId, messageId, reaction) =>
         this.reactToMessage(conversationId, messageId, reaction),
@@ -717,6 +718,29 @@ class LanternApp {
     return parsed > now ? now : parsed;
   }
 
+  private normalizeReplyPayload(
+    value: MessageReplyPayload | null | undefined
+  ): MessageReplyPayload | null {
+    if (!value) return null;
+    const messageId = (value.messageId || '').trim();
+    const senderDeviceId = (value.senderDeviceId || '').trim();
+    if (!messageId || !senderDeviceId) {
+      return null;
+    }
+    if (value.type !== 'text' && value.type !== 'announcement' && value.type !== 'file') {
+      return null;
+    }
+    const previewText = (value.previewText || '').trim();
+    const fileName = (value.fileName || '').trim();
+    return {
+      messageId,
+      senderDeviceId,
+      type: value.type,
+      previewText: previewText ? previewText.slice(0, 300) : null,
+      fileName: fileName ? fileName.slice(0, 260) : null
+    };
+  }
+
   private bumpUnreadIfBackground(conversationId: string): void {
     const isVisibleFocused =
       Boolean(this.mainWindow) &&
@@ -1042,6 +1066,7 @@ class LanternApp {
       }
       case 'chat:text': {
         const payload = frame.payload as ChatTextPayload;
+        const replyTo = this.normalizeReplyPayload(payload.replyTo);
         const conversationId = this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
@@ -1064,6 +1089,11 @@ class LanternApp {
           status: 'delivered',
           reaction: null,
           deletedAt: null,
+          replyToMessageId: replyTo?.messageId || null,
+          replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+          replyToType: replyTo?.type || null,
+          replyToPreviewText: replyTo?.previewText || null,
+          replyToFileName: replyTo?.fileName || null,
           createdAt
         };
 
@@ -1098,6 +1128,7 @@ class LanternApp {
       }
       case 'announce': {
         const payload = frame.payload as AnnouncementPayload;
+        const replyTo = this.normalizeReplyPayload(payload.replyTo);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
           ANNOUNCEMENTS_CONVERSATION_ID,
@@ -1119,6 +1150,11 @@ class LanternApp {
           status: 'delivered',
           reaction: null,
           deletedAt: null,
+          replyToMessageId: replyTo?.messageId || null,
+          replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+          replyToType: replyTo?.type || null,
+          replyToPreviewText: replyTo?.previewText || null,
+          replyToFileName: replyTo?.fileName || null,
           createdAt
         };
 
@@ -1392,6 +1428,11 @@ class LanternApp {
           status: 'sent',
           reaction: null,
           deletedAt: null,
+          replyToMessageId: existingMessage?.replyToMessageId || null,
+          replyToSenderDeviceId: existingMessage?.replyToSenderDeviceId || null,
+          replyToType: existingMessage?.replyToType || null,
+          replyToPreviewText: existingMessage?.replyToPreviewText || null,
+          replyToFileName: existingMessage?.replyToFileName || null,
           createdAt
         };
 
@@ -1740,6 +1781,7 @@ class LanternApp {
         const existing = this.db.getMessageById(frame.messageId);
         if (!existing) {
           const payload = frame.payload as AnnouncementPayload;
+          const replyTo = this.normalizeReplyPayload(payload.replyTo);
           const createdAt = this.db.reserveConversationTimestamp(
             ANNOUNCEMENTS_CONVERSATION_ID,
             this.normalizeInboundCreatedAt(frame.createdAt)
@@ -1760,6 +1802,11 @@ class LanternApp {
             status: 'sent',
             reaction: null,
             deletedAt: null,
+            replyToMessageId: replyTo?.messageId || null,
+            replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+            replyToType: replyTo?.type || null,
+            replyToPreviewText: replyTo?.previewText || null,
+            replyToFileName: replyTo?.fileName || null,
             createdAt
           });
         }

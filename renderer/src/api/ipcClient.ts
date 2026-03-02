@@ -37,8 +37,21 @@ export interface MessageRow {
   status: 'sent' | 'delivered' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
+  replyToMessageId: string | null;
+  replyToSenderDeviceId: string | null;
+  replyToType: 'text' | 'announcement' | 'file' | null;
+  replyToPreviewText: string | null;
+  replyToFileName: string | null;
   createdAt: number;
   localOnly?: boolean;
+}
+
+export interface MessageReplyReference {
+  messageId: string;
+  senderDeviceId: string;
+  type: 'text' | 'announcement' | 'file';
+  previewText: string | null;
+  fileName: string | null;
 }
 
 export interface AnnouncementReactionSummary {
@@ -114,9 +127,13 @@ interface LanternApi {
     port?: number;
   }) => Promise<RelaySettings>;
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<StartupSettings>;
-  sendText: (peerId: string, text: string) => Promise<MessageRow>;
+  sendText: (
+    peerId: string,
+    text: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
-  sendAnnouncement: (text: string) => Promise<MessageRow>;
+  sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<MessageRow>;
   sendFile: (peerId: string, filePath: string) => Promise<MessageRow>;
   reactToMessage: (
     conversationId: string,
@@ -182,9 +199,11 @@ export const ipcClient = {
     window.lantern.updateRelaySettings(input),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
     window.lantern.updateStartupSettings(input),
-  sendText: (peerId: string, text: string) => window.lantern.sendText(peerId, text),
+  sendText: (peerId: string, text: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendText(peerId, text, replyTo),
   sendTyping: (peerId: string, isTyping: boolean) => window.lantern.sendTyping(peerId, isTyping),
-  sendAnnouncement: (text: string) => window.lantern.sendAnnouncement(text),
+  sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendAnnouncement(text, replyTo),
   sendFile: (peerId: string, filePath: string) => window.lantern.sendFile(peerId, filePath),
   reactToMessage: (
     conversationId: string,

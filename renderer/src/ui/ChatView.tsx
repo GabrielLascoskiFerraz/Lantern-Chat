@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
 import {
+  ArrowReply20Regular,
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
@@ -20,7 +21,14 @@ import {
   MoreHorizontal20Regular,
   Search20Regular
 } from '@fluentui/react-icons';
-import { AnnouncementReactionSummary, ipcClient, MessageRow, Peer, Profile } from '../api/ipcClient';
+import {
+  AnnouncementReactionSummary,
+  ipcClient,
+  MessageReplyReference,
+  MessageRow,
+  Peer,
+  Profile
+} from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { MessageComposer } from './MessageComposer';
@@ -38,7 +46,7 @@ interface ChatViewProps {
   hasMoreOlder: boolean;
   loadingOlder: boolean;
   recentMessageIds: Record<string, number>;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
@@ -50,6 +58,10 @@ interface ChatViewProps {
   onSearchMessageIds: (query: string) => Promise<string[]>;
   onLoadOlderMessages: () => Promise<number>;
   onEnsureMessagesLoaded: (messageIds: string[]) => Promise<void>;
+}
+
+interface ReplyDraftUi extends MessageReplyReference {
+  senderLabel: string;
 }
 
 const formatTime = (value: number): string =>
@@ -205,6 +217,27 @@ const renderMessageText = (text: string, query: string, onOpen: (url: string) =>
   return parts;
 };
 
+const toReplyReferenceFromMessage = (message: MessageRow): MessageReplyReference => {
+  if (message.type === 'file') {
+    return {
+      messageId: message.messageId,
+      senderDeviceId: message.senderDeviceId,
+      type: 'file',
+      previewText: null,
+      fileName: message.fileName || 'Arquivo'
+    };
+  }
+
+  const body = (message.bodyText || '').replace(/\s+/g, ' ').trim();
+  return {
+    messageId: message.messageId,
+    senderDeviceId: message.senderDeviceId,
+    type: message.type === 'announcement' ? 'announcement' : 'text',
+    previewText: body.length > 180 ? `${body.slice(0, 177)}...` : body || null,
+    fileName: null
+  };
+};
+
 export const ChatView = ({
   conversationId,
   peer,
@@ -260,24 +293,30 @@ export const ChatView = ({
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmForgetOpen, setConfirmForgetOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
-  const [selectionContextMenu, setSelectionContextMenu] = useState<{
+  const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<{
     x: number;
     y: number;
-    text: string;
+    messageId: string;
+    canDelete: boolean;
+    selectedText: string;
   } | null>(null);
+  const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const jumpHighlightTimeoutRef = useRef<number | null>(null);
   const scrollMetricsRef = useRef<{ top: number; height: number; client: number }>({
     top: 0,
     height: 0,
     client: 0
   });
 
-  const closeSelectionContextMenu = useCallback(() => {
-    setSelectionContextMenu(null);
+  const closeMessageContextMenu = useCallback(() => {
+    setMessageContextMenu(null);
   }, []);
 
   const copySelectedText = useCallback(async (text: string) => {
@@ -304,23 +343,33 @@ export const ChatView = ({
   }, []);
 
   const handleBubbleContextMenu = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      const selection = window.getSelection();
-      const selectedText = selection?.toString().trim() || '';
-      if (!selectedText || !selection || selection.rangeCount === 0) {
-        setSelectionContextMenu(null);
-        return;
-      }
-
-      const container = event.currentTarget;
-      const range = selection.getRangeAt(0);
-      if (!container.contains(range.commonAncestorContainer)) {
-        return;
-      }
-
+    (event: ReactMouseEvent<HTMLDivElement>, message: MessageRow) => {
       event.preventDefault();
-      const menuWidth = 188;
-      const menuHeight = 68;
+      const selection = window.getSelection();
+      let selectedText = '';
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        if (event.currentTarget.contains(range.commonAncestorContainer)) {
+          selectedText = selection.toString().trim();
+        }
+      }
+
+      const menuWidth = 220;
+      const rowHeight = 42;
+      const isDeleted = Boolean(message.deletedAt);
+      const isLocalOnly = Boolean(message.localOnly);
+      const canReply = !isDeleted && !isLocalOnly;
+      const canDelete =
+        !isDeleted &&
+        !isLocalOnly &&
+        message.direction === 'out' &&
+        message.senderDeviceId === localProfile.deviceId;
+      const itemCount = (canReply ? 1 : 0) + (selectedText ? 1 : 0) + (canDelete ? 1 : 0);
+      if (itemCount <= 0) {
+        setMessageContextMenu(null);
+        return;
+      }
+      const menuHeight = itemCount * rowHeight + 12;
       const rootRect = paneRootRef.current?.getBoundingClientRect();
       const rootLeft = rootRect?.left ?? 0;
       const rootTop = rootRect?.top ?? 0;
@@ -330,9 +379,16 @@ export const ChatView = ({
       const maxY = window.innerHeight - 8 - rootTop - menuHeight;
       const x = Math.min(Math.max(event.clientX - rootLeft, minX), maxX);
       const y = Math.min(Math.max(event.clientY - rootTop, minY), maxY);
-      setSelectionContextMenu({ x, y, text: selectedText });
+
+      setMessageContextMenu({
+        x,
+        y,
+        messageId: message.messageId,
+        canDelete,
+        selectedText
+      });
     },
-    []
+    [localProfile.deviceId]
   );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
@@ -350,6 +406,94 @@ export const ChatView = ({
     () => new Set(messages.map((row) => row.messageId)),
     [messages]
   );
+  const messageById = useMemo(
+    () => new Map(messages.map((row) => [row.messageId, row])),
+    [messages]
+  );
+  const contextMenuMessage = useMemo(() => {
+    if (!messageContextMenu) return null;
+    return messageById.get(messageContextMenu.messageId) || null;
+  }, [messageById, messageContextMenu]);
+
+  const senderLabelForMessage = useCallback(
+    (senderDeviceId: string): string => {
+      if (senderDeviceId === localProfile.deviceId) {
+        return 'Você';
+      }
+      return peer?.displayName || `Contato ${senderDeviceId.slice(0, 6)}`;
+    },
+    [localProfile.deviceId, peer?.displayName]
+  );
+
+  const focusComposerInput = useCallback(() => {
+    const tryFocus = () => {
+      const textarea = paneRootRef.current?.querySelector('.composer textarea');
+      if (!(textarea instanceof HTMLTextAreaElement)) return false;
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+      return true;
+    };
+
+    window.requestAnimationFrame(() => {
+      if (tryFocus()) return;
+      window.setTimeout(() => {
+        void tryFocus();
+      }, 60);
+    });
+  }, []);
+
+  const startReplyToMessage = useCallback(
+    (message: MessageRow) => {
+      const replyRef = toReplyReferenceFromMessage(message);
+      setReplyDraft({
+        ...replyRef,
+        senderLabel: senderLabelForMessage(replyRef.senderDeviceId)
+      });
+      setReactionPickerMessageId(null);
+      closeMessageContextMenu();
+      focusComposerInput();
+    },
+    [senderLabelForMessage, closeMessageContextMenu, focusComposerInput]
+  );
+
+  const jumpToReferencedMessage = useCallback(
+    async (targetMessageId: string) => {
+      if (!targetMessageId) return;
+      await onEnsureMessagesLoaded([targetMessageId]);
+
+      let attempts = 0;
+      const maxAttempts = 8;
+      const tryJump = () => {
+        const rowNode = messageRowRefs.current[targetMessageId];
+        if (rowNode) {
+          rowNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setJumpHighlightMessageId(targetMessageId);
+          if (jumpHighlightTimeoutRef.current) {
+            window.clearTimeout(jumpHighlightTimeoutRef.current);
+            jumpHighlightTimeoutRef.current = null;
+          }
+          jumpHighlightTimeoutRef.current = window.setTimeout(() => {
+            setJumpHighlightMessageId((current) =>
+              current === targetMessageId ? null : current
+            );
+            jumpHighlightTimeoutRef.current = null;
+          }, 1400);
+          return;
+        }
+        if (attempts >= maxAttempts) return;
+        attempts += 1;
+        window.setTimeout(tryJump, 80);
+      };
+
+      window.requestAnimationFrame(tryJump);
+    },
+    [onEnsureMessagesLoaded]
+  );
+
+  useEffect(() => {
+    setReplyDraft(null);
+  }, [conversationId]);
 
   useEffect(() => {
     hasMoreOlderRef.current = hasMoreOlder;
@@ -772,8 +916,8 @@ export const ChatView = ({
   }, [searchOpen]);
 
   useEffect(() => {
-    if (!selectionContextMenu) return;
-    const close = () => setSelectionContextMenu(null);
+    if (!messageContextMenu) return;
+    const close = () => setMessageContextMenu(null);
     window.addEventListener('click', close);
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
@@ -782,7 +926,17 @@ export const ChatView = ({
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close);
     };
-  }, [selectionContextMenu]);
+  }, [messageContextMenu]);
+
+  useEffect(
+    () => () => {
+      if (jumpHighlightTimeoutRef.current) {
+        window.clearTimeout(jumpHighlightTimeoutRef.current);
+        jumpHighlightTimeoutRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (!searchOpen) {
@@ -1002,6 +1156,14 @@ export const ChatView = ({
               ? Math.min(100, Math.floor((progress.transferred / progress.total) * 100))
               : null;
           const transferStage = isFile ? transferStageLabel(message, progressPercent) : null;
+          const hasReplyReference = Boolean(message.replyToMessageId);
+          const replySenderLabel = message.replyToSenderDeviceId
+            ? senderLabelForMessage(message.replyToSenderDeviceId)
+            : 'Mensagem';
+          const replyPreview =
+            message.replyToType === 'file'
+              ? `📎 ${message.replyToFileName || message.replyToPreviewText || 'Arquivo'}`
+              : message.replyToPreviewText || 'Mensagem indisponível';
 
           return (
             <div key={message.messageId}>
@@ -1011,8 +1173,9 @@ export const ChatView = ({
                 </div>
               )}
               <div
-                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''}`}
+                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''}`}
                 ref={(node) => {
+                  messageRowRefs.current[message.messageId] = node;
                   if (matchedMessageIdSet.has(message.messageId)) {
                     matchRowRefs.current[message.messageId] = node;
                   }
@@ -1031,8 +1194,22 @@ export const ChatView = ({
                   } ${isImageFile && !previewDataUrl ? 'media-loading' : ''} ${
                     isImageFile && previewDataUrl ? 'media-loaded' : ''
                   }`}
-                  onContextMenu={handleBubbleContextMenu}
+                  onContextMenu={(event) => handleBubbleContextMenu(event, message)}
                 >
+                  {!isDeleted && hasReplyReference && (
+                    <button
+                      type="button"
+                      className="reply-reference"
+                      onClick={() => {
+                        if (message.replyToMessageId) {
+                          void jumpToReferencedMessage(message.replyToMessageId);
+                        }
+                      }}
+                    >
+                      <span className="reply-reference-author">{replySenderLabel}</span>
+                      <span className="reply-reference-preview">{replyPreview}</span>
+                    </button>
+                  )}
                   {isDeleted ? (
                     <div className="message-deleted">Esta mensagem foi apagada.</div>
                   ) : isFile ? (
@@ -1148,6 +1325,16 @@ export const ChatView = ({
                       )}
                     </button>
 
+                    <button
+                      type="button"
+                      className="reaction-trigger reply-trigger"
+                      onClick={() => startReplyToMessage(message)}
+                      title="Responder"
+                      aria-label="Responder"
+                    >
+                      <ArrowReply20Regular />
+                    </button>
+
                       <div
                         className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
                         aria-hidden={!reactionPickerOpen}
@@ -1235,10 +1422,15 @@ export const ChatView = ({
         placeholder="Digite sua mensagem"
         disabled={false}
         autoFocusKey={peer.deviceId}
-        onSend={onSend}
+        onSend={async (text, replyTo) => {
+          await onSend(text, replyTo);
+          setReplyDraft(null);
+        }}
         onTypingChange={onTyping}
         onSendFile={onSendFile}
         onPaste={handleComposerPaste}
+        replyDraft={replyDraft}
+        onCancelReply={() => setReplyDraft(null)}
       />
 
       <ConfirmDialog
@@ -1279,25 +1471,57 @@ export const ChatView = ({
         }}
       />
 
-      {selectionContextMenu && (
+      {messageContextMenu && (
         <div
           className="chat-context-menu"
-          style={{ left: selectionContextMenu.x, top: selectionContextMenu.y }}
+          style={{ left: messageContextMenu.x, top: messageContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          <button
-            type="button"
-            className="chat-context-item"
-            onClick={() => {
-              void copySelectedText(selectionContextMenu.text);
-              closeSelectionContextMenu();
-            }}
-          >
-            <span className="menu-item-icon">
-              <Copy20Regular />
-            </span>
-            <span>Copiar texto</span>
-          </button>
+          {contextMenuMessage && !contextMenuMessage.deletedAt && !contextMenuMessage.localOnly && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                startReplyToMessage(contextMenuMessage);
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <ArrowReply20Regular />
+              </span>
+              <span>Responder</span>
+            </button>
+          )}
+          {Boolean(messageContextMenu.selectedText.trim()) && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                void copySelectedText(messageContextMenu.selectedText);
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <Copy20Regular />
+              </span>
+              <span>Copiar texto</span>
+            </button>
+          )}
+          {messageContextMenu.canDelete && (
+            <button
+              type="button"
+              className="chat-context-item danger"
+              onClick={() => {
+                setPendingDeleteMessageId(messageContextMenu.messageId);
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <Delete20Regular />
+              </span>
+              <span>Excluir</span>
+            </button>
+          )}
         </div>
       )}
     </div>

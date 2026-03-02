@@ -1,5 +1,6 @@
 import { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { Button, Caption1, Text } from '@fluentui/react-components';
+import { ArrowReply20Regular } from '@fluentui/react-icons';
 import { Checkmark20Regular } from '@fluentui/react-icons';
 import { Clock20Regular } from '@fluentui/react-icons';
 import { Copy20Regular } from '@fluentui/react-icons';
@@ -8,7 +9,14 @@ import { Dismiss20Regular } from '@fluentui/react-icons';
 import { Emoji20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
-import { AnnouncementReactionSummary, ipcClient, MessageRow, Peer, Profile } from '../api/ipcClient';
+import {
+  AnnouncementReactionSummary,
+  ipcClient,
+  MessageReplyReference,
+  MessageRow,
+  Peer,
+  Profile
+} from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { MessageComposer } from './MessageComposer';
@@ -21,9 +29,13 @@ interface AnnouncementsViewProps {
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
   recentMessageIds: Record<string, number>;
   relayConnected: boolean;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
+}
+
+interface ReplyDraftUi extends MessageReplyReference {
+  senderLabel: string;
 }
 
 const REACTIONS: Array<'👍' | '👎' | '❤️' | '😢' | '😊' | '😂'> = ['👍', '👎', '❤️', '😂', '😊', '😢'];
@@ -69,6 +81,27 @@ const renderMessageText = (text: string): ReactNode[] => {
   return parts;
 };
 
+const toReplyReferenceFromMessage = (message: MessageRow): MessageReplyReference => {
+  if (message.type === 'file') {
+    return {
+      messageId: message.messageId,
+      senderDeviceId: message.senderDeviceId,
+      type: 'file',
+      previewText: null,
+      fileName: message.fileName || 'Arquivo'
+    };
+  }
+
+  const body = (message.bodyText || '').replace(/\s+/g, ' ').trim();
+  return {
+    messageId: message.messageId,
+    senderDeviceId: message.senderDeviceId,
+    type: message.type === 'announcement' ? 'announcement' : 'text',
+    previewText: body.length > 180 ? `${body.slice(0, 177)}...` : body || null,
+    fileName: null
+  };
+};
+
 export const AnnouncementsView = ({
   messages,
   loading,
@@ -83,15 +116,21 @@ export const AnnouncementsView = ({
 }: AnnouncementsViewProps) => {
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
-  const [selectionContextMenu, setSelectionContextMenu] = useState<{
+  const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<{
     x: number;
     y: number;
-    text: string;
+    messageId: string;
+    selectedText: string;
+    canDelete: boolean;
   } | null>(null);
+  const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const jumpHighlightTimeoutRef = useRef<number | null>(null);
 
   const copySelectedText = async (text: string): Promise<void> => {
     const value = text.trim();
@@ -116,23 +155,99 @@ export const AnnouncementsView = ({
     }
   };
 
-  const handleBubbleContextMenu = (event: ReactMouseEvent<HTMLDivElement>): void => {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString().trim() || '';
-    if (!selectedText || !selection || selection.rangeCount === 0) {
-      setSelectionContextMenu(null);
-      return;
+  const senderLabelForMessage = (senderDeviceId: string): string => {
+    if (senderDeviceId === profile.deviceId) {
+      return 'Você';
     }
+    const peer = peers.find((candidate) => candidate.deviceId === senderDeviceId);
+    return peer?.displayName || `Contato ${senderDeviceId.slice(0, 6)}`;
+  };
 
-    const container = event.currentTarget;
-    const range = selection.getRangeAt(0);
-    if (!container.contains(range.commonAncestorContainer)) {
-      return;
-    }
+  const focusComposerInput = (): void => {
+    const tryFocus = () => {
+      const textarea = paneRootRef.current?.querySelector('.composer textarea');
+      if (!(textarea instanceof HTMLTextAreaElement)) return false;
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+      return true;
+    };
 
+    window.requestAnimationFrame(() => {
+      if (tryFocus()) return;
+      window.setTimeout(() => {
+        void tryFocus();
+      }, 60);
+    });
+  };
+
+  const startReplyToMessage = (message: MessageRow): void => {
+    if (message.deletedAt || message.localOnly) return;
+    const replyRef = toReplyReferenceFromMessage(message);
+    setReplyDraft({
+      ...replyRef,
+      senderLabel: senderLabelForMessage(replyRef.senderDeviceId)
+    });
+    setReactionPickerMessageId(null);
+    setMessageContextMenu(null);
+    focusComposerInput();
+  };
+
+  const jumpToReferencedMessage = async (targetMessageId: string): Promise<void> => {
+    if (!targetMessageId) return;
+    let attempts = 0;
+    const maxAttempts = 8;
+    const tryJump = () => {
+      const rowNode = messageRowRefs.current[targetMessageId];
+      if (rowNode) {
+        rowNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setJumpHighlightMessageId(targetMessageId);
+        if (jumpHighlightTimeoutRef.current) {
+          window.clearTimeout(jumpHighlightTimeoutRef.current);
+          jumpHighlightTimeoutRef.current = null;
+        }
+        jumpHighlightTimeoutRef.current = window.setTimeout(() => {
+          setJumpHighlightMessageId((current) =>
+            current === targetMessageId ? null : current
+          );
+          jumpHighlightTimeoutRef.current = null;
+        }, 1400);
+        return;
+      }
+      if (attempts >= maxAttempts) return;
+      attempts += 1;
+      window.setTimeout(tryJump, 90);
+    };
+    window.requestAnimationFrame(tryJump);
+  };
+
+  const handleBubbleContextMenu = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    message: MessageRow
+  ): void => {
     event.preventDefault();
-    const menuWidth = 188;
-    const menuHeight = 68;
+    const selection = window.getSelection();
+    let selectedText = '';
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (event.currentTarget.contains(range.commonAncestorContainer)) {
+        selectedText = selection.toString().trim();
+      }
+    }
+
+    const canReply = !message.deletedAt && !message.localOnly;
+    const canDelete =
+      !message.deletedAt &&
+      !message.localOnly &&
+      message.direction === 'out' &&
+      message.senderDeviceId === profile.deviceId;
+    const itemCount = (canReply ? 1 : 0) + (selectedText ? 1 : 0) + (canDelete ? 1 : 0);
+    if (itemCount <= 0) {
+      setMessageContextMenu(null);
+      return;
+    }
+    const menuWidth = 220;
+    const menuHeight = itemCount * 42 + 12;
     const rootRect = paneRootRef.current?.getBoundingClientRect();
     const rootLeft = rootRect?.left ?? 0;
     const rootTop = rootRect?.top ?? 0;
@@ -142,7 +257,14 @@ export const AnnouncementsView = ({
     const maxY = window.innerHeight - 8 - rootTop - menuHeight;
     const x = Math.min(Math.max(event.clientX - rootLeft, minX), maxX);
     const y = Math.min(Math.max(event.clientY - rootTop, minY), maxY);
-    setSelectionContextMenu({ x, y, text: selectedText });
+
+    setMessageContextMenu({
+      x,
+      y,
+      messageId: message.messageId,
+      selectedText,
+      canDelete
+    });
   };
 
   const isNearBottom = (): boolean => {
@@ -170,8 +292,8 @@ export const AnnouncementsView = ({
   }, []);
 
   useEffect(() => {
-    if (!selectionContextMenu) return;
-    const close = () => setSelectionContextMenu(null);
+    if (!messageContextMenu) return;
+    const close = () => setMessageContextMenu(null);
     window.addEventListener('click', close);
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
@@ -180,7 +302,17 @@ export const AnnouncementsView = ({
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close);
     };
-  }, [selectionContextMenu]);
+  }, [messageContextMenu]);
+
+  useEffect(
+    () => () => {
+      if (jumpHighlightTimeoutRef.current) {
+        window.clearTimeout(jumpHighlightTimeoutRef.current);
+        jumpHighlightTimeoutRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -261,30 +393,55 @@ export const AnnouncementsView = ({
             const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
             const reactionPickerOpen = reactionPickerMessageId === message.messageId;
+            const hasReplyReference = Boolean(message.replyToMessageId);
+            const replySenderLabel = message.replyToSenderDeviceId
+              ? senderLabelForMessage(message.replyToSenderDeviceId)
+              : 'Mensagem';
+            const replyPreview =
+              message.replyToType === 'file'
+                ? `📎 ${message.replyToFileName || message.replyToPreviewText || 'Arquivo'}`
+                : message.replyToPreviewText || 'Mensagem indisponível';
 
             return (
               <div
                 key={message.messageId}
-                className={`bubble-row ${outgoing ? 'out' : 'in'} has-actions ${hasCounters ? 'has-static-reaction' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''}`}
+                className={`bubble-row ${outgoing ? 'out' : 'in'} has-actions ${hasCounters ? 'has-static-reaction' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''}`}
+                ref={(node) => {
+                  messageRowRefs.current[message.messageId] = node;
+                }}
               >
                 {!outgoing && <Avatar emoji={emoji} bg={bg} size={30} />}
                 <div className={`bubble-block ${outgoing ? 'out' : 'in'}`}>
                   <div className={`bubble ${outgoing ? 'out' : 'in'}`}>
-                    <div onContextMenu={handleBubbleContextMenu}>
-                    <div className="announcement-meta">
-                      <span className="announcement-sender">{senderName}</span>
-                      <span className="announcement-expiry-clock">
-                        <Clock20Regular />
-                        {formatRemaining(message.createdAt)}
-                      </span>
-                    </div>
-                    <div className="message-text">{renderMessageText(message.bodyText || '')}</div>
-                    <div className="bubble-meta">
-                      <span className="bubble-time">
-                        <Checkmark20Regular />
-                        <span>{formatTime(message.createdAt)}</span>
-                      </span>
-                    </div>
+                    <div onContextMenu={(event) => handleBubbleContextMenu(event, message)}>
+                      {hasReplyReference && (
+                        <button
+                          type="button"
+                          className="reply-reference"
+                          onClick={() => {
+                            if (message.replyToMessageId) {
+                              void jumpToReferencedMessage(message.replyToMessageId);
+                            }
+                          }}
+                        >
+                          <span className="reply-reference-author">{replySenderLabel}</span>
+                          <span className="reply-reference-preview">{replyPreview}</span>
+                        </button>
+                      )}
+                      <div className="announcement-meta">
+                        <span className="announcement-sender">{senderName}</span>
+                        <span className="announcement-expiry-clock">
+                          <Clock20Regular />
+                          {formatRemaining(message.createdAt)}
+                        </span>
+                      </div>
+                      <div className="message-text">{renderMessageText(message.bodyText || '')}</div>
+                      <div className="bubble-meta">
+                        <span className="bubble-time">
+                          <Checkmark20Regular />
+                          <span>{formatTime(message.createdAt)}</span>
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -307,6 +464,15 @@ export const AnnouncementsView = ({
                       ) : (
                         <Emoji20Regular />
                       )}
+                    </button>
+                    <button
+                      type="button"
+                      className="reaction-trigger reply-trigger"
+                      onClick={() => startReplyToMessage(message)}
+                      title="Responder"
+                      aria-label="Responder"
+                    >
+                      <ArrowReply20Regular />
                     </button>
                     <div
                       className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
@@ -378,7 +544,12 @@ export const AnnouncementsView = ({
         placeholder="Enviar anúncio para todos online"
         disabled={!relayConnected}
         autoFocusKey="announcements"
-        onSend={onSend}
+        onSend={async (text, replyTo) => {
+          await onSend(text, replyTo);
+          setReplyDraft(null);
+        }}
+        replyDraft={replyDraft}
+        onCancelReply={() => setReplyDraft(null)}
       />
       <ConfirmDialog
         open={Boolean(pendingDeleteMessageId)}
@@ -394,25 +565,63 @@ export const AnnouncementsView = ({
         }}
       />
 
-      {selectionContextMenu && (
+      {messageContextMenu && (
         <div
           className="chat-context-menu"
-          style={{ left: selectionContextMenu.x, top: selectionContextMenu.y }}
+          style={{ left: messageContextMenu.x, top: messageContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          <button
-            type="button"
-            className="chat-context-item"
-            onClick={() => {
-              void copySelectedText(selectionContextMenu.text);
-              setSelectionContextMenu(null);
-            }}
-          >
-            <span className="menu-item-icon">
-              <Copy20Regular />
-            </span>
-            <span>Copiar texto</span>
-          </button>
+          {(() => {
+            const message = messages.find((row) => row.messageId === messageContextMenu.messageId) || null;
+            if (!message || message.deletedAt || message.localOnly) {
+              return null;
+            }
+            return (
+              <button
+                type="button"
+                className="chat-context-item"
+                onClick={() => {
+                  startReplyToMessage(message);
+                  setMessageContextMenu(null);
+                }}
+              >
+                <span className="menu-item-icon">
+                  <ArrowReply20Regular />
+                </span>
+                <span>Responder</span>
+              </button>
+            );
+          })()}
+          {Boolean(messageContextMenu.selectedText.trim()) && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                void copySelectedText(messageContextMenu.selectedText);
+                setMessageContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <Copy20Regular />
+              </span>
+              <span>Copiar texto</span>
+            </button>
+          )}
+          {messageContextMenu.canDelete && (
+            <button
+              type="button"
+              className="chat-context-item danger"
+              onClick={() => {
+                setPendingDeleteMessageId(messageContextMenu.messageId);
+                setMessageContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <Delete20Regular />
+              </span>
+              <span>Excluir</span>
+            </button>
+          )}
         </div>
       )}
     </div>

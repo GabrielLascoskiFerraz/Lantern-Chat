@@ -48,6 +48,7 @@ export interface ProtocolFrame<T = unknown> {
 
 export interface ChatTextPayload {
   text: string;
+  replyTo?: MessageReplyPayload | null;
 }
 
 export interface AckPayload {
@@ -94,6 +95,11 @@ export interface SyncMessagePayload {
   status: 'sent' | 'delivered' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
+  replyToMessageId: string | null;
+  replyToSenderDeviceId: string | null;
+  replyToType: 'text' | 'announcement' | 'file' | null;
+  replyToPreviewText: string | null;
+  replyToFileName: string | null;
   createdAt: number;
 }
 
@@ -103,6 +109,15 @@ export interface SyncResponsePayload {
 
 export interface AnnouncementPayload {
   text: string;
+  replyTo?: MessageReplyPayload | null;
+}
+
+export interface MessageReplyPayload {
+  messageId: string;
+  senderDeviceId: string;
+  type: 'text' | 'announcement' | 'file';
+  previewText: string | null;
+  fileName: string | null;
 }
 
 export interface FileOfferPayload {
@@ -140,6 +155,11 @@ export interface DbMessage {
   status: 'sent' | 'delivered' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
+  replyToMessageId: string | null;
+  replyToSenderDeviceId: string | null;
+  replyToType: 'text' | 'announcement' | 'file' | null;
+  replyToPreviewText: string | null;
+  replyToFileName: string | null;
   createdAt: number;
 }
 

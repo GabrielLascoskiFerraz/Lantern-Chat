@@ -5,6 +5,7 @@ import {
   Textarea
 } from '@fluentui/react-components';
 import {
+  ArrowReply20Regular,
   Attach20Regular,
   ClipboardPaste20Regular,
   Copy20Regular,
@@ -14,16 +15,22 @@ import {
   Emoji20Regular,
   Send20Filled
 } from '@fluentui/react-icons';
-import { ipcClient } from '../api/ipcClient';
+import { ipcClient, MessageReplyReference } from '../api/ipcClient';
 
 interface MessageComposerProps {
   disabled?: boolean;
   autoFocusKey?: string;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTypingChange?: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string) => Promise<void>;
   onPaste?: () => void;
+  replyDraft?: ComposerReplyDraft | null;
+  onCancelReply?: () => void;
   placeholder: string;
+}
+
+interface ComposerReplyDraft extends MessageReplyReference {
+  senderLabel: string;
 }
 
 interface PendingAttachmentInfo {
@@ -449,6 +456,8 @@ export const MessageComposer = ({
   onTypingChange,
   onSendFile,
   onPaste,
+  replyDraft,
+  onCancelReply,
   placeholder
 }: MessageComposerProps) => {
   const [text, setText] = useState('');
@@ -659,6 +668,37 @@ export const MessageComposer = ({
     });
 
     return () => window.cancelAnimationFrame(frame);
+  }, [emojiOpen]);
+
+  useEffect(() => {
+    if (!emojiOpen) return;
+
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        !composerRootRef.current?.contains(active) &&
+        !emojiPickerRef.current?.contains(active)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setEmojiOpen(false);
+
+      window.requestAnimationFrame(() => {
+        const textarea = composerRootRef.current?.querySelector('textarea');
+        if (!(textarea instanceof HTMLTextAreaElement)) return;
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      });
+    };
+
+    window.addEventListener('keydown', onEscape, true);
+    return () => window.removeEventListener('keydown', onEscape, true);
   }, [emojiOpen]);
 
   useEffect(() => {
@@ -942,7 +982,18 @@ export const MessageComposer = ({
     try {
       setText('');
       if (trimmed) {
-        await onSend(trimmed);
+        const replyTo =
+          replyDraft
+            ? {
+                messageId: replyDraft.messageId,
+                senderDeviceId: replyDraft.senderDeviceId,
+                type: replyDraft.type,
+                previewText: replyDraft.previewText || null,
+                fileName: replyDraft.fileName || null
+              }
+            : null;
+        await onSend(trimmed, replyTo);
+        onCancelReply?.();
       }
       if (pendingFilePaths.length > 0 && onSendFile) {
         const filePathsToSend = [...pendingFilePaths];
@@ -1158,9 +1209,36 @@ export const MessageComposer = ({
     pasteProgressItems.length > 0 ||
     isPastingFiles ||
     Boolean(pasteFeedback);
+  const replyPreviewText = useMemo(() => {
+    if (!replyDraft) return '';
+    if (replyDraft.type === 'file') {
+      return replyDraft.fileName || replyDraft.previewText || 'Arquivo';
+    }
+    return replyDraft.previewText || 'Mensagem';
+  }, [replyDraft]);
 
   return (
     <div className={`composer ${isDragOverFiles ? 'drag-over' : ''}`} ref={composerRootRef}>
+      {replyDraft && (
+        <div className="composer-reply-draft" role="status">
+          <span className="composer-reply-draft-icon" aria-hidden>
+            <ArrowReply20Regular />
+          </span>
+          <div className="composer-reply-draft-content">
+            <span className="composer-reply-draft-title">Respondendo a {replyDraft.senderLabel}</span>
+            <span className="composer-reply-draft-preview">{replyPreviewText}</span>
+          </div>
+          <button
+            type="button"
+            className="composer-reply-draft-cancel"
+            onClick={() => onCancelReply?.()}
+            aria-label="Cancelar resposta"
+            title="Cancelar resposta"
+          >
+            <Dismiss12Regular />
+          </button>
+        </div>
+      )}
       {showAttachmentPanel && (
         <div
           className={`composer-attachment-pending ${isSubmitting ? 'sending' : ''} ${

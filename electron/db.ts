@@ -288,9 +288,53 @@ export class DbService {
   saveMessage(message: DbMessage): boolean {
     const insert = this.db.prepare(
       `INSERT OR IGNORE INTO messages
-       (messageId, conversationId, direction, senderDeviceId, receiverDeviceId, type, bodyText, fileId, fileName, fileSize, fileSha256, filePath, status, reaction, deletedAt, createdAt)
+       (
+         messageId,
+         conversationId,
+         direction,
+         senderDeviceId,
+         receiverDeviceId,
+         type,
+         bodyText,
+         fileId,
+         fileName,
+         fileSize,
+         fileSha256,
+         filePath,
+         status,
+         reaction,
+         deletedAt,
+         replyToMessageId,
+         replyToSenderDeviceId,
+         replyToType,
+         replyToPreviewText,
+         replyToFileName,
+         createdAt
+       )
        VALUES
-       (@messageId, @conversationId, @direction, @senderDeviceId, @receiverDeviceId, @type, @bodyText, @fileId, @fileName, @fileSize, @fileSha256, @filePath, @status, @reaction, @deletedAt, @createdAt)`
+       (
+         @messageId,
+         @conversationId,
+         @direction,
+         @senderDeviceId,
+         @receiverDeviceId,
+         @type,
+         @bodyText,
+         @fileId,
+         @fileName,
+         @fileSize,
+         @fileSha256,
+         @filePath,
+         @status,
+         @reaction,
+         @deletedAt,
+         @replyToMessageId,
+         @replyToSenderDeviceId,
+         @replyToType,
+         @replyToPreviewText,
+         @replyToFileName,
+         @createdAt
+       )`
     );
 
     const touchConversation = this.db.prepare(
@@ -631,6 +675,11 @@ export class DbService {
     status: 'sent' | 'delivered' | 'failed' | null;
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
     deletedAt: number | null;
+    replyToMessageId: string | null;
+    replyToSenderDeviceId: string | null;
+    replyToType: 'text' | 'announcement' | 'file' | null;
+    replyToPreviewText: string | null;
+    replyToFileName: string | null;
   }): DbMessage | undefined {
     this.db
       .prepare(
@@ -646,7 +695,12 @@ export class DbService {
                ELSE COALESCE(?, status)
              END,
              reaction = ?,
-             deletedAt = ?
+             deletedAt = ?,
+             replyToMessageId = COALESCE(?, replyToMessageId),
+             replyToSenderDeviceId = COALESCE(?, replyToSenderDeviceId),
+             replyToType = COALESCE(?, replyToType),
+             replyToPreviewText = COALESCE(?, replyToPreviewText),
+             replyToFileName = COALESCE(?, replyToFileName)
          WHERE messageId = ?`
       )
       .run(
@@ -663,6 +717,11 @@ export class DbService {
         input.status,
         input.reaction,
         input.deletedAt,
+        input.replyToMessageId,
+        input.replyToSenderDeviceId,
+        input.replyToType,
+        input.replyToPreviewText,
+        input.replyToFileName,
         input.messageId
       );
     return this.getMessageById(input.messageId);

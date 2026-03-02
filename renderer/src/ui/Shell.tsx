@@ -107,7 +107,7 @@ export const Shell = () => {
           profile={profile}
           peers={peers}
           reactionsByMessageId={announcementReactionsByMessage}
-          onSend={sendAnnouncement}
+          onSend={(text, replyTo) => sendAnnouncement(text, replyTo)}
           relayConnected={Boolean(relaySettings?.connected)}
           onReactToMessage={(messageId, reaction) =>
             reactToMessage(ANNOUNCEMENTS_ID, messageId, reaction)
@@ -137,8 +137,8 @@ export const Shell = () => {
         transferByFileId={transferMap}
         hasMoreOlder={hasMoreHistory}
         loadingOlder={loadingOlderHistory}
-        onSend={(text) =>
-          peer ? sendText(peer.deviceId, text) : Promise.resolve()
+        onSend={(text, replyTo) =>
+          peer ? sendText(peer.deviceId, text, replyTo) : Promise.resolve()
         }
         onTyping={(isTyping) =>
           peer

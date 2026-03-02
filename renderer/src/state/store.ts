@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   AnnouncementReactionSummary,
   ipcClient,
+  MessageReplyReference,
   MessageRow,
   Peer,
   Profile,
@@ -59,9 +60,13 @@ interface LanternState {
     conversationId: string,
     messageIds: string[]
   ) => Promise<void>;
-  sendText: (peerId: string, text: string) => Promise<void>;
+  sendText: (
+    peerId: string,
+    text: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<void>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
-  sendAnnouncement: (text: string) => Promise<void>;
+  sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   sendFile: (peerId: string, filePath: string) => Promise<void>;
   reactToMessage: (
     conversationId: string,
@@ -979,10 +984,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       };
     });
   },
-  sendText: async (peerId, text) => {
+  sendText: async (peerId, text, replyTo) => {
     const conversationId = `dm:${peerId}`;
     try {
-      const message = await ipcClient.sendText(peerId, text);
+      const message = await ipcClient.sendText(peerId, text, replyTo);
       set((state) => ({
         messagesByConversation: {
           ...state.messagesByConversation,
@@ -1013,6 +1018,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         status: 'sent',
         reaction: null,
         deletedAt: null,
+        replyToMessageId: replyTo?.messageId || null,
+        replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+        replyToType: replyTo?.type || null,
+        replyToPreviewText: replyTo?.previewText || null,
+        replyToFileName: replyTo?.fileName || null,
         createdAt: Date.now(),
         localOnly: true
       };
@@ -1039,9 +1049,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       // ignora falhas silenciosamente
     }
   },
-  sendAnnouncement: async (text) => {
+  sendAnnouncement: async (text, replyTo) => {
     try {
-      const message = await ipcClient.sendAnnouncement(text);
+      const message = await ipcClient.sendAnnouncement(text, replyTo);
       set((state) => ({
         messagesByConversation: {
           ...state.messagesByConversation,
