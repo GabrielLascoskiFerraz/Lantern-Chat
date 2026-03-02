@@ -22,7 +22,8 @@ const api = {
     ipcRenderer.invoke('lantern:sendTyping', peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
-  sendFile: (peerId: string, filePath: string) => ipcRenderer.invoke('lantern:sendFile', peerId, filePath),
+  sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
   reactToMessage: (
     conversationId: string,
     messageId: string,

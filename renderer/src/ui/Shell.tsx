@@ -145,9 +145,9 @@ export const Shell = () => {
             ? sendTyping(peer.deviceId, isTyping)
             : Promise.resolve()
         }
-        onSendFile={(filePath) =>
+        onSendFile={(filePath, replyTo) =>
           peer
-            ? sendFile(peer.deviceId, filePath)
+            ? sendFile(peer.deviceId, filePath, replyTo)
             : Promise.resolve()
         }
         onReactToMessage={(messageId, reaction) =>

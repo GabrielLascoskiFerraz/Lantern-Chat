@@ -134,7 +134,11 @@ interface LanternApi {
   ) => Promise<MessageRow>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<MessageRow>;
-  sendFile: (peerId: string, filePath: string) => Promise<MessageRow>;
+  sendFile: (
+    peerId: string,
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -204,7 +208,8 @@ export const ipcClient = {
   sendTyping: (peerId: string, isTyping: boolean) => window.lantern.sendTyping(peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendAnnouncement(text, replyTo),
-  sendFile: (peerId: string, filePath: string) => window.lantern.sendFile(peerId, filePath),
+  sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendFile(peerId, filePath, replyTo),
   reactToMessage: (
     conversationId: string,
     messageId: string,

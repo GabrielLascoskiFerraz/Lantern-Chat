@@ -260,7 +260,7 @@ class LanternApp {
       sendText: (peerId, text, replyTo) => this.messageService.sendText(peerId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
       sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
-      sendFile: (peerId, filePath) => this.messageService.sendFile(peerId, filePath),
+      sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
       reactToMessage: (conversationId, messageId, reaction) =>
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
@@ -906,21 +906,9 @@ class LanternApp {
   ): Promise<DbMessage | null> {
     const targetMessage = this.db.getMessageById(messageId);
     if (!targetMessage) return null;
-    const summary = this.db.setMessageReaction(
-      messageId,
-      this.profile.deviceId,
-      reaction,
-      this.profile.deviceId
-    );
-    this.emitEvent({
-      type:
-        conversationId === ANNOUNCEMENTS_CONVERSATION_ID || targetMessage.type === 'announcement'
-          ? 'announcement:reactions'
-          : 'message:reactions',
-      messageId,
-      summary
-    });
 
+    const isAnnouncementConversation =
+      conversationId === ANNOUNCEMENTS_CONVERSATION_ID || targetMessage.type === 'announcement';
     const peer = this.getPeerFromConversationId(conversationId);
     if (peer) {
       const frame: ProtocolFrame<ReactPayload> = {
@@ -934,20 +922,50 @@ class LanternApp {
           reaction
         }
       };
-      await this.sendToPeer(peer, frame);
+      try {
+        await this.sendToPeer(peer, frame);
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'warning',
+          message: 'Contato offline. Reação não enviada.'
+        });
+        return targetMessage;
+      }
     } else if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
-      await this.sendBroadcast({
-        type: 'chat:react',
-        messageId: randomUUID(),
-        from: this.profile.deviceId,
-        to: null,
-        createdAt: Date.now(),
-        payload: {
-          targetMessageId: messageId,
-          reaction
-        }
-      } satisfies ProtocolFrame<ReactPayload>);
+      try {
+        await this.sendBroadcast({
+          type: 'chat:react',
+          messageId: randomUUID(),
+          from: this.profile.deviceId,
+          to: null,
+          createdAt: Date.now(),
+          payload: {
+            targetMessageId: messageId,
+            reaction
+          }
+        } satisfies ProtocolFrame<ReactPayload>);
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'warning',
+          message: 'Relay offline. Reação não enviada.'
+        });
+        return targetMessage;
+      }
     }
+
+    const summary = this.db.setMessageReaction(
+      messageId,
+      this.profile.deviceId,
+      reaction,
+      this.profile.deviceId
+    );
+    this.emitEvent({
+      type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
+      messageId,
+      summary
+    });
     return targetMessage;
   }
 
@@ -1395,6 +1413,7 @@ class LanternApp {
       }
       case 'file:offer': {
         const payload = frame.payload as FileOfferPayload;
+        const replyTo = this.normalizeReplyPayload(payload.replyTo);
         const conversationId = this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
@@ -1428,11 +1447,13 @@ class LanternApp {
           status: 'sent',
           reaction: null,
           deletedAt: null,
-          replyToMessageId: existingMessage?.replyToMessageId || null,
-          replyToSenderDeviceId: existingMessage?.replyToSenderDeviceId || null,
-          replyToType: existingMessage?.replyToType || null,
-          replyToPreviewText: existingMessage?.replyToPreviewText || null,
-          replyToFileName: existingMessage?.replyToFileName || null,
+          replyToMessageId: replyTo?.messageId || existingMessage?.replyToMessageId || null,
+          replyToSenderDeviceId:
+            replyTo?.senderDeviceId || existingMessage?.replyToSenderDeviceId || null,
+          replyToType: replyTo?.type || existingMessage?.replyToType || null,
+          replyToPreviewText:
+            replyTo?.previewText || existingMessage?.replyToPreviewText || null,
+          replyToFileName: replyTo?.fileName || existingMessage?.replyToFileName || null,
           createdAt
         };
 

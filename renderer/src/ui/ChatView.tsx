@@ -48,7 +48,7 @@ interface ChatViewProps {
   recentMessageIds: Record<string, number>;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
-  onSendFile?: (filePath: string) => Promise<void>;
+  onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onClearConversation: () => Promise<void>;

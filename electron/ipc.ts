@@ -52,7 +52,11 @@ export interface IpcBindings {
   ) => Promise<DbMessage>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) => Promise<DbMessage>;
-  sendFile: (peerId: string, filePath: string) => Promise<DbMessage>;
+  sendFile: (
+    peerId: string,
+    filePath: string,
+    replyTo?: MessageReplyPayload | null
+  ) => Promise<DbMessage>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -360,8 +364,14 @@ export const registerIpc = (
     (_event, text: string, replyTo?: MessageReplyPayload | null) =>
       bindings.sendAnnouncement(text, replyTo)
   );
-  ipcMain.handle('lantern:sendFile', (_event, peerId: string, filePath: string) =>
-    bindings.sendFile(peerId, filePath)
+  ipcMain.handle(
+    'lantern:sendFile',
+    (
+      _event,
+      peerId: string,
+      filePath: string,
+      replyTo?: MessageReplyPayload | null
+    ) => bindings.sendFile(peerId, filePath, replyTo)
   );
   ipcMain.handle(
     'lantern:reactToMessage',

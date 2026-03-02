@@ -22,7 +22,7 @@ interface MessageComposerProps {
   autoFocusKey?: string;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTypingChange?: (isTyping: boolean) => Promise<void>;
-  onSendFile?: (filePath: string) => Promise<void>;
+  onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onPaste?: () => void;
   replyDraft?: ComposerReplyDraft | null;
   onCancelReply?: () => void;
@@ -981,26 +981,31 @@ export const MessageComposer = ({
     setIsSubmitting(true);
     try {
       setText('');
+      const replyTo =
+        replyDraft
+          ? {
+              messageId: replyDraft.messageId,
+              senderDeviceId: replyDraft.senderDeviceId,
+              type: replyDraft.type,
+              previewText: replyDraft.previewText || null,
+              fileName: replyDraft.fileName || null
+            }
+          : null;
+      let sentSomething = false;
       if (trimmed) {
-        const replyTo =
-          replyDraft
-            ? {
-                messageId: replyDraft.messageId,
-                senderDeviceId: replyDraft.senderDeviceId,
-                type: replyDraft.type,
-                previewText: replyDraft.previewText || null,
-                fileName: replyDraft.fileName || null
-              }
-            : null;
         await onSend(trimmed, replyTo);
-        onCancelReply?.();
+        sentSomething = true;
       }
       if (pendingFilePaths.length > 0 && onSendFile) {
         const filePathsToSend = [...pendingFilePaths];
         setPendingFilePaths([]);
         for (const filePath of filePathsToSend) {
-          await onSendFile(filePath);
+          await onSendFile(filePath, replyTo);
         }
+        sentSomething = true;
+      }
+      if (sentSomething && replyTo) {
+        onCancelReply?.();
       }
     } finally {
       setIsSubmitting(false);

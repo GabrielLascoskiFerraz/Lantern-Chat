@@ -67,7 +67,11 @@ interface LanternState {
   ) => Promise<void>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
-  sendFile: (peerId: string, filePath: string) => Promise<void>;
+  sendFile: (
+    peerId: string,
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<void>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -1088,9 +1092,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
-  sendFile: async (peerId, filePath) => {
+  sendFile: async (peerId, filePath, replyTo) => {
     try {
-      const message = await ipcClient.sendFile(peerId, filePath);
+      const message = await ipcClient.sendFile(peerId, filePath, replyTo);
       set((state) => ({
         messagesByConversation: {
           ...state.messagesByConversation,
@@ -1117,7 +1121,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }
   },
   reactToMessage: async (conversationId, messageId, reaction) => {
-    await ipcClient.reactToMessage(conversationId, messageId, reaction);
+    try {
+      await ipcClient.reactToMessage(conversationId, messageId, reaction);
+    } catch {
+      // O main já envia toast amigável; aqui evitamos rejeição não tratada no renderer.
+    }
   },
   deleteMessageForEveryone: async (conversationId, messageId) => {
     const updated = await ipcClient.deleteMessageForEveryone(conversationId, messageId);

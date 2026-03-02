@@ -126,6 +126,7 @@ export interface FileOfferPayload {
   filename: string;
   size: number;
   sha256: string;
+  replyTo?: MessageReplyPayload | null;
 }
 
 export interface FileChunkPayload {
