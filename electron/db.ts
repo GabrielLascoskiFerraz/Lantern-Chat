@@ -352,18 +352,52 @@ export class DbService {
     return tx(message);
   }
 
-  updateMessageStatus(messageId: string, status: 'sent' | 'delivered' | 'failed'): void {
+  updateMessageStatus(
+    messageId: string,
+    status: 'sent' | 'delivered' | 'read' | 'failed'
+  ): void {
     this.db
       .prepare(
         `UPDATE messages
          SET status = CASE
-           WHEN status = 'delivered' THEN 'delivered'
+           WHEN COALESCE(status, '') = 'read' THEN 'read'
+           WHEN ? = 'read' THEN 'read'
+           WHEN COALESCE(status, '') = 'delivered' AND ? IN ('sent', 'failed') THEN 'delivered'
            WHEN ? = 'delivered' THEN 'delivered'
            ELSE ?
          END
          WHERE messageId = ?`
       )
-      .run(status, status, messageId);
+      .run(status, status, status, status, messageId);
+  }
+
+  markIncomingMessagesRead(conversationId: string, limit = 500): string[] {
+    const normalizedLimit = Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 500;
+    const candidateRows = this.db
+      .prepare(
+        `SELECT messageId
+         FROM messages
+         WHERE conversationId = ?
+           AND direction = 'in'
+           AND type IN ('text', 'file')
+           AND deletedAt IS NULL
+           AND status = 'delivered'
+         ORDER BY createdAt ASC, messageId ASC
+         LIMIT ?`
+      )
+      .all(conversationId, normalizedLimit) as Array<{ messageId: string }>;
+
+    const ids = candidateRows.map((row) => row.messageId).filter((value) => value.length > 0);
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db
+      .prepare(`UPDATE messages SET status = 'read' WHERE messageId IN (${placeholders})`)
+      .run(...ids);
+
+    return ids;
   }
 
   updateFilePath(fileId: string, filePath: string, status: 'delivered' | 'failed'): void {
@@ -376,6 +410,7 @@ export class DbService {
              ELSE ?
            END,
            status = CASE
+             WHEN status = 'read' THEN 'read'
              WHEN status = 'delivered' THEN 'delivered'
              WHEN ? = 'delivered' THEN 'delivered'
              ELSE ?
@@ -672,7 +707,7 @@ export class DbService {
     fileName: string | null;
     fileSize: number | null;
     fileSha256: string | null;
-    status: 'sent' | 'delivered' | 'failed' | null;
+    status: 'sent' | 'delivered' | 'read' | 'failed' | null;
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
     deletedAt: number | null;
     replyToMessageId: string | null;
@@ -690,8 +725,10 @@ export class DbService {
              fileSize = CASE WHEN ? IS NOT NULL THEN ? ELSE fileSize END,
              fileSha256 = CASE WHEN ? IS NOT NULL THEN ? ELSE fileSha256 END,
              status = CASE
-               WHEN status = 'delivered' THEN 'delivered'
-               WHEN ? = 'delivered' THEN 'delivered'
+               WHEN COALESCE(status, '') = 'read' THEN 'read'
+               WHEN COALESCE(?, '') = 'read' THEN 'read'
+               WHEN COALESCE(status, '') = 'delivered' AND COALESCE(?, '') IN ('sent', 'failed') THEN 'delivered'
+               WHEN COALESCE(?, '') = 'delivered' THEN 'delivered'
                ELSE COALESCE(?, status)
              END,
              reaction = ?,
@@ -713,6 +750,8 @@ export class DbService {
         input.fileSize,
         input.fileSha256,
         input.fileSha256,
+        input.status,
+        input.status,
         input.status,
         input.status,
         input.reaction,

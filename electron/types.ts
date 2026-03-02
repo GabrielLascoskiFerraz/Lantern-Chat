@@ -53,7 +53,7 @@ export interface ChatTextPayload {
 
 export interface AckPayload {
   ackMessageId: string;
-  status: 'delivered';
+  status: 'delivered' | 'read';
 }
 
 export interface ReactPayload {
@@ -92,7 +92,7 @@ export interface SyncMessagePayload {
   fileName: string | null;
   fileSize: number | null;
   fileSha256: string | null;
-  status: 'sent' | 'delivered' | 'failed' | null;
+  status: 'sent' | 'delivered' | 'read' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
   replyToMessageId: string | null;
@@ -153,7 +153,7 @@ export interface DbMessage {
   fileSize: number | null;
   fileSha256: string | null;
   filePath: string | null;
-  status: 'sent' | 'delivered' | 'failed' | null;
+  status: 'sent' | 'delivered' | 'read' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
   replyToMessageId: string | null;
@@ -191,7 +191,7 @@ export type AppEvent =
       type: 'message:status';
       messageId: string;
       conversationId: string | null;
-      status: 'delivered' | 'failed';
+      status: 'delivered' | 'read' | 'failed';
     }
   | { type: 'typing:update'; conversationId: string; peerId: string; isTyping: boolean }
   | { type: 'ui:toast'; level: 'info' | 'success' | 'warning' | 'error'; message: string }

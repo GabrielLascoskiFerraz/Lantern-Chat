@@ -28,6 +28,8 @@ export const Shell = () => {
     conversationPreviewById,
     recentMessageIds,
     unreadByConversation,
+    openedUnreadCountByConversation,
+    unreadAnchorMessageIdByConversation,
     typingByConversation,
     sendText,
     sendTyping,
@@ -161,6 +163,8 @@ export const Shell = () => {
         onOpenFile={openFile}
         onSaveFileAs={saveFileAs}
         recentMessageIds={recentMessageIds}
+        unreadAtOpen={openedUnreadCountByConversation[conversationId] || 0}
+        unreadAnchorMessageId={unreadAnchorMessageIdByConversation[conversationId] || null}
         onSearchMessageIds={(query) => searchMessageIds(conversationId, query)}
         onLoadOlderMessages={() => loadOlderMessages(conversationId)}
         onEnsureMessagesLoaded={(messageIds) =>

@@ -46,6 +46,8 @@ interface ChatViewProps {
   hasMoreOlder: boolean;
   loadingOlder: boolean;
   recentMessageIds: Record<string, number>;
+  unreadAtOpen: number;
+  unreadAnchorMessageId: string | null;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
@@ -94,6 +96,7 @@ const formatDateSeparator = (value: number): string => {
 };
 
 const statusLabel = (status: MessageRow['status']): string => {
+  if (status === 'read') return 'Entregue';
   if (status === 'delivered') return 'Entregue';
   if (status === 'failed') return 'Não enviada';
   return 'Pendente';
@@ -106,6 +109,7 @@ const renderOutgoingStatusIcon = (status: MessageRow['status']): ReactNode => {
   if (status === 'failed') {
     return <Dismiss20Regular className="bubble-time-icon failed" />;
   }
+  if (status === 'read') return <Checkmark20Regular className="bubble-time-icon delivered" />;
   return <Checkmark20Regular className="bubble-time-icon delivered" />;
 };
 
@@ -142,7 +146,7 @@ const transferStageLabel = (
       tone: 'active'
     };
   }
-  if (message.status === 'delivered') {
+  if (message.status === 'delivered' || message.status === 'read') {
     return { label: 'Concluído', tone: 'done' };
   }
   if (message.status === 'sent') {
@@ -251,6 +255,8 @@ export const ChatView = ({
   hasMoreOlder,
   loadingOlder,
   recentMessageIds,
+  unreadAtOpen,
+  unreadAnchorMessageId,
   onSend,
   onTyping,
   onSendFile,
@@ -302,6 +308,7 @@ export const ChatView = ({
     selectedText: string;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
+  const [showUnreadSeparator, setShowUnreadSeparator] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -309,6 +316,7 @@ export const ChatView = ({
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const jumpHighlightTimeoutRef = useRef<number | null>(null);
+  const unreadSeparatorTimeoutRef = useRef<number | null>(null);
   const scrollMetricsRef = useRef<{ top: number; height: number; client: number }>({
     top: 0,
     height: 0,
@@ -494,6 +502,28 @@ export const ChatView = ({
   useEffect(() => {
     setReplyDraft(null);
   }, [conversationId]);
+
+  useEffect(() => {
+    if (unreadSeparatorTimeoutRef.current) {
+      window.clearTimeout(unreadSeparatorTimeoutRef.current);
+      unreadSeparatorTimeoutRef.current = null;
+    }
+    if (!unreadAnchorMessageId || unreadAtOpen <= 0) {
+      setShowUnreadSeparator(false);
+      return;
+    }
+    setShowUnreadSeparator(true);
+    unreadSeparatorTimeoutRef.current = window.setTimeout(() => {
+      setShowUnreadSeparator(false);
+      unreadSeparatorTimeoutRef.current = null;
+    }, 6200);
+    return () => {
+      if (unreadSeparatorTimeoutRef.current) {
+        window.clearTimeout(unreadSeparatorTimeoutRef.current);
+        unreadSeparatorTimeoutRef.current = null;
+      }
+    };
+  }, [conversationId, unreadAtOpen, unreadAnchorMessageId]);
 
   useEffect(() => {
     hasMoreOlderRef.current = hasMoreOlder;
@@ -1172,6 +1202,13 @@ export const ChatView = ({
                   <span>{formatDateSeparator(message.createdAt)}</span>
                 </div>
               )}
+              {showUnreadSeparator &&
+                !normalizedQuery &&
+                unreadAnchorMessageId === message.messageId && (
+                  <div className="messages-new-separator">
+                    <span>Novas mensagens</span>
+                  </div>
+                )}
               <div
                 className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''}`}
                 ref={(node) => {

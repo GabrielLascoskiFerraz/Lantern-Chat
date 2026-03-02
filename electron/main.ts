@@ -276,9 +276,9 @@ class LanternApp {
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
       setActiveConversation: (conversationId) => {
         this.activeConversationId = conversationId;
-        this.db.markConversationRead(conversationId);
+        this.markConversationRead(conversationId);
       },
-      markConversationRead: (conversationId) => this.db.markConversationRead(conversationId),
+      markConversationRead: (conversationId) => this.markConversationRead(conversationId),
       markConversationUnread: (conversationId) => this.db.markConversationUnread(conversationId),
       clearConversation: (conversationId) => this.clearConversation(conversationId),
       forgetContactConversation: (conversationId) => this.forgetContactConversation(conversationId),
@@ -741,6 +741,38 @@ class LanternApp {
     };
   }
 
+  private markConversationRead(conversationId: string): void {
+    this.db.markConversationRead(conversationId);
+
+    if (!conversationId.startsWith('dm:')) {
+      return;
+    }
+
+    const peer = this.getPeerFromConversationId(conversationId);
+    if (!peer) {
+      return;
+    }
+
+    const readMessageIds = this.db.markIncomingMessagesRead(conversationId, 1000);
+    if (readMessageIds.length === 0) {
+      return;
+    }
+
+    for (const messageId of readMessageIds) {
+      void this.sendToPeer(peer, {
+        type: 'chat:ack',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: peer.deviceId,
+        createdAt: Date.now(),
+        payload: {
+          ackMessageId: messageId,
+          status: 'read'
+        }
+      } satisfies ProtocolFrame<AckPayload>).catch(() => undefined);
+    }
+  }
+
   private bumpUnreadIfBackground(conversationId: string): void {
     const isVisibleFocused =
       Boolean(this.mainWindow) &&
@@ -749,7 +781,7 @@ class LanternApp {
       this.mainWindow!.isFocused();
 
     if (this.activeConversationId === conversationId && isVisibleFocused) {
-      this.db.markConversationRead(conversationId);
+      this.markConversationRead(conversationId);
       return;
     }
     this.db.incrementUnread(conversationId);

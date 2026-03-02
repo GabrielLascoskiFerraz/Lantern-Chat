@@ -964,6 +964,24 @@ body {
   padding: 3px 10px;
 }
 
+.messages-new-separator {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0 6px;
+  animation: fadeUpIn 180ms ease;
+}
+
+.messages-new-separator span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--teams-accent) 76%, var(--teams-muted) 24%);
+  background: color-mix(in srgb, var(--teams-accent-soft) 70%, var(--teams-surface) 30%);
+  border: 1px solid color-mix(in srgb, var(--teams-accent) 30%, var(--teams-border) 70%);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
 .bubble-row {
   display: flex;
   align-items: flex-end;

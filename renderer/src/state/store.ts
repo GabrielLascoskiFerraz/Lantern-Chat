@@ -38,6 +38,8 @@ interface LanternState {
   announcementReactionsByMessage: Record<string, AnnouncementReactionSummary>;
   conversationPreviewById: Record<string, string>;
   unreadByConversation: Record<string, number>;
+  openedUnreadCountByConversation: Record<string, number>;
+  unreadAnchorMessageIdByConversation: Record<string, string | null>;
   typingByConversation: Record<string, boolean>;
   recentMessageIds: Record<string, number>;
   toasts: UiToast[];
@@ -253,6 +255,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   announcementReactionsByMessage: {},
   conversationPreviewById: {},
   unreadByConversation: {},
+  openedUnreadCountByConversation: {},
+  unreadAnchorMessageIdByConversation: {},
   typingByConversation: {},
   recentMessageIds: {},
   toasts: [],
@@ -305,6 +309,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     const profileLooksPristine = profile.updatedAt <= profile.createdAt;
     const shouldOpenSettings = !onboardingDone || profileLooksPristine;
 
+    const selectedAtLoad = get().selectedConversationId;
+    const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
+
     set({
       profile,
       relaySettings,
@@ -312,10 +319,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       peers,
       onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
       unreadByConversation,
+      openedUnreadCountByConversation: {
+        [selectedAtLoad]: selectedUnreadAtLoad
+      },
+      unreadAnchorMessageIdByConversation: {
+        [selectedAtLoad]: null
+      },
       conversationPreviewById,
       settingsOpen: shouldOpenSettings,
       ready: true,
-      loadingConversationId: get().selectedConversationId
+      loadingConversationId: selectedAtLoad
     });
 
     const current = get().selectedConversationId;
@@ -330,6 +343,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ? await ipcClient.getAnnouncementReactions(initialReactionMessageIds)
           : await ipcClient.getMessageReactions(initialReactionMessageIds)
         : {};
+    const initialUnreadCount = selectedUnreadAtLoad;
+    const initialUnreadAnchorMessageId =
+      initialUnreadCount > 0 && initialMessages.length > 0
+        ? initialMessages[Math.max(0, initialMessages.length - Math.min(initialUnreadCount, initialMessages.length))]
+            ?.messageId || null
+        : null;
+
     set((state) => ({
       messagesByConversation: {
         ...state.messagesByConversation,
@@ -346,6 +366,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       announcementReactionsByMessage: {
         ...state.announcementReactionsByMessage,
         ...initialMessageReactions
+      },
+      unreadAnchorMessageIdByConversation: {
+        ...state.unreadAnchorMessageIdByConversation,
+        [current]: initialUnreadAnchorMessageId
       },
       loadingConversationId:
         state.loadingConversationId === current ? null : state.loadingConversationId
@@ -664,6 +688,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           unreadByConversation: {
             ...state.unreadByConversation,
             [event.conversationId]: 0
+          },
+          unreadAnchorMessageIdByConversation: {
+            ...state.unreadAnchorMessageIdByConversation,
+            [event.conversationId]: null
           }
         }));
         return;
@@ -779,9 +807,27 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }, 10_000);
   },
   selectConversation: async (conversationId) => {
+    const preSelectState = get();
+    const unreadCountAtOpen = preSelectState.unreadByConversation[conversationId] || 0;
+    const existingRows = preSelectState.messagesByConversation[conversationId] || [];
+    const existingAnchorMessageId =
+      unreadCountAtOpen > 0 && existingRows.length > 0
+        ? existingRows[
+            Math.max(0, existingRows.length - Math.min(unreadCountAtOpen, existingRows.length))
+          ]?.messageId || null
+        : null;
+
     set((state) => ({
       selectedConversationId: conversationId,
       loadingConversationId: conversationId,
+      openedUnreadCountByConversation: {
+        ...state.openedUnreadCountByConversation,
+        [conversationId]: unreadCountAtOpen
+      },
+      unreadAnchorMessageIdByConversation: {
+        ...state.unreadAnchorMessageIdByConversation,
+        [conversationId]: existingAnchorMessageId
+      },
       unreadByConversation: {
         ...state.unreadByConversation,
         [conversationId]: 0
@@ -801,6 +847,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           : {};
       await ipcClient.markConversationRead(conversationId);
       await ipcClient.setActiveConversation(conversationId);
+
+      const fetchedAnchorMessageId =
+        unreadCountAtOpen > 0 && rows.length > 0
+          ? rows[Math.max(0, rows.length - Math.min(unreadCountAtOpen, rows.length))]
+              ?.messageId || null
+          : null;
 
       set((state) => ({
         messagesByConversation: {
@@ -828,6 +880,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             ...state.announcementReactionsByMessage,
             ...messageReactions
           },
+        unreadAnchorMessageIdByConversation: {
+          ...state.unreadAnchorMessageIdByConversation,
+          [conversationId]: fetchedAnchorMessageId
+        },
         loadingConversationId:
           state.loadingConversationId === conversationId ? null : state.loadingConversationId
       }));
@@ -1178,6 +1234,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       unreadByConversation: {
         ...state.unreadByConversation,
         [conversationId]: 0
+      },
+      unreadAnchorMessageIdByConversation: {
+        ...state.unreadAnchorMessageIdByConversation,
+        [conversationId]: null
       }
     }));
   },
@@ -1202,6 +1262,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
       const nextUnread = { ...state.unreadByConversation };
       delete nextUnread[conversationId];
+      const nextUnreadAnchor = { ...state.unreadAnchorMessageIdByConversation };
+      delete nextUnreadAnchor[conversationId];
 
       const nextTyping = { ...state.typingByConversation };
       delete nextTyping[conversationId];
@@ -1217,6 +1279,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         loadingOlderByConversation: nextLoadingOlder,
         conversationPreviewById: nextPreview,
         unreadByConversation: nextUnread,
+        unreadAnchorMessageIdByConversation: nextUnreadAnchor,
         typingByConversation: nextTyping
       };
     });
