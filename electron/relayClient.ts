@@ -115,14 +115,15 @@ const RELAY_MDNS_PROTOCOL = 'tcp';
 const DEFAULT_RELAY_PORT = Number(process.env.LANTERN_RELAY_PORT || 43190);
 const DEFAULT_RELAY_URL = `ws://127.0.0.1:${DEFAULT_RELAY_PORT}`;
 const ACK_TIMEOUT_MS = 10_000;
-const HEARTBEAT_INTERVAL_MS = 10_000;
+const HEARTBEAT_INTERVAL_MS = 8_000;
 const RECONNECT_DELAY_INITIAL_MS = 1_200;
 const RECONNECT_DELAY_MAX_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 8_000;
 const DISCOVERED_ENDPOINT_TTL_MS = 35_000;
 const DISCOVERY_REFRESH_INTERVAL_MS = 12_000;
 const LAST_HEALTHY_RETRY_WINDOW_MS = 14_000;
-const PRESENCE_STALE_TIMEOUT_MS = 45_000;
+const PRESENCE_STALE_TIMEOUT_MS = 90_000;
+const HELLO_ACK_TIMEOUT_MS = 12_000;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -352,6 +353,7 @@ export class RelayClient {
   private readonly discoveredEndpoints = new Map<string, DiscoveredRelayEndpoint>();
   private readonly discoveredEndpointByServiceKey = new Map<string, string>();
   private readonly relayPeersById = new Map<string, RelayPeerSnapshot>();
+  private helloAckTimer: NodeJS.Timeout | null = null;
   private bonjour: BonjourService | null = null;
   private browser: Browser | null = null;
   private manualRelayUrl: string | null = null;
@@ -410,6 +412,10 @@ export class RelayClient {
     if (this.presenceStaleTimer) {
       clearTimeout(this.presenceStaleTimer);
       this.presenceStaleTimer = null;
+    }
+    if (this.helloAckTimer) {
+      clearTimeout(this.helloAckTimer);
+      this.helloAckTimer = null;
     }
 
     this.rejectPendingAcks(new Error('Conexão do relay encerrada.'));
@@ -716,12 +722,12 @@ export class RelayClient {
       this.socket = null;
     }
 
+    let opened = false;
     await new Promise<void>((resolve) => {
       const socket = new WebSocket(endpoint);
       this.socket = socket;
       this.selectedEndpoint = endpoint;
       let settled = false;
-      let opened = false;
 
       const connectTimeout = setTimeout(() => {
         if (settled || opened) return;
@@ -748,18 +754,10 @@ export class RelayClient {
 
       socket.once('open', () => {
         opened = true;
-        this.ready = true;
+        this.ready = false;
         this.connecting = false;
-        this.reconnectDelayMs = RECONNECT_DELAY_INITIAL_MS;
         this.cancelPresenceStaleTimer();
-        this.lastPresenceAt = Date.now();
-
-        this.callbacks.onConnectionState?.({
-          connected: true,
-          endpoint
-        });
-
-        this.resolveReadyWaiters();
+        this.lastPresenceAt = 0;
 
         this.sendEnvelope({
           type: 'relay:hello',
@@ -773,8 +771,14 @@ export class RelayClient {
           }
         });
 
-        this.requestPresence();
-        this.schedulePresenceStaleCheck();
+        if (this.helloAckTimer) {
+          clearTimeout(this.helloAckTimer);
+        }
+        this.helloAckTimer = setTimeout(() => {
+          this.helloAckTimer = null;
+          this.forceSocketDisconnect();
+        }, HELLO_ACK_TIMEOUT_MS);
+        this.helloAckTimer.unref?.();
         done();
       });
 
@@ -806,7 +810,7 @@ export class RelayClient {
       });
     });
 
-    if (!this.ready) {
+    if (!opened) {
       if (endpoint === this.lastHealthyEndpoint) {
         this.lastHealthyEndpointFailedAt = Date.now();
       }
@@ -828,6 +832,10 @@ export class RelayClient {
     this.lastPresenceRevision = -1;
     this.lastPresenceAt = 0;
     this.cancelPresenceStaleTimer();
+    if (this.helloAckTimer) {
+      clearTimeout(this.helloAckTimer);
+      this.helloAckTimer = null;
+    }
     this.relayPeersById.clear();
     this.rejectPendingAcks(new Error('Conexão com relay perdida.'));
     this.rejectReadyWaiters(new Error('Conexão com relay perdida.'));
@@ -898,10 +906,22 @@ export class RelayClient {
       case 'relay:welcome':
         return;
       case 'relay:hello:ok': {
+        if (this.helloAckTimer) {
+          clearTimeout(this.helloAckTimer);
+          this.helloAckTimer = null;
+        }
+        this.ready = true;
+        this.connecting = false;
+        this.reconnectDelayMs = RECONNECT_DELAY_INITIAL_MS;
         if (this.selectedEndpoint) {
           this.lastHealthyEndpoint = this.selectedEndpoint;
           this.lastHealthyEndpointFailedAt = 0;
         }
+        this.callbacks.onConnectionState?.({
+          connected: true,
+          endpoint: this.selectedEndpoint
+        });
+        this.resolveReadyWaiters();
         this.lastPresenceAt = Date.now();
         this.schedulePresenceStaleCheck();
         this.requestPresence();
@@ -1069,7 +1089,7 @@ export class RelayClient {
         this.requestPresence();
       }
 
-      if (this.lastPresenceAt > 0 && Date.now() - this.lastPresenceAt > 45_000) {
+      if (this.lastPresenceAt > 0 && Date.now() - this.lastPresenceAt > 90_000) {
         try {
           this.socket.close();
         } catch {

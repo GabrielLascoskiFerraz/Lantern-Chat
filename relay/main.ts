@@ -99,9 +99,9 @@ interface RelayAnnouncementState {
 const DEFAULT_CONFIG: RelayConfig = {
   host: '0.0.0.0',
   port: 43190,
-  pingIntervalMs: 4_000,
-  peerTimeoutMs: 12_000,
-  presenceBroadcastIntervalMs: 25_000,
+  pingIntervalMs: 5_000,
+  peerTimeoutMs: 30_000,
+  presenceBroadcastIntervalMs: 12_000,
   maxPayloadBytes: 8 * 1024 * 1024
 };
 
@@ -742,12 +742,20 @@ class LanternRelay {
   private async routeFrame(frame: RelayTransportFrame, senderDeviceId: string | null): Promise<string[]> {
     const deliveredTo: string[] = [];
     if (frame.to === null) {
-      for (const [deviceId, recipient] of this.sessionsByDeviceId.entries()) {
-        if (senderDeviceId && deviceId === senderDeviceId) continue;
-        const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
-          type: 'relay:deliver',
-          payload: { frame }
-        });
+      const recipients = Array.from(this.sessionsByDeviceId.entries())
+        .filter(([deviceId]) => !(senderDeviceId && deviceId === senderDeviceId));
+      const results = await Promise.all(
+        recipients.map(async ([deviceId, recipient]) => {
+          const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
+            type: 'relay:deliver',
+            payload: { frame }
+          });
+          return { deviceId, recipient, delivered };
+        })
+      );
+
+      for (const result of results) {
+        const { deviceId, recipient, delivered } = result;
         if (delivered) {
           deliveredTo.push(deviceId);
           continue;
