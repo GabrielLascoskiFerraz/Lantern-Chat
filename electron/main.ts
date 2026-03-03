@@ -409,7 +409,14 @@ class LanternApp {
         });
       },
       onPresence: (peers) => {
-        this.handleRelayPresence(peers);
+        try {
+          this.handleRelayPresence(peers);
+        } catch (error) {
+          console.error(
+            '[Lantern][Relay] falha ao processar presença:',
+            error instanceof Error ? error.message : String(error)
+          );
+        }
       },
       onAnnouncementExpired: (messageIds) => {
         this.handleRelayAnnouncementExpiry(messageIds);
@@ -457,9 +464,10 @@ class LanternApp {
         this.emitEvent({ type: 'ui:toast', level: 'warning', message });
       }
     });
-    this.relay.setEndpointSettings(this.relaySettings);
-    await this.relay.start();
 
+    // Importante: inicializar MessageService antes de conectar no relay.
+    // O relay pode emitir presença/frames imediatamente após start()
+    // e esses handlers dependem de messageService já pronto.
     this.messageService = new MessageService({
       db: this.db,
       profile: this.profile,
@@ -471,6 +479,9 @@ class LanternApp {
       onPeerUnreachable: (peerId) => this.markPeerUnreachable(peerId, { force: true }),
       emitEvent: (event) => this.emitEvent(event)
     });
+
+    this.relay.setEndpointSettings(this.relaySettings);
+    await this.relay.start();
 
     if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
       console.log(
