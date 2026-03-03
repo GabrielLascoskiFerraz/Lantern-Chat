@@ -10,6 +10,7 @@ import {
 import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
 import {
   ArrowReply20Regular,
+  ArrowForward20Regular,
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
@@ -31,11 +32,14 @@ import {
 } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
 
 interface ChatViewProps {
   conversationId: string;
   peer: Peer | null;
+  forwardTargets: Peer[];
+  onlinePeerIds: string[];
   peerOnline: boolean;
   peerTyping: boolean;
   loading: boolean;
@@ -51,6 +55,7 @@ interface ChatViewProps {
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onClearConversation: () => Promise<void>;
@@ -245,6 +250,8 @@ const toReplyReferenceFromMessage = (message: MessageRow): MessageReplyReference
 export const ChatView = ({
   conversationId,
   peer,
+  forwardTargets,
+  onlinePeerIds,
   peerOnline,
   peerTyping,
   loading,
@@ -260,6 +267,7 @@ export const ChatView = ({
   onSend,
   onTyping,
   onSendFile,
+  onForwardMessage,
   onReactToMessage,
   onDeleteMessage,
   onClearConversation,
@@ -299,12 +307,14 @@ export const ChatView = ({
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmForgetOpen, setConfirmForgetOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
+  const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<{
     x: number;
     y: number;
     messageId: string;
     canDelete: boolean;
+    canForward: boolean;
     selectedText: string;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
@@ -368,12 +378,21 @@ export const ChatView = ({
       const isDeleted = Boolean(message.deletedAt);
       const isLocalOnly = Boolean(message.localOnly);
       const canReply = !isDeleted && !isLocalOnly;
+      const canForward =
+        !isDeleted &&
+        !isLocalOnly &&
+        (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
+        forwardTargets.length > 0;
       const canDelete =
         !isDeleted &&
         !isLocalOnly &&
         message.direction === 'out' &&
         message.senderDeviceId === localProfile.deviceId;
-      const itemCount = (canReply ? 1 : 0) + (selectedText ? 1 : 0) + (canDelete ? 1 : 0);
+      const itemCount =
+        (canReply ? 1 : 0) +
+        (canForward ? 1 : 0) +
+        (selectedText ? 1 : 0) +
+        (canDelete ? 1 : 0);
       if (itemCount <= 0) {
         setMessageContextMenu(null);
         return;
@@ -394,10 +413,11 @@ export const ChatView = ({
         y,
         messageId: message.messageId,
         canDelete,
+        canForward,
         selectedText
       });
     },
-    [localProfile.deviceId]
+    [forwardTargets.length, localProfile.deviceId]
   );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
@@ -423,6 +443,10 @@ export const ChatView = ({
     if (!messageContextMenu) return null;
     return messageById.get(messageContextMenu.messageId) || null;
   }, [messageById, messageContextMenu]);
+  const pendingForwardMessage = useMemo(() => {
+    if (!pendingForwardMessageId) return null;
+    return messageById.get(pendingForwardMessageId) || null;
+  }, [messageById, pendingForwardMessageId]);
 
   const senderLabelForMessage = useCallback(
     (senderDeviceId: string): string => {
@@ -1256,6 +1280,12 @@ export const ChatView = ({
                   }`}
                   onContextMenu={(event) => handleBubbleContextMenu(event, message)}
                 >
+                  {!isDeleted && Boolean(message.forwardedFromMessageId) && (
+                    <div className="message-forwarded-label">
+                      <ArrowForward20Regular />
+                      <span>Encaminhada</span>
+                    </div>
+                  )}
                   {!isDeleted && hasReplyReference && (
                     <button
                       type="button"
@@ -1519,6 +1549,19 @@ export const ChatView = ({
         }}
       />
 
+      <ForwardMessageDialog
+        open={Boolean(pendingForwardMessageId)}
+        sourceMessage={pendingForwardMessage}
+        contacts={forwardTargets}
+        onlinePeerIds={onlinePeerIds}
+        onCancel={() => setPendingForwardMessageId(null)}
+        onConfirm={async (targetPeerIds) => {
+          if (!pendingForwardMessageId) return;
+          await onForwardMessage(targetPeerIds, pendingForwardMessageId);
+          setPendingForwardMessageId(null);
+        }}
+      />
+
       <ConfirmDialog
         open={confirmForgetOpen}
         title="Excluir contato e conversa"
@@ -1550,6 +1593,21 @@ export const ChatView = ({
                 <ArrowReply20Regular />
               </span>
               <span>Responder</span>
+            </button>
+          )}
+          {messageContextMenu.canForward && contextMenuMessage && !contextMenuMessage.deletedAt && !contextMenuMessage.localOnly && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                setPendingForwardMessageId(contextMenuMessage.messageId);
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <ArrowForward20Regular />
+              </span>
+              <span>Encaminhar</span>
             </button>
           )}
           {Boolean(messageContextMenu.selectedText.trim()) && (

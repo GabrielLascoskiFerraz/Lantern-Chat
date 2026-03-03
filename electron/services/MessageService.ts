@@ -135,9 +135,13 @@ export class MessageService {
         replyTo && !offer.replyTo
           ? { ...offer, replyTo }
           : offer;
+      const offerWithMeta: FileOfferPayload =
+        message.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
+          ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
+          : offerWithReply;
       await this.sendToPeer(
         peer,
-        this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithReply, message.createdAt)
+        this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, message.createdAt)
       );
       await this.streamFileChunksToPeer(peer, message.messageId, offer, filePath, 0);
     } catch {
@@ -151,7 +155,8 @@ export class MessageService {
   async sendText(
     peerId: string,
     text: string,
-    replyTo?: MessageReplyPayload | null
+    replyTo?: MessageReplyPayload | null,
+    options?: { forwardedFromMessageId?: string | null }
   ): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
     const conversationId = this.db.ensureDmConversation(
@@ -168,7 +173,8 @@ export class MessageService {
       createdAt,
       payload: {
         text,
-        replyTo: sanitizedReply
+        replyTo: sanitizedReply,
+        forwardedFromMessageId: options?.forwardedFromMessageId || null
       }
     };
 
@@ -193,6 +199,7 @@ export class MessageService {
       replyToType: sanitizedReply?.type || null,
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
+      forwardedFromMessageId: options?.forwardedFromMessageId || null,
       createdAt
     };
 
@@ -251,6 +258,7 @@ export class MessageService {
       replyToType: sanitizedReply?.type || null,
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
+      forwardedFromMessageId: null,
       createdAt
     };
 
@@ -268,7 +276,8 @@ export class MessageService {
   async sendFile(
     peerId: string,
     filePath: string,
-    replyTo?: MessageReplyPayload | null
+    replyTo?: MessageReplyPayload | null,
+    options?: { forwardedFromMessageId?: string | null }
   ): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
@@ -308,6 +317,7 @@ export class MessageService {
       replyToType: sanitizedReply?.type || null,
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
+      forwardedFromMessageId: options?.forwardedFromMessageId || null,
       createdAt
     };
 
@@ -361,7 +371,8 @@ export class MessageService {
         to: peer.deviceId,
         createdAt: message.createdAt,
         payload: {
-          text: message.bodyText
+          text: message.bodyText,
+          forwardedFromMessageId: message.forwardedFromMessageId || null
         }
       };
 
@@ -443,10 +454,14 @@ export class MessageService {
           replyTo && !offer.replyTo
             ? { ...offer, replyTo }
             : offer;
+        const offerWithMeta: FileOfferPayload =
+          fileMessage.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
+            ? { ...offerWithReply, forwardedFromMessageId: fileMessage.forwardedFromMessageId }
+            : offerWithReply;
 
         await this.sendToPeer(
           peer,
-          this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithReply, fileMessage.createdAt)
+          this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, fileMessage.createdAt)
         );
         await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, 0);
       } catch {

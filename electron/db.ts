@@ -309,6 +309,7 @@ export class DbService {
          replyToType,
          replyToPreviewText,
          replyToFileName,
+         forwardedFromMessageId,
          createdAt
        )
        VALUES
@@ -333,6 +334,7 @@ export class DbService {
          @replyToType,
          @replyToPreviewText,
          @replyToFileName,
+         @forwardedFromMessageId,
          @createdAt
        )`
     );
@@ -342,9 +344,30 @@ export class DbService {
     );
 
     const tx = this.db.transaction((row: DbMessage) => {
-      const result = insert.run(row);
+      // Normaliza campos opcionais para evitar falhas de named parameters
+      // em fluxos legados (ex.: snapshots antigos).
+      const normalizedRow: DbMessage = {
+        ...row,
+        bodyText: row.bodyText ?? null,
+        fileId: row.fileId ?? null,
+        fileName: row.fileName ?? null,
+        fileSize: row.fileSize ?? null,
+        fileSha256: row.fileSha256 ?? null,
+        filePath: row.filePath ?? null,
+        status: row.status ?? null,
+        reaction: row.reaction ?? null,
+        deletedAt: row.deletedAt ?? null,
+        replyToMessageId: row.replyToMessageId ?? null,
+        replyToSenderDeviceId: row.replyToSenderDeviceId ?? null,
+        replyToType: row.replyToType ?? null,
+        replyToPreviewText: row.replyToPreviewText ?? null,
+        replyToFileName: row.replyToFileName ?? null,
+        forwardedFromMessageId: row.forwardedFromMessageId ?? null
+      };
+
+      const result = insert.run(normalizedRow);
       if (result.changes > 0) {
-        touchConversation.run(Date.now(), row.conversationId);
+        touchConversation.run(Date.now(), normalizedRow.conversationId);
       }
       return result.changes > 0;
     });
@@ -428,11 +451,14 @@ export class DbService {
           `SELECT * FROM messages
            WHERE type IN ('text', 'file')
              AND conversationId = ?
-             AND createdAt > ?
+             AND (
+               createdAt > ?
+               OR (deletedAt IS NOT NULL AND deletedAt > ?)
+             )
            ORDER BY createdAt ASC, messageId ASC
            LIMIT ?`
         )
-        .all(dmConversationId, since, limit) as DbMessage[];
+        .all(dmConversationId, since, since, limit) as DbMessage[];
     }
     return this.db
       .prepare(
@@ -450,7 +476,12 @@ export class DbService {
     const row = this.db
       .prepare(
         `SELECT
-           MAX(createdAt) AS latestDm
+           MAX(
+             CASE
+               WHEN deletedAt IS NOT NULL AND deletedAt > createdAt THEN deletedAt
+               ELSE createdAt
+             END
+           ) AS latestDm
          FROM messages
          WHERE conversationId = ?
            AND type IN ('text', 'file')`
@@ -715,6 +746,7 @@ export class DbService {
     replyToType: 'text' | 'announcement' | 'file' | null;
     replyToPreviewText: string | null;
     replyToFileName: string | null;
+    forwardedFromMessageId?: string | null;
   }): DbMessage | undefined {
     this.db
       .prepare(
@@ -737,7 +769,8 @@ export class DbService {
              replyToSenderDeviceId = COALESCE(?, replyToSenderDeviceId),
              replyToType = COALESCE(?, replyToType),
              replyToPreviewText = COALESCE(?, replyToPreviewText),
-             replyToFileName = COALESCE(?, replyToFileName)
+             replyToFileName = COALESCE(?, replyToFileName),
+             forwardedFromMessageId = COALESCE(?, forwardedFromMessageId)
          WHERE messageId = ?`
       )
       .run(
@@ -761,6 +794,7 @@ export class DbService {
         input.replyToType,
         input.replyToPreviewText,
         input.replyToFileName,
+        input.forwardedFromMessageId ?? null,
         input.messageId
       );
     return this.getMessageById(input.messageId);

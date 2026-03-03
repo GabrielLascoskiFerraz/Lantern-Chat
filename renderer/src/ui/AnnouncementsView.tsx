@@ -1,6 +1,7 @@
 import { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { Button, Caption1, Text } from '@fluentui/react-components';
 import { ArrowReply20Regular } from '@fluentui/react-icons';
+import { ArrowForward20Regular } from '@fluentui/react-icons';
 import { Checkmark20Regular } from '@fluentui/react-icons';
 import { Clock20Regular } from '@fluentui/react-icons';
 import { Copy20Regular } from '@fluentui/react-icons';
@@ -19,6 +20,7 @@ import {
 } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
 
 interface AnnouncementsViewProps {
@@ -26,10 +28,13 @@ interface AnnouncementsViewProps {
   loading: boolean;
   profile: Profile;
   peers: Peer[];
+  forwardTargets: Peer[];
+  onlinePeerIds: string[];
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
   recentMessageIds: Record<string, number>;
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
 }
@@ -107,14 +112,18 @@ export const AnnouncementsView = ({
   loading,
   profile,
   peers,
+  forwardTargets,
+  onlinePeerIds,
   reactionsByMessageId,
   recentMessageIds,
   relayConnected,
   onSend,
+  onForwardMessage,
   onReactToMessage,
   onDeleteMessage
 }: AnnouncementsViewProps) => {
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
+  const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<{
@@ -123,6 +132,7 @@ export const AnnouncementsView = ({
     messageId: string;
     selectedText: string;
     canDelete: boolean;
+    canForward: boolean;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
@@ -236,12 +246,21 @@ export const AnnouncementsView = ({
     }
 
     const canReply = !message.deletedAt && !message.localOnly;
+    const canForward =
+      !message.deletedAt &&
+      !message.localOnly &&
+      (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
+      forwardTargets.length > 0;
     const canDelete =
       !message.deletedAt &&
       !message.localOnly &&
       message.direction === 'out' &&
       message.senderDeviceId === profile.deviceId;
-    const itemCount = (canReply ? 1 : 0) + (selectedText ? 1 : 0) + (canDelete ? 1 : 0);
+    const itemCount =
+      (canReply ? 1 : 0) +
+      (canForward ? 1 : 0) +
+      (selectedText ? 1 : 0) +
+      (canDelete ? 1 : 0);
     if (itemCount <= 0) {
       setMessageContextMenu(null);
       return;
@@ -263,7 +282,8 @@ export const AnnouncementsView = ({
       y,
       messageId: message.messageId,
       selectedText,
-      canDelete
+      canDelete,
+      canForward
     });
   };
 
@@ -414,6 +434,12 @@ export const AnnouncementsView = ({
                 <div className={`bubble-block ${outgoing ? 'out' : 'in'}`}>
                   <div className={`bubble ${outgoing ? 'out' : 'in'}`}>
                     <div onContextMenu={(event) => handleBubbleContextMenu(event, message)}>
+                      {Boolean(message.forwardedFromMessageId) && (
+                        <div className="message-forwarded-label">
+                          <ArrowForward20Regular />
+                          <span>Encaminhada</span>
+                        </div>
+                      )}
                       {hasReplyReference && (
                         <button
                           type="button"
@@ -565,6 +591,23 @@ export const AnnouncementsView = ({
         }}
       />
 
+      <ForwardMessageDialog
+        open={Boolean(pendingForwardMessageId)}
+        sourceMessage={
+          pendingForwardMessageId
+            ? messages.find((row) => row.messageId === pendingForwardMessageId) || null
+            : null
+        }
+        contacts={forwardTargets}
+        onlinePeerIds={onlinePeerIds}
+        onCancel={() => setPendingForwardMessageId(null)}
+        onConfirm={async (targetPeerIds) => {
+          if (!pendingForwardMessageId) return;
+          await onForwardMessage(targetPeerIds, pendingForwardMessageId);
+          setPendingForwardMessageId(null);
+        }}
+      />
+
       {messageContextMenu && (
         <div
           className="chat-context-menu"
@@ -589,6 +632,27 @@ export const AnnouncementsView = ({
                   <ArrowReply20Regular />
                 </span>
                 <span>Responder</span>
+              </button>
+            );
+          })()}
+          {(() => {
+            const message = messages.find((row) => row.messageId === messageContextMenu.messageId) || null;
+            if (!message || !messageContextMenu.canForward || message.deletedAt || message.localOnly) {
+              return null;
+            }
+            return (
+              <button
+                type="button"
+                className="chat-context-item"
+                onClick={() => {
+                  setPendingForwardMessageId(message.messageId);
+                  setMessageContextMenu(null);
+                }}
+              >
+                <span className="menu-item-icon">
+                  <ArrowForward20Regular />
+                </span>
+                <span>Encaminhar</span>
               </button>
             );
           })()}

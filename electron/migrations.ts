@@ -56,6 +56,7 @@ export const runMigrations = (db: Database.Database): void => {
       replyToType TEXT,
       replyToPreviewText TEXT,
       replyToFileName TEXT,
+      forwardedFromMessageId TEXT,
       createdAt INTEGER NOT NULL
     );
 
@@ -112,5 +113,8 @@ export const runMigrations = (db: Database.Database): void => {
   }
   if (!messageColumns.some((column) => column.name === 'replyToFileName')) {
     db.exec('ALTER TABLE messages ADD COLUMN replyToFileName TEXT;');
+  }
+  if (!messageColumns.some((column) => column.name === 'forwardedFromMessageId')) {
+    db.exec('ALTER TABLE messages ADD COLUMN forwardedFromMessageId TEXT;');
   }
 };

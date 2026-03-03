@@ -49,6 +49,7 @@ export interface ProtocolFrame<T = unknown> {
 export interface ChatTextPayload {
   text: string;
   replyTo?: MessageReplyPayload | null;
+  forwardedFromMessageId?: string | null;
 }
 
 export interface AckPayload {
@@ -100,6 +101,7 @@ export interface SyncMessagePayload {
   replyToType: 'text' | 'announcement' | 'file' | null;
   replyToPreviewText: string | null;
   replyToFileName: string | null;
+  forwardedFromMessageId?: string | null;
   createdAt: number;
 }
 
@@ -127,6 +129,7 @@ export interface FileOfferPayload {
   size: number;
   sha256: string;
   replyTo?: MessageReplyPayload | null;
+  forwardedFromMessageId?: string | null;
 }
 
 export interface FileChunkPayload {
@@ -161,6 +164,7 @@ export interface DbMessage {
   replyToType: 'text' | 'announcement' | 'file' | null;
   replyToPreviewText: string | null;
   replyToFileName: string | null;
+  forwardedFromMessageId?: string | null;
   createdAt: number;
 }
 

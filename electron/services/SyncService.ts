@@ -26,6 +26,7 @@ export class SyncService {
         replyToType: row.replyToType,
         replyToPreviewText: row.replyToPreviewText,
         replyToFileName: row.replyToFileName,
+        forwardedFromMessageId: row.forwardedFromMessageId || null,
         createdAt: row.createdAt
       }));
   }
@@ -81,6 +82,7 @@ export class SyncService {
       replyToType: message.replyToType,
       replyToPreviewText: message.replyToPreviewText,
       replyToFileName: message.replyToFileName,
+      forwardedFromMessageId: message.forwardedFromMessageId || null,
       createdAt: normalizedCreatedAt
     };
 
@@ -100,7 +102,8 @@ export class SyncService {
         replyToSenderDeviceId: message.replyToSenderDeviceId,
         replyToType: message.replyToType,
         replyToPreviewText: message.replyToPreviewText,
-        replyToFileName: message.replyToFileName
+        replyToFileName: message.replyToFileName,
+        forwardedFromMessageId: message.forwardedFromMessageId || null
       });
       return { inserted: false, row: merged };
     }

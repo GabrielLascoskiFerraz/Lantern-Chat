@@ -35,6 +35,7 @@ export const Shell = () => {
     sendTyping,
     sendAnnouncement,
     sendFile,
+    forwardMessageToPeer,
     reactToMessage,
     deleteMessageForEveryone,
     markConversationUnread,
@@ -108,9 +109,16 @@ export const Shell = () => {
           loading={loadingConversationId === ANNOUNCEMENTS_ID}
           profile={profile}
           peers={peers}
+          forwardTargets={peers}
+          onlinePeerIds={onlinePeerIds}
           reactionsByMessageId={announcementReactionsByMessage}
           onSend={(text, replyTo) => sendAnnouncement(text, replyTo)}
           relayConnected={Boolean(relaySettings?.connected)}
+          onForwardMessage={async (targetPeerIds, sourceMessageId) => {
+            for (const targetPeerId of targetPeerIds) {
+              await forwardMessageToPeer(targetPeerId, sourceMessageId);
+            }
+          }}
           onReactToMessage={(messageId, reaction) =>
             reactToMessage(ANNOUNCEMENTS_ID, messageId, reaction)
           }
@@ -125,12 +133,15 @@ export const Shell = () => {
     const peerId = conversationId.startsWith('dm:') ? conversationId.replace('dm:', '') : '';
     const peer = peers.find((candidate) => candidate.deviceId === peerId) || null;
     const peerOnline = peer ? onlinePeerIds.includes(peer.deviceId) : false;
+    const forwardTargets = peers.filter((candidate) => candidate.deviceId !== peerId);
 
     return (
       <ChatView
         conversationId={conversationId}
         peer={peer}
         peerOnline={peerOnline}
+        forwardTargets={forwardTargets}
+        onlinePeerIds={onlinePeerIds}
         peerTyping={Boolean(typingByConversation[conversationId])}
         loading={loadingConversationId === conversationId}
         localProfile={profile}
@@ -152,6 +163,11 @@ export const Shell = () => {
             ? sendFile(peer.deviceId, filePath, replyTo)
             : Promise.resolve()
         }
+        onForwardMessage={async (targetPeerIds, sourceMessageId) => {
+          for (const targetPeerId of targetPeerIds) {
+            await forwardMessageToPeer(targetPeerId, sourceMessageId);
+          }
+        }}
         onReactToMessage={(messageId, reaction) =>
           reactToMessage(conversationId, messageId, reaction)
         }

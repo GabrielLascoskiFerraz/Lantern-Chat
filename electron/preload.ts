@@ -24,6 +24,8 @@ const api = {
     ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
+  forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
+    ipcRenderer.invoke('lantern:forwardMessageToPeer', targetPeerId, sourceMessageId),
   reactToMessage: (
     conversationId: string,
     messageId: string,

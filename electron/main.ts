@@ -281,6 +281,8 @@ class LanternApp {
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
       sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
       sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
+      forwardMessageToPeer: (targetPeerId, sourceMessageId) =>
+        this.forwardMessageToPeer(targetPeerId, sourceMessageId),
       reactToMessage: (conversationId, messageId, reaction) =>
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
@@ -960,6 +962,51 @@ class LanternApp {
     }
   }
 
+  private async forwardMessageToPeer(
+    targetPeerId: string,
+    sourceMessageId: string
+  ): Promise<DbMessage> {
+    const cleanTargetPeerId = (targetPeerId || '').trim();
+    const cleanSourceMessageId = (sourceMessageId || '').trim();
+    if (!cleanTargetPeerId) {
+      throw new Error('Contato de destino inválido para encaminhar.');
+    }
+    if (!cleanSourceMessageId) {
+      throw new Error('Mensagem de origem inválida para encaminhar.');
+    }
+    if (cleanTargetPeerId === this.profile.deviceId) {
+      throw new Error('Não é possível encaminhar para você mesmo.');
+    }
+
+    const source = this.db.getMessageById(cleanSourceMessageId);
+    if (!source || source.deletedAt) {
+      throw new Error('Mensagem de origem não encontrada.');
+    }
+
+    const destinationPeer = this.resolvePeerForTransport(cleanTargetPeerId);
+    if (!destinationPeer && !this.peersById.has(cleanTargetPeerId)) {
+      throw new Error('Contato de destino não encontrado.');
+    }
+
+    if (source.type === 'file') {
+      const sourceFilePath = (source.filePath || '').trim();
+      if (!sourceFilePath || !fs.existsSync(sourceFilePath)) {
+        throw new Error('Este anexo não está disponível para encaminhar.');
+      }
+      return this.messageService.sendFile(cleanTargetPeerId, sourceFilePath, undefined, {
+        forwardedFromMessageId: source.messageId
+      });
+    }
+
+    const textToForward = (source.bodyText || '').trim();
+    if (!textToForward) {
+      throw new Error('Esta mensagem não possui conteúdo para encaminhar.');
+    }
+    return this.messageService.sendText(cleanTargetPeerId, textToForward, undefined, {
+      forwardedFromMessageId: source.messageId
+    });
+  }
+
   private async reactToMessage(
     conversationId: string,
     messageId: string,
@@ -1047,47 +1094,57 @@ class LanternApp {
       this.removeManagedAttachment(existing.filePath);
     }
 
-    // Mensagens ainda não entregues funcionam como "cancelar envio":
-    // remove localmente e impede qualquer reenvio futuro (retry/sync).
-    const isPendingDelivery = existing.status !== 'delivered';
+    // "sent/failed/null" ainda representam entrega pendente.
+    // "read" é mais forte que delivered e deve propagar exclusão remota.
+    const isPendingDelivery =
+      existing.status === 'sent' || existing.status === 'failed' || existing.status === null;
 
     const updated = this.db.deleteMessageForEveryone(messageId);
     if (!updated) return null;
 
-    if (isPendingDelivery) {
-      this.emitEvent({
-        type: 'message:removed',
-        conversationId: updated.conversationId,
-        messageId: updated.messageId
-      });
-      return updated;
-    }
+    const peerIdFromConversation = conversationId.startsWith('dm:')
+      ? conversationId.slice(3)
+      : null;
+    const isPeerOnlineNow = peerIdFromConversation
+      ? Boolean(this.presence.getPeer(peerIdFromConversation))
+      : false;
 
-    if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
-      await this.sendBroadcast({
-        type: 'chat:delete',
-        messageId: randomUUID(),
-        from: this.profile.deviceId,
-        to: null,
-        createdAt: Date.now(),
-        payload: {
-          targetMessageId: messageId
-        }
-      } satisfies ProtocolFrame<DeletePayload>);
-    } else {
-      const peer = this.getPeerFromConversationId(conversationId);
-      if (peer) {
-        const frame: ProtocolFrame<DeletePayload> = {
-          type: 'chat:delete',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: peer.deviceId,
-          createdAt: Date.now(),
-          payload: {
-            targetMessageId: messageId
+    if (!isPendingDelivery || isPeerOnlineNow || conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+      try {
+        if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+          await this.sendBroadcast({
+            type: 'chat:delete',
+            messageId: randomUUID(),
+            from: this.profile.deviceId,
+            to: null,
+            createdAt: Date.now(),
+            payload: {
+              targetMessageId: messageId
+            }
+          } satisfies ProtocolFrame<DeletePayload>);
+        } else {
+          const peer = this.getPeerFromConversationId(conversationId);
+          if (peer) {
+            const frame: ProtocolFrame<DeletePayload> = {
+              type: 'chat:delete',
+              messageId: randomUUID(),
+              from: this.profile.deviceId,
+              to: peer.deviceId,
+              createdAt: Date.now(),
+              payload: {
+                targetMessageId: messageId
+              }
+            };
+            await this.sendToPeer(peer, frame);
           }
-        };
-        await this.sendToPeer(peer, frame);
+        }
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'warning',
+          message:
+            'Contato offline no momento. A exclusão será sincronizada quando a conexão voltar.'
+        });
       }
     }
 
@@ -1146,6 +1203,11 @@ class LanternApp {
       case 'chat:text': {
         const payload = frame.payload as ChatTextPayload;
         const replyTo = this.normalizeReplyPayload(payload.replyTo);
+        const forwardedFromMessageId =
+          typeof payload.forwardedFromMessageId === 'string' &&
+          payload.forwardedFromMessageId.trim().length > 0
+            ? payload.forwardedFromMessageId.trim()
+            : null;
         const conversationId = this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
@@ -1173,6 +1235,7 @@ class LanternApp {
           replyToType: replyTo?.type || null,
           replyToPreviewText: replyTo?.previewText || null,
           replyToFileName: replyTo?.fileName || null,
+          forwardedFromMessageId,
           createdAt
         };
 
@@ -1238,6 +1301,7 @@ class LanternApp {
           replyToType: replyTo?.type || null,
           replyToPreviewText: replyTo?.previewText || null,
           replyToFileName: replyTo?.fileName || null,
+          forwardedFromMessageId: null,
           createdAt
         };
 
@@ -1341,6 +1405,9 @@ class LanternApp {
             conversationId: updated.conversationId,
             messageId: updated.messageId
           });
+        } else if (deliverySource === 'live' && activePeer) {
+          // Corrige corrida: delete pode chegar antes do payload original.
+          void this.requestSync(activePeer).catch(() => undefined);
         }
         break;
       }
@@ -1491,6 +1558,11 @@ class LanternApp {
       case 'file:offer': {
         const payload = frame.payload as FileOfferPayload;
         const replyTo = this.normalizeReplyPayload(payload.replyTo);
+        const forwardedFromMessageId =
+          typeof payload.forwardedFromMessageId === 'string' &&
+          payload.forwardedFromMessageId.trim().length > 0
+            ? payload.forwardedFromMessageId.trim()
+            : null;
         const conversationId = this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
@@ -1531,6 +1603,8 @@ class LanternApp {
           replyToPreviewText:
             replyTo?.previewText || existingMessage?.replyToPreviewText || null,
           replyToFileName: replyTo?.fileName || existingMessage?.replyToFileName || null,
+          forwardedFromMessageId:
+            forwardedFromMessageId || existingMessage?.forwardedFromMessageId || null,
           createdAt
         };
 
@@ -1909,6 +1983,7 @@ class LanternApp {
             replyToType: replyTo?.type || null,
             replyToPreviewText: replyTo?.previewText || null,
             replyToFileName: replyTo?.fileName || null,
+            forwardedFromMessageId: null,
             createdAt
           });
         }

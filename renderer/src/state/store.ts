@@ -74,6 +74,7 @@ interface LanternState {
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<void>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -1169,6 +1170,34 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         error instanceof Error
           ? error.message
           : 'Não foi possível enviar o anexo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  forwardMessageToPeer: async (targetPeerId, sourceMessageId) => {
+    try {
+      const message = await ipcClient.forwardMessageToPeer(targetPeerId, sourceMessageId);
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [message.conversationId]: appendUniqueMessage(
+            state.messagesByConversation[message.conversationId] || [],
+            message
+          )
+        },
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [message.conversationId]: previewFromMessage(message)
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível encaminhar a mensagem.';
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set((state) => ({
         toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]

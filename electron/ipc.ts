@@ -57,6 +57,7 @@ export interface IpcBindings {
     filePath: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
+  forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<DbMessage>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -372,6 +373,11 @@ export const registerIpc = (
       filePath: string,
       replyTo?: MessageReplyPayload | null
     ) => bindings.sendFile(peerId, filePath, replyTo)
+  );
+  ipcMain.handle(
+    'lantern:forwardMessageToPeer',
+    (_event, targetPeerId: string, sourceMessageId: string) =>
+      bindings.forwardMessageToPeer(targetPeerId, sourceMessageId)
   );
   ipcMain.handle(
     'lantern:reactToMessage',

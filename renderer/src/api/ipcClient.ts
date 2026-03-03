@@ -42,6 +42,7 @@ export interface MessageRow {
   replyToType: 'text' | 'announcement' | 'file' | null;
   replyToPreviewText: string | null;
   replyToFileName: string | null;
+  forwardedFromMessageId?: string | null;
   createdAt: number;
   localOnly?: boolean;
 }
@@ -139,6 +140,7 @@ interface LanternApi {
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
+  forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<MessageRow>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -210,6 +212,8 @@ export const ipcClient = {
     window.lantern.sendAnnouncement(text, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendFile(peerId, filePath, replyTo),
+  forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
+    window.lantern.forwardMessageToPeer(targetPeerId, sourceMessageId),
   reactToMessage: (
     conversationId: string,
     messageId: string,
