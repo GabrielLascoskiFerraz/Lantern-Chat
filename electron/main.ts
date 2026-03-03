@@ -71,6 +71,78 @@ class LanternApp {
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
 
+  private formatBackupTimestamp(value: number): string {
+    const date = new Date(value);
+    const pad = (num: number) => String(num).padStart(2, '0');
+    return [
+      date.getFullYear(),
+      pad(date.getMonth() + 1),
+      pad(date.getDate()),
+      '-',
+      pad(date.getHours()),
+      pad(date.getMinutes()),
+      pad(date.getSeconds())
+    ].join('');
+  }
+
+  private async copyDirectoryRecursive(source: string, target: string): Promise<void> {
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    await fs.promises.cp(source, target, {
+      recursive: true,
+      force: true,
+      errorOnExist: false
+    });
+  }
+
+  private async applyPendingRestoreIfExists(): Promise<void> {
+    const userDataDir = app.getPath('userData');
+    const stagingRoot = path.join(userDataDir, 'restore-pending');
+    const markerPath = path.join(stagingRoot, 'restore.json');
+
+    if (!fs.existsSync(markerPath)) {
+      return;
+    }
+
+    try {
+      const markerRaw = await fs.promises.readFile(markerPath, 'utf8');
+      const marker = JSON.parse(markerRaw) as {
+        targetAttachmentsDir?: string;
+      };
+      const stagedDbDir = path.join(stagingRoot, 'db');
+      const stagedDbFile = path.join(stagedDbDir, 'lantern.db');
+      if (!fs.existsSync(stagedDbFile)) {
+        throw new Error('Backup pendente sem banco de dados válido.');
+      }
+
+      await fs.promises.mkdir(userDataDir, { recursive: true });
+      const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
+      for (const fileName of dbFileNames) {
+        const targetPath = path.join(userDataDir, fileName);
+        await fs.promises.rm(targetPath, { force: true }).catch(() => undefined);
+        const stagedPath = path.join(stagedDbDir, fileName);
+        if (!fs.existsSync(stagedPath)) {
+          continue;
+        }
+        await fs.promises.copyFile(stagedPath, targetPath);
+      }
+
+      const stagedAttachmentsDir = path.join(stagingRoot, 'attachments');
+      const targetAttachmentsDir = (marker.targetAttachmentsDir || '').trim();
+      if (targetAttachmentsDir && fs.existsSync(stagedAttachmentsDir)) {
+        const targetResolved = path.resolve(targetAttachmentsDir);
+        await fs.promises.rm(targetResolved, { recursive: true, force: true });
+        await this.copyDirectoryRecursive(stagedAttachmentsDir, targetResolved);
+      }
+    } catch (error) {
+      console.error(
+        '[Lantern] Falha ao aplicar restauração pendente:',
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
   }
@@ -141,6 +213,157 @@ class LanternApp {
     await fs.promises.copyFile(sourcePath, destination);
   }
 
+  private async createLocalBackup(): Promise<{
+    canceled: boolean;
+    backupPath: string | null;
+  }> {
+    const picker = this.mainWindow
+      ? await dialog.showOpenDialog(this.mainWindow, {
+          title: 'Escolher pasta para salvar backup',
+          defaultPath: app.getPath('documents'),
+          properties: ['openDirectory', 'createDirectory']
+        })
+      : await dialog.showOpenDialog({
+          title: 'Escolher pasta para salvar backup',
+          defaultPath: app.getPath('documents'),
+          properties: ['openDirectory', 'createDirectory']
+        });
+
+    if (picker.canceled || picker.filePaths.length === 0) {
+      return { canceled: true, backupPath: null };
+    }
+
+    const targetParent = path.resolve(picker.filePaths[0]);
+    const stamp = this.formatBackupTimestamp(Date.now());
+    const backupRoot = path.join(targetParent, `LanternBackup-${stamp}`);
+    const backupDbDir = path.join(backupRoot, 'db');
+    const backupAttachmentsDir = path.join(backupRoot, 'attachments');
+    const userDataDir = app.getPath('userData');
+    const sourceDbPath = path.join(userDataDir, 'lantern.db');
+
+    if (!fs.existsSync(sourceDbPath)) {
+      throw new Error('Banco de dados local não encontrado para backup.');
+    }
+
+    await fs.promises.mkdir(backupDbDir, { recursive: true });
+    const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
+    for (const fileName of dbFileNames) {
+      const sourcePath = path.join(userDataDir, fileName);
+      if (!fs.existsSync(sourcePath)) {
+        continue;
+      }
+      await fs.promises.copyFile(sourcePath, path.join(backupDbDir, fileName));
+    }
+
+    const attachmentsDir = this.getConfiguredAttachmentsDir();
+    let copiedAttachments = false;
+    if (attachmentsDir && fs.existsSync(attachmentsDir)) {
+      const stat = await fs.promises.stat(attachmentsDir).catch(() => null);
+      if (stat?.isDirectory()) {
+        await this.copyDirectoryRecursive(attachmentsDir, backupAttachmentsDir);
+        copiedAttachments = true;
+      }
+    }
+
+    const manifest = {
+      app: 'Lantern',
+      version: app.getVersion(),
+      createdAt: Date.now(),
+      profileDeviceId: this.profile.deviceId,
+      profileName: this.profile.displayName,
+      includesAttachments: copiedAttachments
+    };
+    await fs.promises.writeFile(
+      path.join(backupRoot, 'manifest.json'),
+      JSON.stringify(manifest, null, 2),
+      'utf8'
+    );
+
+    return { canceled: false, backupPath: backupRoot };
+  }
+
+  private async restoreLocalBackup(): Promise<{
+    canceled: boolean;
+    restartScheduled: boolean;
+  }> {
+    const picker = this.mainWindow
+      ? await dialog.showOpenDialog(this.mainWindow, {
+          title: 'Selecionar pasta do backup',
+          defaultPath: app.getPath('documents'),
+          properties: ['openDirectory']
+        })
+      : await dialog.showOpenDialog({
+          title: 'Selecionar pasta do backup',
+          defaultPath: app.getPath('documents'),
+          properties: ['openDirectory']
+        });
+
+    if (picker.canceled || picker.filePaths.length === 0) {
+      return { canceled: true, restartScheduled: false };
+    }
+
+    const backupRoot = path.resolve(picker.filePaths[0]);
+    const backupDbDir = path.join(backupRoot, 'db');
+    const backupDbFile = path.join(backupDbDir, 'lantern.db');
+    if (!fs.existsSync(backupDbFile)) {
+      throw new Error(
+        'Backup inválido: arquivo db/lantern.db não encontrado na pasta selecionada.'
+      );
+    }
+
+    const userDataDir = app.getPath('userData');
+    const stagingRoot = path.join(userDataDir, 'restore-pending');
+    const stagingDbDir = path.join(stagingRoot, 'db');
+    const stagingAttachmentsDir = path.join(stagingRoot, 'attachments');
+    await fs.promises.rm(stagingRoot, { recursive: true, force: true });
+    await fs.promises.mkdir(stagingDbDir, { recursive: true });
+
+    const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
+    for (const fileName of dbFileNames) {
+      const sourcePath = path.join(backupDbDir, fileName);
+      if (!fs.existsSync(sourcePath)) {
+        continue;
+      }
+      await fs.promises.copyFile(sourcePath, path.join(stagingDbDir, fileName));
+    }
+
+    const backupAttachmentsDir = path.join(backupRoot, 'attachments');
+    const targetAttachmentsDir = this.getConfiguredAttachmentsDir();
+    if (fs.existsSync(backupAttachmentsDir)) {
+      const stat = await fs.promises.stat(backupAttachmentsDir).catch(() => null);
+      if (stat?.isDirectory()) {
+        await this.copyDirectoryRecursive(backupAttachmentsDir, stagingAttachmentsDir);
+      }
+    }
+
+    await fs.promises.writeFile(
+      path.join(stagingRoot, 'restore.json'),
+      JSON.stringify(
+        {
+          createdAt: Date.now(),
+          sourceBackupPath: backupRoot,
+          targetAttachmentsDir
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    this.emitEvent({
+      type: 'ui:toast',
+      level: 'info',
+      message: 'Restauração preparada. O Lantern será reiniciado para aplicar o backup.'
+    });
+
+    setTimeout(() => {
+      app.relaunch();
+      app.exit(0);
+    }, 220);
+
+    return { canceled: false, restartScheduled: true };
+  }
+
   async start(): Promise<void> {
     app.setName('Lantern');
     app.setAppUserModelId(APP_ID);
@@ -153,6 +376,7 @@ class LanternApp {
       }
     }
 
+    await this.applyPendingRestoreIfExists();
     this.db = new DbService(app.getPath('userData'));
     this.profile = this.db.getProfile();
     this.relaySettings = this.db.getRelaySettings();
@@ -331,7 +555,9 @@ class LanternApp {
           }
         }
       },
-      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
+      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName),
+      createLocalBackup: () => this.createLocalBackup(),
+      restoreLocalBackup: () => this.restoreLocalBackup()
     });
 
     this.emitEvent = ipc.emitEvent;

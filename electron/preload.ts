@@ -77,6 +77,10 @@ const api = {
   openFile: (filePath: string): Promise<void> => ipcRenderer.invoke('lantern:openFile', filePath),
   saveFileAs: (filePath: string, fileName?: string): Promise<void> =>
     ipcRenderer.invoke('lantern:saveFileAs', filePath, fileName),
+  createLocalBackup: (): Promise<{ canceled: boolean; backupPath: string | null }> =>
+    ipcRenderer.invoke('lantern:createLocalBackup'),
+  restoreLocalBackup: (): Promise<{ canceled: boolean; restartScheduled: boolean }> =>
+    ipcRenderer.invoke('lantern:restoreLocalBackup'),
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('lantern:openExternalUrl', url),
   nativePaste: (): Promise<boolean> => ipcRenderer.invoke('lantern:nativePaste'),
   getFilePreview: (filePath: string): Promise<string | null> =>

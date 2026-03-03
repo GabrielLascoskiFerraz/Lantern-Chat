@@ -58,6 +58,9 @@ export const SettingsModal = ({
   const [relayPortDraft, setRelayPortDraft] = useState(String(relaySettings?.port || 43190));
   const [openAtLogin, setOpenAtLogin] = useState(Boolean(startupSettings?.openAtLogin));
   const [downloadsDir, setDownloadsDir] = useState(startupSettings?.downloadsDir || '');
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [backupFeedback, setBackupFeedback] = useState('');
   const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
   const emojiGroups = {
     rostos: [
@@ -125,6 +128,9 @@ export const SettingsModal = ({
     setRelayPortDraft(String(relaySettings?.port || 43190));
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
+    setBackupBusy(false);
+    setRestoreBusy(false);
+    setBackupFeedback('');
   };
   const dialogSurfaceStyle = {
     width: '85vw',
@@ -145,6 +151,46 @@ export const SettingsModal = ({
       : 43190;
   const relayHostTrimmed = relayHost.trim();
   const relayConfigValid = relayAutomatic || relayHostTrimmed.length > 0;
+
+  const handleCreateBackup = async (): Promise<void> => {
+    if (backupBusy || restoreBusy) return;
+    setBackupBusy(true);
+    setBackupFeedback('');
+    try {
+      const result = await ipcClient.createLocalBackup();
+      if (result.canceled) {
+        setBackupFeedback('Backup cancelado.');
+        return;
+      }
+      setBackupFeedback(`Backup criado em: ${result.backupPath || 'pasta selecionada'}`);
+    } catch (error) {
+      setBackupFeedback(
+        error instanceof Error ? error.message : 'Não foi possível criar o backup local.'
+      );
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreBackup = async (): Promise<void> => {
+    if (backupBusy || restoreBusy) return;
+    setRestoreBusy(true);
+    setBackupFeedback('');
+    try {
+      const result = await ipcClient.restoreLocalBackup();
+      if (result.canceled) {
+        setBackupFeedback('Restauração cancelada.');
+        return;
+      }
+      setBackupFeedback('Restauração preparada. O aplicativo será reiniciado.');
+    } catch (error) {
+      setBackupFeedback(
+        error instanceof Error ? error.message : 'Não foi possível restaurar o backup.'
+      );
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={(_, data) => !data.open && onClose()}>
@@ -338,6 +384,36 @@ export const SettingsModal = ({
                 <Text size={200} className="settings-relay-help">
                   Os novos arquivos recebidos serão salvos nesta pasta.
                 </Text>
+              </Field>
+
+              <Field className="settings-field settings-field-backup" label="Backup e restauração local">
+                <div className="settings-backup-actions">
+                  <Button
+                    appearance="secondary"
+                    disabled={backupBusy || restoreBusy}
+                    onClick={() => void handleCreateBackup()}
+                  >
+                    {backupBusy ? 'Gerando backup...' : 'Criar backup'}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={backupBusy || restoreBusy}
+                    onClick={() => void handleRestoreBackup()}
+                  >
+                    {restoreBusy ? 'Preparando restauração...' : 'Restaurar backup'}
+                  </Button>
+                </div>
+                <Text size={200} className="settings-relay-help">
+                  O backup inclui histórico local (SQLite) e anexos do Lantern.
+                </Text>
+                <Text size={200} className="settings-relay-help">
+                  Ao restaurar, o aplicativo reinicia automaticamente para aplicar os dados.
+                </Text>
+                {backupFeedback && (
+                  <Text size={200} className="settings-backup-feedback">
+                    {backupFeedback}
+                  </Text>
+                )}
               </Field>
             </section>
           </DialogContent>

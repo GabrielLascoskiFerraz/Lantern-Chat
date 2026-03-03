@@ -91,6 +91,8 @@ export interface IpcBindings {
   getConversations: () => Record<string, number>;
   addManualPeer: (address: string, port: number) => void;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
+  createLocalBackup: () => Promise<{ canceled: boolean; backupPath: string | null }>;
+  restoreLocalBackup: () => Promise<{ canceled: boolean; restartScheduled: boolean }>;
 }
 
 export const registerIpc = (
@@ -455,6 +457,8 @@ export const registerIpc = (
   ipcMain.handle('lantern:saveFileAs', (_event, filePath: string, fileName?: string) =>
     bindings.saveFileAs(filePath, fileName)
   );
+  ipcMain.handle('lantern:createLocalBackup', () => bindings.createLocalBackup());
+  ipcMain.handle('lantern:restoreLocalBackup', () => bindings.restoreLocalBackup());
 
   ipcMain.handle('lantern:pickFile', async () => {
     const result = await dialog.showOpenDialog(window, {

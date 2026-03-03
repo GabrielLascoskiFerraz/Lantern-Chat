@@ -2631,6 +2631,10 @@ body {
   grid-column: 1 / -1;
 }
 
+.settings-field-backup {
+  grid-column: 1 / -1;
+}
+
 .settings-relay-toggle-row {
   display: flex;
   align-items: center;
@@ -2672,6 +2676,19 @@ body {
 .settings-relay-help {
   margin-top: 8px;
   color: var(--teams-muted);
+}
+
+.settings-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-backup-feedback {
+  margin-top: 8px;
+  display: block;
+  color: color-mix(in srgb, var(--teams-accent) 74%, var(--teams-text));
+  word-break: break-word;
 }
 
 .settings-modal .fui-DialogActions {

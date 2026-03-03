@@ -179,6 +179,8 @@ interface LanternApi {
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
+  createLocalBackup: () => Promise<{ canceled: boolean; backupPath: string | null }>;
+  restoreLocalBackup: () => Promise<{ canceled: boolean; restartScheduled: boolean }>;
   openExternalUrl: (url: string) => Promise<void>;
   nativePaste: () => Promise<boolean>;
   getFilePreview: (filePath: string) => Promise<string | null>;
@@ -265,6 +267,8 @@ export const ipcClient = {
   pickDirectory: (defaultPath?: string) => window.lantern.pickDirectory(defaultPath),
   openFile: (filePath: string) => window.lantern.openFile(filePath),
   saveFileAs: (filePath: string, fileName?: string) => window.lantern.saveFileAs(filePath, fileName),
+  createLocalBackup: () => window.lantern.createLocalBackup(),
+  restoreLocalBackup: () => window.lantern.restoreLocalBackup(),
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   nativePaste: () => window.lantern.nativePaste(),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),
