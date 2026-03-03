@@ -17,9 +17,21 @@ interface IncomingTransfer {
   hash: ReturnType<typeof createHash>;
   writeStream: fs.WriteStream;
   finalPath: string;
+  writeQueue: Buffer[];
+  queuedBytes: number;
+  waitingDrain: boolean;
+  drainListenerAttached: boolean;
+  streamErrored: boolean;
+  writableWaiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timeout: NodeJS.Timeout;
+  }>;
 }
 
 export class FileTransferService {
+  private static readonly MAX_PENDING_WRITE_QUEUE_BYTES = 24 * 1024 * 1024;
+  private static readonly DRAIN_WAIT_TIMEOUT_MS = 20_000;
   private attachmentsDir: string;
   private readonly profile: Profile;
   private readonly incoming = new Map<string, IncomingTransfer>();
@@ -171,7 +183,7 @@ export class FileTransferService {
     const finalPath = path.join(this.attachmentsDir, `${fileOffer.messageId}_${safeName}`);
     const writeStream = fs.createWriteStream(finalPath, { flags: 'w' });
 
-    this.incoming.set(fileOffer.fileId, {
+    const transfer: IncomingTransfer = {
       fileId: fileOffer.fileId,
       messageId: fileOffer.messageId,
       peerId,
@@ -183,10 +195,121 @@ export class FileTransferService {
       transferredBytes: 0,
       hash: createHash('sha256'),
       writeStream,
-      finalPath
+      finalPath,
+      writeQueue: [],
+      queuedBytes: 0,
+      waitingDrain: false,
+      drainListenerAttached: false,
+      streamErrored: false,
+      writableWaiters: []
+    };
+    writeStream.on('error', () => {
+      transfer.streamErrored = true;
+      this.rejectWritableWaiters(
+        transfer,
+        new Error('Falha de escrita durante recebimento de arquivo.')
+      );
     });
 
+    this.incoming.set(fileOffer.fileId, transfer);
+
     return finalPath;
+  }
+
+  private hasWriteBacklog(transfer: IncomingTransfer): boolean {
+    return transfer.waitingDrain || transfer.writeQueue.length > 0;
+  }
+
+  private resolveWritableWaiters(transfer: IncomingTransfer): void {
+    if (this.hasWriteBacklog(transfer) || transfer.streamErrored) {
+      return;
+    }
+    const waiters = transfer.writableWaiters.splice(0);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve();
+    }
+  }
+
+  private rejectWritableWaiters(transfer: IncomingTransfer, error: Error): void {
+    if (transfer.writableWaiters.length === 0) return;
+    const waiters = transfer.writableWaiters.splice(0);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+  }
+
+  private waitForWriteDrain(transfer: IncomingTransfer): Promise<void> {
+    if (!this.hasWriteBacklog(transfer) && !transfer.streamErrored) {
+      return Promise.resolve();
+    }
+    if (transfer.streamErrored) {
+      return Promise.reject(new Error('Stream em erro durante drain.'));
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const index = transfer.writableWaiters.findIndex((entry) => entry.resolve === resolve);
+        if (index >= 0) {
+          transfer.writableWaiters.splice(index, 1);
+        }
+        reject(new Error('Timeout aguardando drenagem de escrita.'));
+      }, FileTransferService.DRAIN_WAIT_TIMEOUT_MS);
+      timeout.unref?.();
+
+      transfer.writableWaiters.push({
+        resolve,
+        reject,
+        timeout
+      });
+    });
+  }
+
+  private failIncomingTransfer(transfer: IncomingTransfer): void {
+    try {
+      transfer.writeStream.destroy();
+    } catch {
+      // ignora
+    }
+    this.rejectWritableWaiters(transfer, new Error('Transferência interrompida por backpressure.'));
+    this.incoming.delete(transfer.fileId);
+    try {
+      fs.unlinkSync(transfer.finalPath);
+    } catch {
+      // ignora
+    }
+  }
+
+  private flushQueuedWrites(transfer: IncomingTransfer): void {
+    if (transfer.streamErrored || transfer.waitingDrain) {
+      return;
+    }
+
+    while (transfer.writeQueue.length > 0) {
+      const nextBuffer = transfer.writeQueue.shift()!;
+      transfer.queuedBytes = Math.max(0, transfer.queuedBytes - nextBuffer.length);
+      const canContinue = transfer.writeStream.write(nextBuffer);
+      if (!canContinue) {
+        transfer.waitingDrain = true;
+        this.attachDrainListener(transfer);
+        return;
+      }
+    }
+
+    this.resolveWritableWaiters(transfer);
+  }
+
+  private attachDrainListener(transfer: IncomingTransfer): void {
+    if (transfer.drainListenerAttached) {
+      return;
+    }
+    transfer.drainListenerAttached = true;
+    transfer.writeStream.once('drain', () => {
+      transfer.waitingDrain = false;
+      transfer.drainListenerAttached = false;
+      this.flushQueuedWrites(transfer);
+    });
   }
 
   onChunk(chunk: FileChunkPayload): { done: boolean; transferred: number; total: number } {
@@ -205,7 +328,7 @@ export class FileTransferService {
     transfer.totalChunks = chunk.total;
     if (transfer.receivedIndices.has(chunk.index)) {
       return {
-        done: transfer.totalChunks === transfer.receivedChunks,
+        done: transfer.totalChunks === transfer.receivedChunks && !this.hasWriteBacklog(transfer),
         transferred: transfer.transferredBytes,
         total: transfer.totalBytes
       };
@@ -213,13 +336,31 @@ export class FileTransferService {
 
     const buffer = Buffer.from(chunk.dataBase64, 'base64');
     transfer.hash.update(buffer);
-    transfer.writeStream.write(buffer);
+    if (transfer.waitingDrain) {
+      const nextQueuedBytes = transfer.queuedBytes + buffer.length;
+      if (nextQueuedBytes > FileTransferService.MAX_PENDING_WRITE_QUEUE_BYTES) {
+        this.failIncomingTransfer(transfer);
+        throw new Error('Fila de escrita excedeu limite de backpressure.');
+      }
+      transfer.writeQueue.push(buffer);
+      transfer.queuedBytes = nextQueuedBytes;
+    } else {
+      const canContinue = transfer.writeStream.write(buffer);
+      if (!canContinue) {
+        transfer.waitingDrain = true;
+        this.attachDrainListener(transfer);
+      }
+    }
     transfer.receivedIndices.add(chunk.index);
     transfer.receivedChunks = transfer.receivedIndices.size;
     transfer.transferredBytes += buffer.length;
 
+    if (!this.hasWriteBacklog(transfer)) {
+      this.resolveWritableWaiters(transfer);
+    }
+
     return {
-      done: transfer.totalChunks === transfer.receivedChunks,
+      done: transfer.totalChunks === transfer.receivedChunks && !this.hasWriteBacklog(transfer),
       transferred: transfer.transferredBytes,
       total: transfer.totalBytes
     };
@@ -235,6 +376,7 @@ export class FileTransferService {
 
     let streamClosed = true;
     try {
+      await this.waitForWriteDrain(transfer);
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const onFinish = () => {
