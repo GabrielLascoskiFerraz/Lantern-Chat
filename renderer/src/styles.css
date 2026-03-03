@@ -1059,7 +1059,7 @@ body {
   position: relative;
   overflow: visible;
   isolation: isolate;
-  z-index: 0;
+  z-index: 1;
 }
 
 .bubble-row.grouped {
@@ -1085,7 +1085,7 @@ body {
 .bubble-row.has-actions:hover,
 .bubble-row.has-actions:focus-within,
 .bubble-row.actions-open {
-  z-index: 40;
+  z-index: 260;
 }
 
 .bubble-row.out {
@@ -1115,6 +1115,7 @@ body {
   max-width: 100%;
   min-width: 108px;
   position: relative;
+  z-index: 1;
   border-radius: var(--teams-radius-md);
   border: 1px solid var(--teams-border);
   background: var(--teams-bubble-in);
@@ -1569,7 +1570,7 @@ body {
     opacity 160ms var(--motion-ease-standard),
     visibility 160ms var(--motion-ease-standard),
     transform 160ms var(--motion-ease-emphasized);
-  z-index: 16;
+  z-index: 320;
 }
 
 .bubble-actions-row.out {
@@ -1683,7 +1684,7 @@ body {
   font-size: 14px;
   line-height: 1;
   box-shadow: var(--teams-shadow-soft);
-  z-index: 12;
+  z-index: 280;
   opacity: 1;
   visibility: visible;
   transition: opacity 120ms ease, visibility 120ms ease;
