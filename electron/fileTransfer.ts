@@ -147,7 +147,11 @@ export class FileTransferService {
   startIncoming(fileOffer: FileOfferPayload, peerId: string): string {
     const existing = this.incoming.get(fileOffer.fileId);
     if (existing) {
-      if (existing.messageId === fileOffer.messageId && existing.peerId === peerId) {
+      if (
+        existing.messageId === fileOffer.messageId &&
+        existing.peerId === peerId &&
+        existing.receivedChunks === 0
+      ) {
         return existing.finalPath;
       }
       try {
@@ -221,15 +225,39 @@ export class FileTransferService {
     };
   }
 
-  finalize(fileId: string): { ok: boolean; finalPath: string; messageId: string; peerId: string } {
+  async finalize(
+    fileId: string
+  ): Promise<{ ok: boolean; finalPath: string; messageId: string; peerId: string }> {
     const transfer = this.incoming.get(fileId);
     if (!transfer) {
       throw new Error('Transferência não encontrada');
     }
 
-    transfer.writeStream.end();
+    let streamClosed = true;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onFinish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const onError = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+        transfer.writeStream.once('finish', onFinish);
+        transfer.writeStream.once('error', onError);
+        transfer.writeStream.end();
+      });
+    } catch {
+      streamClosed = false;
+    }
+
     const digest = transfer.hash.digest('hex');
     const ok =
+      streamClosed &&
       digest === transfer.expectedSha &&
       transfer.transferredBytes === transfer.totalBytes &&
       transfer.totalChunks === transfer.receivedChunks;

@@ -1421,6 +1421,11 @@ export const ChatView = ({
           const previewState = previewStateByMessageId[message.messageId];
           const previewDataUrl = previewState?.dataUrl;
           const previewVisible = Boolean(previewDataUrl && visiblePreviewByMessageId[message.messageId]);
+          const previewUnavailable =
+            isImageFile &&
+            !previewDataUrl &&
+            (message.status === 'delivered' || message.status === 'read');
+          const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
           const progress = message.fileId ? transferByFileId[message.fileId] : undefined;
           const progressPercent =
             progress && progress.total > 0
@@ -1474,7 +1479,7 @@ export const ChatView = ({
                     message.status === 'failed' ? 'failed' : ''
                   } ${message.status === 'sent' ? 'pending' : ''} ${
                     message.status === null ? 'pending' : ''
-                  } ${isImageFile && !previewDataUrl ? 'media-loading' : ''} ${
+                  } ${previewLoading ? 'media-loading' : ''} ${
                     isImageFile && previewDataUrl ? 'media-loaded' : ''
                   }`}
                   onContextMenu={(event) => handleBubbleContextMenu(event, message)}
@@ -1524,7 +1529,7 @@ export const ChatView = ({
                             className={`message-image-preview-placeholder ${previewVisible ? 'hidden' : ''}`}
                             aria-hidden
                           >
-                            Carregando imagem...
+                            {previewUnavailable ? 'Pré-visualização indisponível' : 'Carregando imagem...'}
                           </div>
                         </button>
                       )}
@@ -1561,6 +1566,10 @@ export const ChatView = ({
                       ) : message.status === 'failed' ? (
                         <div className="inline-status error">
                           <Caption1>Não foi possível enviar este anexo.</Caption1>
+                        </div>
+                      ) : message.status === 'delivered' || message.status === 'read' ? (
+                        <div className="inline-status">
+                          <Caption1>Anexo indisponível neste dispositivo.</Caption1>
                         </div>
                       ) : outgoing && (message.status === 'sent' || message.status === null) ? (
                         <div className="inline-status pending">

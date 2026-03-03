@@ -74,7 +74,10 @@ export class SyncService {
       fileSize: message.fileSize,
       fileSha256: message.fileSha256,
       filePath: null,
-      status: message.status,
+      status:
+        message.type === 'file' && direction === 'in'
+          ? 'sent'
+          : message.status,
       reaction: message.reaction,
       deletedAt: message.deletedAt,
       replyToMessageId: message.replyToMessageId,
@@ -95,7 +98,10 @@ export class SyncService {
         fileName: message.fileName,
         fileSize: message.fileSize,
         fileSha256: message.fileSha256,
-        status: message.status,
+        status:
+          message.type === 'file' && direction === 'in'
+            ? null
+            : message.status,
         reaction: message.reaction,
         deletedAt: message.deletedAt,
         replyToMessageId: message.replyToMessageId,

@@ -570,6 +570,7 @@ class LanternApp {
       endpoint: this.relay?.getCurrentEndpoint() || null
     });
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
+    this.reconcileLegacyIncomingFilePaths();
 
     this.tray.create(this.mainWindow, {
       appName: 'Lantern',
@@ -1558,6 +1559,132 @@ class LanternApp {
     return updated;
   }
 
+  private async finalizeIncomingFileTransfer(
+    fileId: string,
+    senderDeviceId: string,
+    activePeer?: Peer
+  ): Promise<void> {
+    let result: { ok: boolean; finalPath: string; messageId: string; peerId: string };
+    try {
+      result = await this.fileTransfer.finalize(fileId);
+    } catch {
+      return;
+    }
+
+    this.db.updateFilePath(fileId, result.finalPath, result.ok ? 'delivered' : 'failed');
+    const updated = this.db.getMessageById(result.messageId);
+    if (updated) {
+      this.emitEvent({
+        type: 'message:updated',
+        message: updated
+      });
+    }
+
+    this.emitEvent({
+      type: 'message:status',
+      messageId: result.messageId,
+      conversationId: updated?.conversationId || null,
+      status: result.ok ? 'delivered' : 'failed'
+    });
+    if (!result.ok) {
+      this.emitEvent({
+        type: 'ui:toast',
+        level: 'error',
+        message: 'Falha na validação do anexo recebido. O remetente irá reenviar.'
+      });
+      return;
+    }
+
+    const ackPeer =
+      activePeer && activePeer.deviceId === senderDeviceId
+        ? activePeer
+        : this.presence.getPeer(senderDeviceId) || this.resolvePeerForTransport(senderDeviceId);
+    if (!ackPeer) return;
+
+    try {
+      await this.sendToPeer(ackPeer, {
+        type: 'chat:ack',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: senderDeviceId,
+        createdAt: Date.now(),
+        payload: { ackMessageId: result.messageId, status: 'delivered' }
+      });
+    } catch {
+      // ACK best-effort: recebimento do arquivo já foi persistido localmente.
+    }
+  }
+
+  private reconcileLegacyIncomingFilePaths(): void {
+    const brokenRows = this.db.getIncomingFileMessagesWithoutPath(2000);
+    if (brokenRows.length === 0) {
+      return;
+    }
+
+    const attachmentsDir = path.resolve(this.fileTransfer.getAttachmentsDir());
+    let cachedDirEntries: string[] | null = null;
+    const readDirEntries = (): string[] => {
+      if (cachedDirEntries) return cachedDirEntries;
+      try {
+        cachedDirEntries = fs.readdirSync(attachmentsDir);
+      } catch {
+        cachedDirEntries = [];
+      }
+      return cachedDirEntries;
+    };
+
+    let repaired = 0;
+    for (const row of brokenRows) {
+      if (!row.fileId) continue;
+      const prefix = `${row.messageId}_`;
+      let recoveredPath: string | null = null;
+
+      if (row.fileName) {
+        const directPath = path.join(attachmentsDir, prefix + row.fileName);
+        if (fs.existsSync(directPath)) {
+          recoveredPath = directPath;
+        }
+      }
+
+      if (!recoveredPath) {
+        const foundName = readDirEntries().find((entry) => entry.startsWith(prefix));
+        if (foundName) {
+          const candidate = path.join(attachmentsDir, foundName);
+          if (fs.existsSync(candidate)) {
+            recoveredPath = candidate;
+          }
+        }
+      }
+
+      if (!recoveredPath) {
+        continue;
+      }
+
+      this.db.updateFilePath(row.fileId, recoveredPath, 'delivered');
+      const updated = this.db.getMessageById(row.messageId);
+      if (updated) {
+        this.emitEvent({
+          type: 'message:updated',
+          message: updated
+        });
+        this.emitEvent({
+          type: 'message:status',
+          messageId: updated.messageId,
+          conversationId: updated.conversationId,
+          status: updated.status === 'read' ? 'read' : 'delivered'
+        });
+      }
+      repaired += 1;
+    }
+
+    if (process.env.LANTERN_DEBUG_DISCOVERY === '1' && repaired > 0) {
+      console.log(
+        '[Lantern][Files] registros legados corrigidos',
+        JSON.stringify({ repaired, scanned: brokenRows.length, attachmentsDir })
+      );
+    }
+  }
+
   private async handleIncomingFrame(
     frame: ProtocolFrame,
     deliverySource: 'live' | 'sync' = 'live'
@@ -2065,55 +2192,14 @@ class LanternApp {
           transferred: progress.transferred,
           total: progress.total
         });
+        if (progress.done) {
+          await this.finalizeIncomingFileTransfer(payload.fileId, frame.from, activePeer);
+        }
         break;
       }
       case 'file:complete': {
         const payload = frame.payload as FileCompletePayload;
-        let result: { ok: boolean; finalPath: string; messageId: string; peerId: string };
-        try {
-          result = this.fileTransfer.finalize(payload.fileId);
-        } catch {
-          break;
-        }
-        this.db.updateFilePath(payload.fileId, result.finalPath, result.ok ? 'delivered' : 'failed');
-        const updated = this.db.getMessageById(result.messageId);
-        if (updated) {
-          this.emitEvent({
-            type: 'message:updated',
-            message: updated
-          });
-        }
-
-        this.emitEvent({
-          type: 'message:status',
-          messageId: result.messageId,
-          conversationId: updated?.conversationId || null,
-          status: result.ok ? 'delivered' : 'failed'
-        });
-        if (!result.ok) {
-          this.emitEvent({
-            type: 'ui:toast',
-            level: 'error',
-            message: 'Falha na validação do anexo recebido. O remetente irá reenviar.'
-          });
-        }
-
-        if (result.ok) {
-          if (activePeer) {
-            try {
-              await this.sendToPeer(activePeer, {
-                type: 'chat:ack',
-                messageId: randomUUID(),
-                from: this.profile.deviceId,
-                to: frame.from,
-                createdAt: Date.now(),
-                payload: { ackMessageId: result.messageId, status: 'delivered' }
-              });
-            } catch {
-              // ACK best-effort: recebimento do arquivo já foi persistido localmente.
-            }
-          }
-        }
+        await this.finalizeIncomingFileTransfer(payload.fileId, frame.from, activePeer);
         break;
       }
       default:

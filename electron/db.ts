@@ -583,6 +583,24 @@ export class DbService {
       .all(conversationId, limit) as DbMessage[];
   }
 
+  getIncomingFileMessagesWithoutPath(limit = 500): DbMessage[] {
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(Math.trunc(limit), 20_000))
+      : 500;
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE direction = 'in'
+           AND type = 'file'
+           AND deletedAt IS NULL
+           AND filePath IS NULL
+           AND COALESCE(status, 'sent') IN ('delivered', 'read')
+         ORDER BY createdAt ASC, messageId ASC
+         LIMIT ?`
+      )
+      .all(normalizedLimit) as DbMessage[];
+  }
+
   setMessageFavorite(messageId: string, favorite: boolean): boolean {
     const upsert = this.db.prepare(
       `INSERT INTO message_favorites (messageId, createdAt)
