@@ -60,6 +60,7 @@ class LanternApp {
   private peersById = new Map<string, Peer>();
   private readonly knownOnlinePeerIds = new Set<string>();
   private readonly syncRequestAtByPeer = new Map<string, number>();
+  private readonly peerUnreachableFailures = new Map<string, { count: number; lastAt: number }>();
   private readonly forgottenPeersById = new Map<
     string,
     { waitingForOffline: boolean; updatedAt: number }
@@ -67,6 +68,8 @@ class LanternApp {
   private activeConversationId = ANNOUNCEMENTS_CONVERSATION_ID;
   private readonly syncRetryMinIntervalMs = 12_000;
   private readonly syncNotificationMaxAgeMs = 2 * 60 * 1000;
+  private readonly peerUnreachableFailureThreshold = 2;
+  private readonly peerUnreachableFailureWindowMs = 15_000;
   private syncActivityCount = 0;
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
@@ -801,10 +804,6 @@ class LanternApp {
 
     for (const relayPeer of relayPeers) {
       if (!relayPeer.deviceId || relayPeer.deviceId === this.profile.deviceId) continue;
-      if (this.isPeerForgotten(relayPeer.deviceId)) continue;
-
-      incomingIds.add(relayPeer.deviceId);
-      const wasOnline = this.knownOnlinePeerIds.has(relayPeer.deviceId);
 
       const peer: Peer = {
         deviceId: relayPeer.deviceId,
@@ -822,6 +821,17 @@ class LanternApp {
         source: 'relay'
       };
 
+      const hasPendingOps = this.db.getPendingPeerOperations(peer.deviceId).length > 0;
+      if (this.isPeerForgotten(peer.deviceId)) {
+        if (hasPendingOps) {
+          void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
+        }
+        continue;
+      }
+
+      incomingIds.add(peer.deviceId);
+      const wasOnline = this.knownOnlinePeerIds.has(peer.deviceId);
+
       const touched = this.presence.touchOnlinePeer(peer, this.db, { bypassCooldown: true });
       if (touched) {
         changed = true;
@@ -829,12 +839,16 @@ class LanternApp {
 
       this.peersById.set(peer.deviceId, this.presence.getPeer(peer.deviceId) || peer);
       this.knownOnlinePeerIds.add(peer.deviceId);
+      this.peerUnreachableFailures.delete(peer.deviceId);
 
       // Evita tempestade de sync: só sincroniza quando o peer transita de offline -> online.
       if (!wasOnline) {
+        void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
         void this.requestSync(peer).catch(() => undefined);
         void this.messageService.retryFailedMessagesForPeer(peer).catch(() => undefined);
         void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
+      } else if (hasPendingOps) {
+        void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
       }
     }
 
@@ -1002,6 +1016,15 @@ class LanternApp {
     });
   }
 
+  private shouldMarkPeerUnreachableOnUndelivered(frame: ProtocolFrame): boolean {
+    return (
+      frame.type === 'chat:text' ||
+      frame.type === 'file:offer' ||
+      frame.type === 'chat:clear' ||
+      frame.type === 'chat:forget'
+    );
+  }
+
   private async sendToPeer(peer: Peer, frame: ProtocolFrame): Promise<void> {
     if (!this.relay || !this.relay.isConnected()) {
       throw new Error('Relay offline.');
@@ -1010,7 +1033,9 @@ class LanternApp {
     const targetDeviceId = frame.to;
     const result = await this.relay.sendFrame(frame);
     if (targetDeviceId && !result.deliveredTo.includes(targetDeviceId)) {
-      this.markPeerUnreachable(targetDeviceId, { force: true });
+      if (this.shouldMarkPeerUnreachableOnUndelivered(frame)) {
+        this.markPeerUnreachable(targetDeviceId, { force: true });
+      }
       throw new Error('Contato offline no relay.');
     }
   }
@@ -1200,7 +1225,60 @@ class LanternApp {
   private dropPeerRuntimeState(peerId: string): boolean {
     this.syncRequestAtByPeer.delete(peerId);
     this.knownOnlinePeerIds.delete(peerId);
+    this.peerUnreachableFailures.delete(peerId);
     return this.presence.markPeerOffline(peerId);
+  }
+
+  private enqueuePendingPeerOperationIfMissing(
+    peerId: string,
+    type: 'chat:clear' | 'chat:forget'
+  ): void {
+    const cleanPeerId = (peerId || '').trim();
+    if (!cleanPeerId) return;
+    const exists = this.db
+      .getPendingPeerOperations(cleanPeerId)
+      .some((row) => row.type === type);
+    if (exists) return;
+    this.db.enqueuePendingPeerOperation(cleanPeerId, type, { scope: 'dm' });
+  }
+
+  private async flushPendingPeerOperations(peerId: string, peerOverride?: Peer): Promise<void> {
+    const cleanPeerId = (peerId || '').trim();
+    if (!cleanPeerId) return;
+    if (!this.relay || !this.relay.isConnected()) return;
+
+    const peer = peerOverride || this.resolvePeerForTransport(cleanPeerId);
+    if (!peer) return;
+
+    const pending = this.db.getPendingPeerOperations(cleanPeerId);
+    if (pending.length === 0) return;
+
+    for (const operation of pending) {
+      const frame =
+        operation.type === 'chat:clear'
+          ? ({
+              type: 'chat:clear',
+              messageId: randomUUID(),
+              from: this.profile.deviceId,
+              to: cleanPeerId,
+              createdAt: Date.now(),
+              payload: { scope: operation.payload.scope }
+            } satisfies ProtocolFrame<ClearConversationPayload>)
+          : ({
+              type: 'chat:forget',
+              messageId: randomUUID(),
+              from: this.profile.deviceId,
+              to: cleanPeerId,
+              createdAt: Date.now(),
+              payload: { scope: operation.payload.scope }
+            } satisfies ProtocolFrame<ForgetPeerPayload>);
+      try {
+        await this.sendToPeer(peer, frame);
+        this.db.removePendingPeerOperation(operation.id);
+      } catch {
+        break;
+      }
+    }
   }
 
   private forgetPeerLocally(peerId: string): void {
@@ -1223,6 +1301,21 @@ class LanternApp {
 
     const force = Boolean(options?.force);
     if (!force) return;
+
+    const now = Date.now();
+    const previous = this.peerUnreachableFailures.get(peerId);
+    const count =
+      previous && now - previous.lastAt <= this.peerUnreachableFailureWindowMs
+        ? previous.count + 1
+        : 1;
+    this.peerUnreachableFailures.set(peerId, {
+      count,
+      lastAt: now
+    });
+    if (count < this.peerUnreachableFailureThreshold) {
+      return;
+    }
+    this.peerUnreachableFailures.delete(peerId);
 
     const changed = this.dropPeerRuntimeState(peerId);
     if (changed) {
@@ -1716,7 +1809,12 @@ class LanternApp {
           });
         } else if (deliverySource === 'live' && activePeer) {
           // Corrige corrida: delete pode chegar antes do payload original.
-          void this.requestSync(activePeer).catch(() => undefined);
+          void this.requestSync(activePeer, {
+            force: true,
+            since: 0,
+            limit: 100_000,
+            fullResync: true
+          }).catch(() => undefined);
         }
         break;
       }
@@ -2117,6 +2215,7 @@ class LanternApp {
     }
     this.knownOnlinePeerIds.clear();
     this.syncRequestAtByPeer.clear();
+    this.peerUnreachableFailures.clear();
     this.forgottenPeersById.clear();
     try {
       this.tray?.destroy();
@@ -2147,10 +2246,11 @@ class LanternApp {
 
     const peer = this.getPeerFromConversationId(conversationId);
     if (!peer) {
+      this.enqueuePendingPeerOperationIfMissing(conversationId.slice(3), 'chat:clear');
       this.emitEvent({
         type: 'ui:toast',
         level: 'warning',
-        message: 'Conversa limpa localmente. O outro usuário receberá quando estiver online.'
+        message: 'Conversa limpa localmente. Será sincronizada quando o contato voltar online.'
       });
       return;
     }
@@ -2167,10 +2267,11 @@ class LanternApp {
         }
       } satisfies ProtocolFrame<ClearConversationPayload>);
     } catch {
+      this.enqueuePendingPeerOperationIfMissing(conversationId.slice(3), 'chat:clear');
       this.emitEvent({
         type: 'ui:toast',
         level: 'warning',
-        message: 'Conversa limpa localmente. Não foi possível limpar no outro usuário agora.'
+        message: 'Conversa limpa localmente. Será sincronizada quando o contato voltar online.'
       });
     }
   }
@@ -2185,10 +2286,11 @@ class LanternApp {
     const peer = this.getPeerFromConversationId(conversationId);
     this.clearConversationLocal(conversationId);
     if (!peer) {
+      this.enqueuePendingPeerOperationIfMissing(peerId, 'chat:forget');
       this.emitEvent({
         type: 'ui:toast',
         level: 'warning',
-        message: 'Contato removido localmente. Não foi possível remover no outro usuário agora.'
+        message: 'Contato removido localmente. A remoção será sincronizada quando o contato voltar online.'
       });
     } else {
       try {
@@ -2214,10 +2316,11 @@ class LanternApp {
           }
         } satisfies ProtocolFrame<ForgetPeerPayload>);
       } catch {
+        this.enqueuePendingPeerOperationIfMissing(peerId, 'chat:forget');
         this.emitEvent({
           type: 'ui:toast',
           level: 'warning',
-          message: 'Contato removido localmente. A remoção no outro usuário será aplicada quando houver conexão.'
+          message: 'Contato removido localmente. A remoção será sincronizada quando o contato voltar online.'
         });
       }
     }

@@ -141,7 +141,7 @@ export const registerIpc = (
   };
 
   const sanitizeClipboardText = (value: string): string =>
-    (value || '').replace(/\u0000+/g, '\n');
+    (value || '').split('\0').join('\n');
 
   const parseFileUri = (value: string): string | null => {
     const trimmed = sanitizeClipboardText(value)
@@ -173,7 +173,7 @@ export const registerIpc = (
 
     const fromInlineMatches =
       sanitized
-        .match(/file:\/\/[^\s<>"'\u0000]+/gi)
+        .match(/file:\/\/[^\s<>"']+/gi)
         ?.map((match) => parseFileUri(match))
         .filter((line): line is string => Boolean(line)) || [];
 
@@ -236,21 +236,6 @@ export const registerIpc = (
       }
     }
     return paths;
-  };
-
-  const looksLikeFileClipboard = (formats: string[], text: string): boolean => {
-    const hasFileFormat = formats.some((format) => {
-      const lower = format.toLowerCase();
-      return (
-        lower.includes('file') ||
-        lower.includes('uri') ||
-        lower.includes('nsfilenamespboardtype') ||
-        lower.includes('public.file-url')
-      );
-    });
-    if (hasFileFormat) return true;
-    if (/(^|\n)\s*file:\/\//i.test(text || '')) return true;
-    return false;
   };
 
   const normalizeClipboardPaths = async (candidates: string[]): Promise<string[]> => {
@@ -675,7 +660,15 @@ export const registerIpc = (
     await fs.promises.mkdir(CLIPBOARD_TEMP_DIR, { recursive: true });
 
     const rawName = (fileName || '').trim();
-    const safeName = rawName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 180);
+    const safeName = Array.from(rawName)
+      .map((char) => {
+        const code = char.charCodeAt(0);
+        if (code < 32) return '_';
+        if ('\\/:*?"<>|'.includes(char)) return '_';
+        return char;
+      })
+      .join('')
+      .slice(0, 180);
     const extFromName = path.extname(safeName).replace(/[^a-zA-Z0-9.]/g, '');
     const extFromMime = `.${(match[1].split('/')[1] || 'bin').replace(/[^a-zA-Z0-9]/g, '') || 'bin'}`;
     const ext = extFromName || extFromMime;

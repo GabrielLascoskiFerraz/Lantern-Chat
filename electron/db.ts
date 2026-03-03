@@ -5,6 +5,18 @@ import { ANNOUNCEMENTS_CONVERSATION_ID } from './config';
 import { runMigrations } from './migrations';
 import { AnnouncementReactionSummary, ConversationRow, DbMessage, Peer, Profile } from './types';
 
+type PendingPeerOperationType = 'chat:clear' | 'chat:forget';
+
+interface PendingPeerOperation {
+  id: string;
+  peerId: string;
+  type: PendingPeerOperationType;
+  createdAt: number;
+  payload: {
+    scope: 'dm';
+  };
+}
+
 const colorFromDeviceId = (deviceId: string): string => {
   const hex = createHash('sha256').update(deviceId).digest('hex').slice(0, 6);
   return `#${hex}`;
@@ -446,7 +458,7 @@ export class DbService {
   getSyncMessagesForPeer(peerId: string, limit = 1000, since?: number): DbMessage[] {
     const dmConversationId = `dm:${peerId}`;
     if (typeof since === 'number' && since > 0) {
-      return this.db
+      const changedRows = this.db
         .prepare(
           `SELECT * FROM messages
            WHERE type IN ('text', 'file')
@@ -459,6 +471,37 @@ export class DbService {
            LIMIT ?`
         )
         .all(dmConversationId, since, since, limit) as DbMessage[];
+
+      // Tombstones antigos também precisam ser reenviados para evitar divergência
+      // quando o delete chegou fora de ordem em algum cliente.
+      const tombstoneRows = this.db
+        .prepare(
+          `SELECT * FROM messages
+           WHERE type IN ('text', 'file')
+             AND conversationId = ?
+             AND deletedAt IS NOT NULL
+             AND deletedAt <= ?
+           ORDER BY deletedAt DESC, messageId DESC
+           LIMIT ?`
+        )
+        .all(dmConversationId, since, 5000) as DbMessage[];
+
+      const byId = new Map<string, DbMessage>();
+      for (const row of changedRows) {
+        byId.set(row.messageId, row);
+      }
+      for (const row of tombstoneRows) {
+        if (!byId.has(row.messageId)) {
+          byId.set(row.messageId, row);
+        }
+      }
+
+      return Array.from(byId.values()).sort((left, right) => {
+        const leftTime = Math.max(left.createdAt || 0, left.deletedAt || 0);
+        const rightTime = Math.max(right.createdAt || 0, right.deletedAt || 0);
+        if (leftTime !== rightTime) return leftTime - rightTime;
+        return left.messageId.localeCompare(right.messageId);
+      });
     }
     return this.db
       .prepare(
@@ -1123,6 +1166,61 @@ export class DbService {
     return rows.map((row) => row.messageId);
   }
 
+  getPendingPeerOperations(peerId?: string): PendingPeerOperation[] {
+    const cleanPeerId = (peerId || '').trim();
+    const all = this.readPendingPeerOperations();
+    const filtered = cleanPeerId ? all.filter((row) => row.peerId === cleanPeerId) : all;
+    return filtered.sort((left, right) => {
+      if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
+      return left.id.localeCompare(right.id);
+    });
+  }
+
+  enqueuePendingPeerOperation(
+    peerId: string,
+    type: PendingPeerOperationType,
+    payload: { scope: 'dm' } = { scope: 'dm' }
+  ): PendingPeerOperation {
+    const cleanPeerId = (peerId || '').trim();
+    if (!cleanPeerId) {
+      throw new Error('peerId inválido para enfileirar operação pendente.');
+    }
+    const now = Date.now();
+    const scope = payload.scope === 'dm' ? 'dm' : 'dm';
+    const operation: PendingPeerOperation = {
+      id: randomUUID(),
+      peerId: cleanPeerId,
+      type,
+      createdAt: now,
+      payload: {
+        scope
+      }
+    };
+
+    const all = this.readPendingPeerOperations();
+    all.push(operation);
+    this.writePendingPeerOperations(all);
+    return operation;
+  }
+
+  removePendingPeerOperation(operationId: string): void {
+    const cleanId = (operationId || '').trim();
+    if (!cleanId) return;
+    const all = this.readPendingPeerOperations();
+    const next = all.filter((row) => row.id !== cleanId);
+    if (next.length === all.length) return;
+    this.writePendingPeerOperations(next);
+  }
+
+  clearPendingPeerOperationsForPeer(peerId: string): void {
+    const cleanPeerId = (peerId || '').trim();
+    if (!cleanPeerId) return;
+    const all = this.readPendingPeerOperations();
+    const next = all.filter((row) => row.peerId !== cleanPeerId);
+    if (next.length === all.length) return;
+    this.writePendingPeerOperations(next);
+  }
+
   getRelaySettings(): {
     automatic: boolean;
     host: string;
@@ -1215,5 +1313,53 @@ export class DbService {
 
   private deleteAppSetting(key: string): void {
     this.db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
+  }
+
+  private readPendingPeerOperations(): PendingPeerOperation[] {
+    const raw = this.getAppSetting('pending.peerOps');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const rows: PendingPeerOperation[] = [];
+      for (const value of parsed) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        const record = value as Record<string, unknown>;
+        const id = typeof record.id === 'string' ? record.id.trim() : '';
+        const peerId = typeof record.peerId === 'string' ? record.peerId.trim() : '';
+        const type = record.type;
+        const createdAt =
+          typeof record.createdAt === 'number' && Number.isFinite(record.createdAt)
+            ? Math.trunc(record.createdAt)
+            : 0;
+        const payloadRecord =
+          record.payload && typeof record.payload === 'object' && !Array.isArray(record.payload)
+            ? (record.payload as Record<string, unknown>)
+            : {};
+        const scope = payloadRecord.scope === 'dm' ? 'dm' : 'dm';
+
+        if (!id || !peerId || createdAt <= 0) continue;
+        if (type !== 'chat:clear' && type !== 'chat:forget') continue;
+
+        rows.push({
+          id,
+          peerId,
+          type,
+          createdAt,
+          payload: { scope }
+        });
+      }
+      return rows;
+    } catch {
+      return [];
+    }
+  }
+
+  private writePendingPeerOperations(rows: PendingPeerOperation[]): void {
+    if (!rows.length) {
+      this.deleteAppSetting('pending.peerOps');
+      return;
+    }
+    this.setAppSetting('pending.peerOps', JSON.stringify(rows));
   }
 }

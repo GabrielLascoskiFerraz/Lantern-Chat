@@ -372,6 +372,18 @@ export class MessageService {
         createdAt: message.createdAt,
         payload: {
           text: message.bodyText,
+          replyTo:
+            message.replyToMessageId &&
+            message.replyToSenderDeviceId &&
+            message.replyToType
+              ? {
+                  messageId: message.replyToMessageId,
+                  senderDeviceId: message.replyToSenderDeviceId,
+                  type: message.replyToType,
+                  previewText: message.replyToPreviewText,
+                  fileName: message.replyToFileName
+                }
+              : null,
           forwardedFromMessageId: message.forwardedFromMessageId || null
         }
       };
