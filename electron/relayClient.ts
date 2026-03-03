@@ -99,6 +99,7 @@ interface RelayClientCallbacks {
 }
 
 interface PendingSendAck {
+  promise: Promise<RelaySendResult>;
   resolve: (result: RelaySendResult) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
@@ -121,6 +122,7 @@ const CONNECT_TIMEOUT_MS = 8_000;
 const DISCOVERED_ENDPOINT_TTL_MS = 35_000;
 const DISCOVERY_REFRESH_INTERVAL_MS = 12_000;
 const LAST_HEALTHY_RETRY_WINDOW_MS = 14_000;
+const PRESENCE_STALE_TIMEOUT_MS = 45_000;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -497,6 +499,8 @@ export class RelayClient {
       this.lastPresenceRevision = -1;
       this.lastPresenceAt = 0;
       this.relayPeersById.clear();
+      this.rejectPendingAcks(new Error('Endpoint do relay alterado.'));
+      this.rejectReadyWaiters(new Error('Endpoint do relay alterado.'));
       this.callbacks.onPresence([]);
       this.cancelPresenceStaleTimer();
 
@@ -561,34 +565,51 @@ export class RelayClient {
       throw new Error('Relay indisponível.');
     }
 
-    return new Promise<RelaySendResult>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingAcks.delete(frame.messageId);
-        this.forceSocketDisconnect();
-        reject(new Error('Timeout aguardando confirmação do relay.'));
-      }, ACK_TIMEOUT_MS);
-      timeout.unref?.();
+    const existingPending = this.pendingAcks.get(frame.messageId);
+    if (existingPending) {
+      return existingPending.promise;
+    }
 
-      this.pendingAcks.set(frame.messageId, {
-        resolve,
-        reject,
-        timeout
-      });
-
-      this.sendEnvelope({
-        type: 'relay:send',
-        payload: {
-          frame
-        }
-      }, (error) => {
-        if (!error) return;
-        const pending = this.pendingAcks.get(frame.messageId);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingAcks.delete(frame.messageId);
-        pending.reject(new Error('Falha ao enviar frame para o relay.'));
-      });
+    let resolveAck!: (result: RelaySendResult) => void;
+    let rejectAck!: (error: Error) => void;
+    const promise = new Promise<RelaySendResult>((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
     });
+
+    const timeout = setTimeout(() => {
+      const pending = this.pendingAcks.get(frame.messageId);
+      if (!pending || pending.promise !== promise) {
+        return;
+      }
+      this.pendingAcks.delete(frame.messageId);
+      this.forceSocketDisconnect();
+      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
+    }, ACK_TIMEOUT_MS);
+    timeout.unref?.();
+
+    this.pendingAcks.set(frame.messageId, {
+      promise,
+      resolve: resolveAck,
+      reject: rejectAck,
+      timeout
+    });
+
+    this.sendEnvelope({
+      type: 'relay:send',
+      payload: {
+        frame
+      }
+    }, (error) => {
+      if (!error) return;
+      const pending = this.pendingAcks.get(frame.messageId);
+      if (!pending || pending.promise !== promise) return;
+      clearTimeout(pending.timeout);
+      this.pendingAcks.delete(frame.messageId);
+      pending.reject(new Error('Falha ao enviar frame para o relay.'));
+    });
+
+    return promise;
   }
 
   private chooseEndpoint(): string {
@@ -731,6 +752,7 @@ export class RelayClient {
         this.connecting = false;
         this.reconnectDelayMs = RECONNECT_DELAY_INITIAL_MS;
         this.cancelPresenceStaleTimer();
+        this.lastPresenceAt = Date.now();
 
         this.callbacks.onConnectionState?.({
           connected: true,
@@ -752,6 +774,7 @@ export class RelayClient {
         });
 
         this.requestPresence();
+        this.schedulePresenceStaleCheck();
         done();
       });
 
@@ -779,6 +802,7 @@ export class RelayClient {
 
       socket.on('pong', () => {
         this.lastPresenceAt = Date.now();
+        this.schedulePresenceStaleCheck();
       });
     });
 
@@ -803,6 +827,7 @@ export class RelayClient {
     this.connecting = false;
     this.lastPresenceRevision = -1;
     this.lastPresenceAt = 0;
+    this.cancelPresenceStaleTimer();
     this.relayPeersById.clear();
     this.rejectPendingAcks(new Error('Conexão com relay perdida.'));
     this.rejectReadyWaiters(new Error('Conexão com relay perdida.'));
@@ -827,6 +852,34 @@ export class RelayClient {
     this.presenceStaleTimer = null;
   }
 
+  private schedulePresenceStaleCheck(): void {
+    this.cancelPresenceStaleTimer();
+    if (!this.started) return;
+
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const now = Date.now();
+    const staleAt = (this.lastPresenceAt || now) + PRESENCE_STALE_TIMEOUT_MS;
+    const waitMs = Math.max(0, staleAt - now);
+
+    this.presenceStaleTimer = setTimeout(() => {
+      this.presenceStaleTimer = null;
+      const currentSocket = this.socket;
+      if (!currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (Date.now() - this.lastPresenceAt < PRESENCE_STALE_TIMEOUT_MS) {
+        this.schedulePresenceStaleCheck();
+        return;
+      }
+      this.forceSocketDisconnect();
+    }, waitMs);
+    this.presenceStaleTimer.unref?.();
+  }
+
   private handleRawMessage(raw: WebSocket.RawData): void {
     const text = typeof raw === 'string' ? raw : raw.toString();
     let envelope: RelayEnvelope | null = null;
@@ -849,11 +902,14 @@ export class RelayClient {
           this.lastHealthyEndpoint = this.selectedEndpoint;
           this.lastHealthyEndpointFailedAt = 0;
         }
+        this.lastPresenceAt = Date.now();
+        this.schedulePresenceStaleCheck();
         this.requestPresence();
         return;
       }
       case 'relay:pong': {
         this.lastPresenceAt = Date.now();
+        this.schedulePresenceStaleCheck();
         return;
       }
       case 'relay:presence': {
@@ -877,6 +933,7 @@ export class RelayClient {
           }
         }
         this.lastPresenceAt = Date.now();
+        this.schedulePresenceStaleCheck();
         this.callbacks.onPresence(Array.from(this.relayPeersById.values()));
         return;
       }
@@ -908,6 +965,7 @@ export class RelayClient {
         }
 
         this.lastPresenceAt = Date.now();
+        this.schedulePresenceStaleCheck();
         this.callbacks.onPresence(Array.from(this.relayPeersById.values()));
         return;
       }

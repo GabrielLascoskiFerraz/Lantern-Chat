@@ -511,7 +511,17 @@ class LanternRelay {
     });
 
     socket.on('message', (raw) => {
-      this.handleMessage(session, raw);
+      void this.handleMessage(session, raw).catch((error) => {
+        logRelay(
+          'message_handler_failed',
+          {
+            sessionId: session.sessionId,
+            deviceId: session.peer?.deviceId || null,
+            message: error instanceof Error ? error.message : String(error)
+          },
+          { level: 'warn', rateKey: `message_handler_failed:${session.sessionId}`, rateLimitMs: 1_000 }
+        );
+      });
     });
 
     socket.on('close', () => {
@@ -537,7 +547,7 @@ class LanternRelay {
     });
   }
 
-  private handleMessage(session: RelaySession, raw: RawData): void {
+  private async handleMessage(session: RelaySession, raw: RawData): Promise<void> {
     const data = (() => {
       if (typeof raw === 'string') return raw;
       if (Buffer.isBuffer(raw)) return raw.toString('utf8');
@@ -590,7 +600,7 @@ class LanternRelay {
         this.sendAnnouncementSnapshot(session, 'presence_request');
         return;
       case 'relay:send':
-        this.handleRelaySend(session, envelope.payload);
+        await this.handleRelaySend(session, envelope.payload);
         return;
       default:
         this.sendError(session, 'UNKNOWN_TYPE', `Tipo não suportado: ${envelope.type}`);
@@ -613,7 +623,7 @@ class LanternRelay {
           message: 'Sessão substituída por nova conexão.'
         }
       });
-      this.dropSession(existing, 'session-replaced');
+      this.dropSession(existing, 'session-replaced', { suppressPresence: true });
     }
 
     const now = Date.now();
@@ -681,7 +691,7 @@ class LanternRelay {
     }, 'peer_profile_updated');
   }
 
-  private handleRelaySend(session: RelaySession, payload: unknown): void {
+  private async handleRelaySend(session: RelaySession, payload: unknown): Promise<void> {
     if (!session.peer) {
       this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de encaminhar mensagens.');
       return;
@@ -699,7 +709,7 @@ class LanternRelay {
       return;
     }
 
-    const deliveredTo = this.routeFrame(frame, session.peer.deviceId);
+    const deliveredTo = await this.routeFrame(frame, session.peer.deviceId);
     if (frame.type === 'announce') {
       this.trackAnnouncement(frame);
     } else if (frame.type === 'chat:react' && frame.to === null) {
@@ -729,16 +739,20 @@ class LanternRelay {
     });
   }
 
-  private routeFrame(frame: RelayTransportFrame, senderDeviceId: string | null): string[] {
+  private async routeFrame(frame: RelayTransportFrame, senderDeviceId: string | null): Promise<string[]> {
     const deliveredTo: string[] = [];
     if (frame.to === null) {
       for (const [deviceId, recipient] of this.sessionsByDeviceId.entries()) {
         if (senderDeviceId && deviceId === senderDeviceId) continue;
-        this.sendEnvelope(recipient.socket, {
+        const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
           type: 'relay:deliver',
           payload: { frame }
         });
-        deliveredTo.push(deviceId);
+        if (delivered) {
+          deliveredTo.push(deviceId);
+          continue;
+        }
+        this.dropSession(recipient, 'send-failed');
       }
       return deliveredTo;
     }
@@ -748,11 +762,15 @@ class LanternRelay {
       return deliveredTo;
     }
 
-    this.sendEnvelope(recipient.socket, {
+    const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
       type: 'relay:deliver',
       payload: { frame }
     });
-    deliveredTo.push(frame.to);
+    if (delivered) {
+      deliveredTo.push(frame.to);
+    } else {
+      this.dropSession(recipient, 'send-failed');
+    }
     return deliveredTo;
   }
 
@@ -1082,9 +1100,14 @@ class LanternRelay {
     }
   }
 
-  private dropSession(session: RelaySession, reason: string): void {
+  private dropSession(
+    session: RelaySession,
+    reason: string,
+    options?: { suppressPresence?: boolean }
+  ): void {
     const current = this.sessionsBySocket.get(session.socket);
     if (!current) return;
+    const suppressPresence = Boolean(options?.suppressPresence);
 
     this.sessionsBySocket.delete(session.socket);
     const peer = session.peer;
@@ -1092,20 +1115,22 @@ class LanternRelay {
       const mapped = this.sessionsByDeviceId.get(peer.deviceId);
       if (mapped === session) {
         this.sessionsByDeviceId.delete(peer.deviceId);
-        logRelay('peer_offline', {
-          deviceId: peer.deviceId,
-          displayName: peer.displayName,
-          reason,
-          totalOnline: this.sessionsByDeviceId.size
-        });
-        this.bumpPresenceRevision('peer_offline');
-        this.broadcastPresenceDelta(
-          {
-            op: 'remove',
-            deviceId: peer.deviceId
-          },
-          'peer_offline'
-        );
+        if (!suppressPresence) {
+          logRelay('peer_offline', {
+            deviceId: peer.deviceId,
+            displayName: peer.displayName,
+            reason,
+            totalOnline: this.sessionsByDeviceId.size
+          });
+          this.bumpPresenceRevision('peer_offline');
+          this.broadcastPresenceDelta(
+            {
+              op: 'remove',
+              deviceId: peer.deviceId
+            },
+            'peer_offline'
+          );
+        }
       }
     }
 
@@ -1237,6 +1262,25 @@ class LanternRelay {
       socket.send(JSON.stringify(envelope));
     } catch {
       // ignore
+    }
+  }
+
+  private async sendEnvelopeWithStatus(
+    socket: WebSocket,
+    envelope: RelayEnvelope
+  ): Promise<boolean> {
+    if (socket.readyState !== OPEN_READY_STATE) {
+      return false;
+    }
+    try {
+      const payload = JSON.stringify(envelope);
+      return await new Promise<boolean>((resolve) => {
+        socket.send(payload, (error) => {
+          resolve(!error);
+        });
+      });
+    } catch {
+      return false;
     }
   }
 }

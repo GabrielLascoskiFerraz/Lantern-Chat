@@ -486,7 +486,7 @@ export class DbService {
            AND direction = 'out'
            AND type = 'text'
            AND deletedAt IS NULL
-           AND (status IS NULL OR status != 'delivered')
+           AND COALESCE(status, 'sent') IN ('sent', 'failed')
          ORDER BY createdAt ASC, messageId ASC
          LIMIT ?`
       )
@@ -502,7 +502,7 @@ export class DbService {
            AND direction = 'out'
            AND type = 'file'
            AND deletedAt IS NULL
-           AND (status IS NULL OR status != 'delivered')
+           AND COALESCE(status, 'sent') IN ('sent', 'failed')
          ORDER BY createdAt ASC, messageId ASC
          LIMIT ?`
       )

@@ -599,9 +599,9 @@ class LanternApp {
 
       // Evita tempestade de sync: só sincroniza quando o peer transita de offline -> online.
       if (!wasOnline) {
-        void this.requestSync(peer);
-        void this.messageService.retryFailedMessagesForPeer(peer);
-        void this.messageService.replayPendingFilesForPeer(peer);
+        void this.requestSync(peer).catch(() => undefined);
+        void this.messageService.retryFailedMessagesForPeer(peer).catch(() => undefined);
+        void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
       }
     }
 
@@ -1138,8 +1138,8 @@ class LanternApp {
     switch (frame.type) {
       case 'hello': {
         if (activePeer) {
-          void this.requestSync(activePeer);
-          void this.messageService.retryFailedMessagesForPeer(activePeer);
+          void this.requestSync(activePeer).catch(() => undefined);
+          void this.messageService.retryFailedMessagesForPeer(activePeer).catch(() => undefined);
         }
         break;
       }
