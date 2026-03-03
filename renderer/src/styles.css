@@ -820,6 +820,31 @@ body {
   opacity: 1;
 }
 
+.chat-search-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  opacity: 0;
+  transform: translateX(8px);
+  pointer-events: none;
+  transition:
+    opacity 170ms var(--motion-ease-standard),
+    transform 170ms var(--motion-ease-emphasized);
+}
+
+.chat-search-wrap.open .chat-search-content {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.chat-search-wrap.closing .chat-search-content {
+  opacity: 0;
+  transform: translateX(8px);
+  pointer-events: none;
+}
+
 .chat-search-input {
   width: min(34vw, 320px);
 }

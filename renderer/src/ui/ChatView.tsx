@@ -311,6 +311,7 @@ export const ChatView = ({
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchClosing, setSearchClosing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [favoriteMessages, setFavoriteMessages] = useState<MessageRow[]>([]);
@@ -339,6 +340,7 @@ export const ChatView = ({
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchCloseTimerRef = useRef<number | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const jumpHighlightTimeoutRef = useRef<number | null>(null);
@@ -462,6 +464,7 @@ export const ChatView = ({
         : messages,
     [favoriteMessages, favoritesOnly, messages]
   );
+  const searchUiVisible = searchOpen || searchClosing;
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const matchedMessageIdSet = useMemo(() => new Set(matchedMessageIds), [matchedMessageIds]);
   const loadedMessageIdSet = useMemo(
@@ -523,6 +526,35 @@ export const ChatView = ({
     [senderLabelForMessage, closeMessageContextMenu, focusComposerInput]
   );
 
+  const closeSearchAnimated = useCallback(() => {
+    if (!searchOpen && !searchClosing) {
+      return;
+    }
+    if (searchCloseTimerRef.current) {
+      window.clearTimeout(searchCloseTimerRef.current);
+      searchCloseTimerRef.current = null;
+    }
+    setSearchOpen(false);
+    setSearchClosing(true);
+    searchCloseTimerRef.current = window.setTimeout(() => {
+      setSearchClosing(false);
+      searchCloseTimerRef.current = null;
+    }, 180);
+  }, [searchClosing, searchOpen]);
+
+  const toggleSearchPanel = useCallback(() => {
+    if (searchOpen) {
+      closeSearchAnimated();
+      return;
+    }
+    if (searchCloseTimerRef.current) {
+      window.clearTimeout(searchCloseTimerRef.current);
+      searchCloseTimerRef.current = null;
+    }
+    setSearchClosing(false);
+    setSearchOpen(true);
+  }, [closeSearchAnimated, searchOpen]);
+
   const jumpToReferencedMessage = useCallback(
     async (targetMessageId: string) => {
       if (!targetMessageId) return;
@@ -569,7 +601,7 @@ export const ChatView = ({
       return;
     }
     if (searchOpen) {
-      setSearchOpen(false);
+      closeSearchAnimated();
     }
     let cancelled = false;
     setFavoriteMessagesLoading(true);
@@ -591,7 +623,7 @@ export const ChatView = ({
     return () => {
       cancelled = true;
     };
-  }, [favoritesOnly, conversationId, onGetFavoriteMessages, searchOpen]);
+  }, [favoritesOnly, conversationId, onGetFavoriteMessages, searchOpen, closeSearchAnimated]);
 
   useEffect(() => {
     if (!favoritesOnly) {
@@ -1098,6 +1130,10 @@ export const ChatView = ({
 
   useEffect(
     () => () => {
+      if (searchCloseTimerRef.current) {
+        window.clearTimeout(searchCloseTimerRef.current);
+        searchCloseTimerRef.current = null;
+      }
       if (jumpHighlightTimeoutRef.current) {
         window.clearTimeout(jumpHighlightTimeoutRef.current);
         jumpHighlightTimeoutRef.current = null;
@@ -1107,7 +1143,7 @@ export const ChatView = ({
   );
 
   useEffect(() => {
-    if (!searchOpen) {
+    if (!searchUiVisible) {
       setSearchQuery((current) => (current === '' ? current : ''));
       setActiveMatchIndex((current) => (current === -1 ? current : -1));
       setMatchedMessageIds((current) => (current.length === 0 ? current : []));
@@ -1128,7 +1164,7 @@ export const ChatView = ({
     setActiveMatchIndex((current) =>
       current >= 0 && current < matchedMessageIds.length ? current : fallbackIndex
     );
-  }, [searchOpen, normalizedQuery, matchedMessageIds, loadedMessageIdSet]);
+  }, [searchUiVisible, normalizedQuery, matchedMessageIds, loadedMessageIdSet]);
 
   useEffect(() => {
     if (activeMatchIndex < 0) return;
@@ -1196,9 +1232,9 @@ export const ChatView = ({
           </div>
         </div>
         <div className="pane-header-actions">
-          <div className={`chat-search-wrap ${searchOpen ? 'open' : ''}`}>
-            {searchOpen && (
-              <>
+          <div className={`chat-search-wrap ${searchOpen ? 'open' : ''} ${searchClosing ? 'closing' : ''}`}>
+            {searchUiVisible && (
+              <div className="chat-search-content">
                 <Input
                   className="chat-search-input"
                   placeholder="Buscar nesta conversa"
@@ -1239,13 +1275,13 @@ export const ChatView = ({
                     ? '0/0'
                     : `${activeMatchIndex + 1}/${matchedMessageIds.length}`}
                 </Text>
-              </>
+              </div>
             )}
             <Button
               appearance="subtle"
               icon={searchOpen ? <Dismiss20Regular /> : <Search20Regular />}
               disabled={favoritesOnly}
-              onClick={() => setSearchOpen((open) => !open)}
+              onClick={toggleSearchPanel}
             />
           </div>
           <Button
@@ -1264,19 +1300,6 @@ export const ChatView = ({
             />
             {headerMenuOpen && (
               <div className="header-menu">
-                <button
-                  type="button"
-                  className={`header-menu-item ${favoritesOnly ? 'active' : ''}`}
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setFavoritesOnly((current) => !current);
-                  }}
-                >
-                  <span className="menu-item-icon">
-                    {favoritesOnly ? <Star20Filled /> : <Star20Regular />}
-                  </span>
-                  <span>{favoritesOnly ? 'Mostrar todas as mensagens' : 'Mostrar favoritas'}</span>
-                </button>
                 <button
                   type="button"
                   className="header-menu-item"
