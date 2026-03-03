@@ -1596,6 +1596,10 @@ body {
 }
 
 .bubble-actions-row.in .reaction-trigger {
+  order: 3;
+}
+
+.bubble-actions-row.in .reaction-trigger:not(.reply-trigger):not(.favorite-trigger) {
   order: 1;
 }
 
@@ -1603,8 +1607,16 @@ body {
   order: 2;
 }
 
+.bubble-actions-row.in .reaction-trigger.reply-trigger {
+  order: 4;
+}
+
+.bubble-actions-row.in .reaction-trigger.favorite-trigger {
+  order: 5;
+}
+
 .bubble-actions-row.in .fui-Button {
-  order: 3;
+  order: 6;
 }
 
 .bubble-block:hover .bubble-actions-row,

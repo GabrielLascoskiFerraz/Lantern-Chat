@@ -451,6 +451,7 @@ export const ChatView = ({
   const hasMoreOlderRef = useRef(hasMoreOlder);
   const loadingOlderRef = useRef(loadingOlder);
   const searchJumpInFlightRef = useRef(false);
+  const previousFavoritesOnlyRef = useRef(false);
 
   const displayedMessages = useMemo(
     () =>
@@ -649,6 +650,40 @@ export const ChatView = ({
       });
     });
   }, [favoritesOnly, favoriteByMessageId, messages]);
+
+  useEffect(() => {
+    const wasFavoritesOnly = previousFavoritesOnlyRef.current;
+    previousFavoritesOnlyRef.current = favoritesOnly;
+    if (!(wasFavoritesOnly && !favoritesOnly)) {
+      return;
+    }
+
+    stickToBottomRef.current = true;
+    forceScrollOnOpenRef.current = true;
+    if (forceScrollTimeoutRef.current) {
+      window.clearTimeout(forceScrollTimeoutRef.current);
+      forceScrollTimeoutRef.current = null;
+    }
+
+    const forceBottom = () => {
+      const node = messagesScrollRef.current;
+      if (!node) return;
+      node.scrollTo({ top: node.scrollHeight, behavior: 'auto' });
+      stickToBottomRef.current = true;
+    };
+
+    window.requestAnimationFrame(() => {
+      forceBottom();
+      window.requestAnimationFrame(() => {
+        forceBottom();
+      });
+    });
+
+    forceScrollTimeoutRef.current = window.setTimeout(() => {
+      forceScrollOnOpenRef.current = false;
+      forceScrollTimeoutRef.current = null;
+    }, 1200);
+  }, [favoritesOnly]);
 
   useEffect(() => {
     if (unreadSeparatorHideTimeoutRef.current) {

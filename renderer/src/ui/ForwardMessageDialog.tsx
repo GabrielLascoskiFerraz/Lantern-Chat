@@ -48,9 +48,18 @@ export const ForwardMessageDialog = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const normalizedSearch = search.trim().toLowerCase();
+  const onlinePeerIdSet = useMemo(() => new Set(onlinePeerIds), [onlinePeerIds]);
   const sortedContacts = useMemo(
-    () => [...contacts].sort((a, b) => a.displayName.localeCompare(b.displayName, 'pt-BR')),
-    [contacts]
+    () =>
+      [...contacts].sort((a, b) => {
+        const aOnline = onlinePeerIdSet.has(a.deviceId);
+        const bOnline = onlinePeerIdSet.has(b.deviceId);
+        if (aOnline !== bOnline) {
+          return aOnline ? -1 : 1;
+        }
+        return a.displayName.localeCompare(b.displayName, 'pt-BR');
+      }),
+    [contacts, onlinePeerIdSet]
   );
   const filteredContacts = useMemo(
     () =>
@@ -61,7 +70,6 @@ export const ForwardMessageDialog = ({
       }),
     [sortedContacts, normalizedSearch]
   );
-  const onlinePeerIdSet = useMemo(() => new Set(onlinePeerIds), [onlinePeerIds]);
   const visibleIds = useMemo(() => new Set(filteredContacts.map((peer) => peer.deviceId)), [filteredContacts]);
   const selectedVisibleCount = selectedPeerIds.filter((id) => visibleIds.has(id)).length;
   const canSubmit = Boolean(sourceMessage && selectedPeerIds.length > 0 && !submitting);
