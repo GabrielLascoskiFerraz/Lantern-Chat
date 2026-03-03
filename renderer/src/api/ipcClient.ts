@@ -81,6 +81,7 @@ export type AppEvent =
   | { type: 'message:received'; message: MessageRow }
   | { type: 'message:updated'; message: MessageRow }
   | { type: 'message:removed'; conversationId: string; messageId: string }
+  | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
   | {
       type: 'message:status';
@@ -147,6 +148,13 @@ interface LanternApi {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<MessageRow | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
+  toggleMessageFavorite: (
+    conversationId: string,
+    messageId: string,
+    favorite: boolean
+  ) => Promise<boolean>;
+  getMessageFavorites: (messageIds: string[]) => Promise<Record<string, boolean>>;
+  getFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => Promise<MessageRow[]>;
   getMessagesByIds: (messageIds: string[]) => Promise<MessageRow[]>;
@@ -222,6 +230,11 @@ export const ipcClient = {
   ) => window.lantern.reactToMessage(conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     window.lantern.deleteMessageForEveryone(conversationId, messageId),
+  toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
+    window.lantern.toggleMessageFavorite(conversationId, messageId, favorite),
+  getMessageFavorites: (messageIds: string[]) => window.lantern.getMessageFavorites(messageIds),
+  getFavoriteMessages: (conversationId: string) =>
+    window.lantern.getFavoriteMessages(conversationId),
   resyncConversation: (conversationId: string) =>
     window.lantern.resyncConversation(conversationId),
   getMessages: (conversationId: string, limit: number, before?: number) =>

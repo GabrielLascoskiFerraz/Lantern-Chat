@@ -33,6 +33,12 @@ const api = {
   ) => ipcRenderer.invoke('lantern:reactToMessage', conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     ipcRenderer.invoke('lantern:deleteMessageForEveryone', conversationId, messageId),
+  toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
+    ipcRenderer.invoke('lantern:toggleMessageFavorite', conversationId, messageId, favorite),
+  getMessageFavorites: (messageIds: string[]) =>
+    ipcRenderer.invoke('lantern:getMessageFavorites', messageIds),
+  getFavoriteMessages: (conversationId: string) =>
+    ipcRenderer.invoke('lantern:getFavoriteMessages', conversationId),
   resyncConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:resyncConversation', conversationId),
   getMessages: (conversationId: string, limit: number, before?: number) =>

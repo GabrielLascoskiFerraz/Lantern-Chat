@@ -76,6 +76,14 @@ export const runMigrations = (db: Database.Database): void => {
     CREATE INDEX IF NOT EXISTS idx_message_reactions_message
       ON message_reactions(messageId);
 
+    CREATE TABLE IF NOT EXISTS message_favorites (
+      messageId TEXT PRIMARY KEY,
+      createdAt INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_message_favorites_created_at
+      ON message_favorites(createdAt DESC);
+
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -117,4 +125,13 @@ export const runMigrations = (db: Database.Database): void => {
   if (!messageColumns.some((column) => column.name === 'forwardedFromMessageId')) {
     db.exec('ALTER TABLE messages ADD COLUMN forwardedFromMessageId TEXT;');
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS message_favorites (
+      messageId TEXT PRIMARY KEY,
+      createdAt INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_favorites_created_at
+      ON message_favorites(createdAt DESC);
+  `);
 };

@@ -25,6 +25,7 @@ export const Shell = () => {
     hasMoreHistoryByConversation,
     loadingOlderByConversation,
     announcementReactionsByMessage,
+    favoriteByMessageId,
     conversationPreviewById,
     recentMessageIds,
     unreadByConversation,
@@ -37,6 +38,8 @@ export const Shell = () => {
     sendFile,
     forwardMessageToPeer,
     reactToMessage,
+    toggleMessageFavorite,
+    getFavoriteMessages,
     deleteMessageForEveryone,
     resyncConversation,
     markConversationUnread,
@@ -148,6 +151,7 @@ export const Shell = () => {
         localProfile={profile}
         messages={conversationMessages}
         reactionsByMessageId={announcementReactionsByMessage}
+        favoriteByMessageId={favoriteByMessageId}
         transferByFileId={transferMap}
         hasMoreOlder={hasMoreHistory}
         loadingOlder={loadingOlderHistory}
@@ -172,6 +176,10 @@ export const Shell = () => {
         onReactToMessage={(messageId, reaction) =>
           reactToMessage(conversationId, messageId, reaction)
         }
+        onToggleFavoriteMessage={(messageId, favorite) =>
+          toggleMessageFavorite(conversationId, messageId, favorite)
+        }
+        onGetFavoriteMessages={getFavoriteMessages}
         onDeleteMessage={(messageId) =>
           deleteMessageForEveryone(conversationId, messageId)
         }

@@ -36,6 +36,7 @@ interface LanternState {
   hasMoreHistoryByConversation: Record<string, boolean>;
   loadingOlderByConversation: Record<string, boolean>;
   announcementReactionsByMessage: Record<string, AnnouncementReactionSummary>;
+  favoriteByMessageId: Record<string, boolean>;
   conversationPreviewById: Record<string, string>;
   unreadByConversation: Record<string, number>;
   openedUnreadCountByConversation: Record<string, number>;
@@ -80,6 +81,12 @@ interface LanternState {
     messageId: string,
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<void>;
+  toggleMessageFavorite: (
+    conversationId: string,
+    messageId: string,
+    favorite: boolean
+  ) => Promise<void>;
+  getFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<void>;
   resyncConversation: (conversationId: string) => Promise<void>;
   markConversationUnread: (conversationId: string) => Promise<void>;
@@ -174,6 +181,21 @@ const mergePreviewMapIfChanged = (
   return changed ? next : null;
 };
 
+const mergeFavoriteMap = (
+  current: Record<string, boolean>,
+  incoming: Record<string, boolean>
+): Record<string, boolean> => {
+  const next = { ...current };
+  for (const [messageId, favorite] of Object.entries(incoming)) {
+    if (favorite) {
+      next[messageId] = true;
+    } else {
+      delete next[messageId];
+    }
+  }
+  return next;
+};
+
 const appendUniqueMessage = (rows: MessageRow[], incoming: MessageRow): MessageRow[] => {
   if (rows.some((row) => row.messageId === incoming.messageId)) {
     return rows;
@@ -255,6 +277,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   hasMoreHistoryByConversation: {},
   loadingOlderByConversation: {},
   announcementReactionsByMessage: {},
+  favoriteByMessageId: {},
   conversationPreviewById: {},
   unreadByConversation: {},
   openedUnreadCountByConversation: {},
@@ -338,13 +361,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       await ipcClient.getMessages(current, MESSAGES_PAGE_SIZE)
     );
     const hasMoreHistory = initialMessages.length === MESSAGES_PAGE_SIZE;
-    const initialReactionMessageIds = initialMessages.map((row) => row.messageId);
-    const initialMessageReactions =
-      initialReactionMessageIds.length > 0
-        ? current === ANNOUNCEMENTS_ID
-          ? await ipcClient.getAnnouncementReactions(initialReactionMessageIds)
-          : await ipcClient.getMessageReactions(initialReactionMessageIds)
-        : {};
+    const initialMessageIds = initialMessages.map((row) => row.messageId);
+    const [initialMessageReactions, initialFavorites] =
+      initialMessageIds.length > 0
+        ? await Promise.all([
+            current === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReactions(initialMessageIds)
+              : ipcClient.getMessageReactions(initialMessageIds),
+            ipcClient.getMessageFavorites(initialMessageIds)
+          ])
+        : [{}, {}];
     const initialUnreadCount = selectedUnreadAtLoad;
     const initialUnreadAnchorMessageId =
       initialUnreadCount > 0 && initialMessages.length > 0
@@ -369,6 +395,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         ...state.announcementReactionsByMessage,
         ...initialMessageReactions
       },
+      favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, initialFavorites),
       unreadAnchorMessageIdByConversation: {
         ...state.unreadAnchorMessageIdByConversation,
         [current]: initialUnreadAnchorMessageId
@@ -610,11 +637,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           if (event.message.deletedAt) {
             const nextRows = rows.filter((row) => row.messageId !== event.message.messageId);
             const last = nextRows[nextRows.length - 1];
+            const nextFavorites = { ...state.favoriteByMessageId };
+            delete nextFavorites[event.message.messageId];
             return {
               messagesByConversation: {
                 ...state.messagesByConversation,
                 [conversationId]: nextRows
               },
+              favoriteByMessageId: nextFavorites,
               conversationPreviewById: {
                 ...state.conversationPreviewById,
                 [conversationId]: last ? previewFromMessage(last) : ''
@@ -653,6 +683,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               (row) => row.messageId !== event.messageId
             )
           },
+          favoriteByMessageId: (() => {
+            const next = { ...state.favoriteByMessageId };
+            delete next[event.messageId];
+            return next;
+          })(),
           announcementReactionsByMessage: (() => {
             const next = { ...state.announcementReactionsByMessage };
             delete next[event.messageId];
@@ -669,33 +704,52 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return;
       }
 
-      if (event.type === 'conversation:cleared') {
+      if (event.type === 'message:favorite') {
         set((state) => ({
-          messagesByConversation: {
-            ...state.messagesByConversation,
-            [event.conversationId]: []
-          },
-          hasMoreHistoryByConversation: {
-            ...state.hasMoreHistoryByConversation,
-            [event.conversationId]: false
-          },
-          loadingOlderByConversation: {
-            ...state.loadingOlderByConversation,
-            [event.conversationId]: false
-          },
-          conversationPreviewById: {
-            ...state.conversationPreviewById,
-            [event.conversationId]: ''
-          },
-          unreadByConversation: {
-            ...state.unreadByConversation,
-            [event.conversationId]: 0
-          },
-          unreadAnchorMessageIdByConversation: {
-            ...state.unreadAnchorMessageIdByConversation,
-            [event.conversationId]: null
-          }
+          favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, {
+            [event.messageId]: event.favorite
+          })
         }));
+        return;
+      }
+
+      if (event.type === 'conversation:cleared') {
+        set((state) => {
+          const conversationMessageIds = (
+            state.messagesByConversation[event.conversationId] || []
+          ).map((row) => row.messageId);
+          const nextFavorites = { ...state.favoriteByMessageId };
+          for (const messageId of conversationMessageIds) {
+            delete nextFavorites[messageId];
+          }
+          return {
+            messagesByConversation: {
+              ...state.messagesByConversation,
+              [event.conversationId]: []
+            },
+            hasMoreHistoryByConversation: {
+              ...state.hasMoreHistoryByConversation,
+              [event.conversationId]: false
+            },
+            loadingOlderByConversation: {
+              ...state.loadingOlderByConversation,
+              [event.conversationId]: false
+            },
+            conversationPreviewById: {
+              ...state.conversationPreviewById,
+              [event.conversationId]: ''
+            },
+            favoriteByMessageId: nextFavorites,
+            unreadByConversation: {
+              ...state.unreadByConversation,
+              [event.conversationId]: 0
+            },
+            unreadAnchorMessageIdByConversation: {
+              ...state.unreadAnchorMessageIdByConversation,
+              [event.conversationId]: null
+            }
+          };
+        });
         return;
       }
 
@@ -840,13 +894,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         await ipcClient.getMessages(conversationId, MESSAGES_PAGE_SIZE)
       );
       const hasMoreHistory = rows.length === MESSAGES_PAGE_SIZE;
-      const reactionMessageIds = rows.map((row) => row.messageId);
-      const messageReactions =
-        reactionMessageIds.length > 0
-          ? conversationId === ANNOUNCEMENTS_ID
-            ? await ipcClient.getAnnouncementReactions(reactionMessageIds)
-            : await ipcClient.getMessageReactions(reactionMessageIds)
-          : {};
+      const messageIds = rows.map((row) => row.messageId);
+      const [messageReactions, favoritesMap] =
+        messageIds.length > 0
+          ? await Promise.all([
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReactions(messageIds)
+                : ipcClient.getMessageReactions(messageIds),
+              ipcClient.getMessageFavorites(messageIds)
+            ])
+          : [{}, {}];
       await ipcClient.markConversationRead(conversationId);
       await ipcClient.setActiveConversation(conversationId);
 
@@ -882,6 +939,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             ...state.announcementReactionsByMessage,
             ...messageReactions
           },
+        favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap),
         unreadAnchorMessageIdByConversation: {
           ...state.unreadAnchorMessageIdByConversation,
           [conversationId]: fetchedAnchorMessageId
@@ -954,13 +1012,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
       const knownIds = new Set(currentRows.map((row) => row.messageId));
       const newlyAddedRows = olderRows.filter((row) => !knownIds.has(row.messageId));
-      const reactionTargetIds = olderRows.map((row) => row.messageId);
-      const reactionMap =
-        reactionTargetIds.length > 0
-          ? conversationId === ANNOUNCEMENTS_ID
-            ? await ipcClient.getAnnouncementReactions(reactionTargetIds)
-            : await ipcClient.getMessageReactions(reactionTargetIds)
-          : {};
+      const messageIds = olderRows.map((row) => row.messageId);
+      const [reactionMap, favoritesMap] =
+        messageIds.length > 0
+          ? await Promise.all([
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReactions(messageIds)
+                : ipcClient.getMessageReactions(messageIds),
+              ipcClient.getMessageFavorites(messageIds)
+            ])
+          : [{}, {}];
 
       set((state) => ({
         messagesByConversation: {
@@ -981,7 +1042,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         announcementReactionsByMessage: {
           ...state.announcementReactionsByMessage,
           ...reactionMap
-        }
+        },
+        favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap)
       }));
       return newlyAddedRows.length;
     } catch {
@@ -1019,13 +1081,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     if (incomingRows.length === 0) {
       return;
     }
-    const reactionIds = incomingRows.map((row) => row.messageId);
-    const reactionMap =
-      reactionIds.length > 0
-        ? conversationId === ANNOUNCEMENTS_ID
-          ? await ipcClient.getAnnouncementReactions(reactionIds)
-          : await ipcClient.getMessageReactions(reactionIds)
-        : {};
+    const incomingMessageIds = incomingRows.map((row) => row.messageId);
+    const [reactionMap, favoritesMap] =
+      incomingMessageIds.length > 0
+        ? await Promise.all([
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReactions(incomingMessageIds)
+              : ipcClient.getMessageReactions(incomingMessageIds),
+            ipcClient.getMessageFavorites(incomingMessageIds)
+          ])
+        : [{}, {}];
 
     set((current) => {
       const rows = current.messagesByConversation[conversationId] || [];
@@ -1042,7 +1107,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         announcementReactionsByMessage: {
           ...current.announcementReactionsByMessage,
           ...reactionMap
-        }
+        },
+        favoriteByMessageId: mergeFavoriteMap(current.favoriteByMessageId, favoritesMap)
       };
     });
   },
@@ -1213,6 +1279,47 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       // O main já envia toast amigável; aqui evitamos rejeição não tratada no renderer.
     }
   },
+  toggleMessageFavorite: async (conversationId, messageId, favorite) => {
+    const nextFavorite = await ipcClient.toggleMessageFavorite(
+      conversationId,
+      messageId,
+      favorite
+    );
+    set((state) => ({
+      favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, {
+        [messageId]: nextFavorite
+      })
+    }));
+  },
+  getFavoriteMessages: async (conversationId) => {
+    const rows = normalizeMessageOrder(await ipcClient.getFavoriteMessages(conversationId));
+    const messageIds = rows.map((row) => row.messageId);
+    const [reactionMap, favoritesMap] =
+      messageIds.length > 0
+        ? await Promise.all([
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReactions(messageIds)
+              : ipcClient.getMessageReactions(messageIds),
+            ipcClient.getMessageFavorites(messageIds)
+          ])
+        : [{}, {}];
+
+    set((state) => ({
+      messagesByConversation: {
+        ...state.messagesByConversation,
+        [conversationId]: mergeOrderedMessages(
+          state.messagesByConversation[conversationId] || [],
+          rows
+        )
+      },
+      announcementReactionsByMessage: {
+        ...state.announcementReactionsByMessage,
+        ...reactionMap
+      },
+      favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap)
+    }));
+    return rows;
+  },
   deleteMessageForEveryone: async (conversationId, messageId) => {
     const updated = await ipcClient.deleteMessageForEveryone(conversationId, messageId);
     if (!updated) return;
@@ -1223,6 +1330,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           (row) => row.messageId !== messageId
         )
       },
+      favoriteByMessageId: (() => {
+        const next = { ...state.favoriteByMessageId };
+        delete next[messageId];
+        return next;
+      })(),
       announcementReactionsByMessage: (() => {
         if (conversationId !== ANNOUNCEMENTS_ID) {
           return state.announcementReactionsByMessage;
@@ -1255,34 +1367,44 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   },
   clearConversation: async (conversationId) => {
     await ipcClient.clearConversation(conversationId);
-    set((state) => ({
-      messagesByConversation: {
-        ...state.messagesByConversation,
-        [conversationId]: []
-      },
-      hasMoreHistoryByConversation: {
-        ...state.hasMoreHistoryByConversation,
-        [conversationId]: false
-      },
-      loadingOlderByConversation: {
-        ...state.loadingOlderByConversation,
-        [conversationId]: false
-      },
-      announcementReactionsByMessage:
-        conversationId === ANNOUNCEMENTS_ID ? {} : state.announcementReactionsByMessage,
-      conversationPreviewById: {
-        ...state.conversationPreviewById,
-        [conversationId]: ''
-      },
-      unreadByConversation: {
-        ...state.unreadByConversation,
-        [conversationId]: 0
-      },
-      unreadAnchorMessageIdByConversation: {
-        ...state.unreadAnchorMessageIdByConversation,
-        [conversationId]: null
+    set((state) => {
+      const conversationMessageIds = (state.messagesByConversation[conversationId] || []).map(
+        (row) => row.messageId
+      );
+      const nextFavorites = { ...state.favoriteByMessageId };
+      for (const messageId of conversationMessageIds) {
+        delete nextFavorites[messageId];
       }
-    }));
+      return {
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [conversationId]: []
+        },
+        hasMoreHistoryByConversation: {
+          ...state.hasMoreHistoryByConversation,
+          [conversationId]: false
+        },
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [conversationId]: false
+        },
+        announcementReactionsByMessage:
+          conversationId === ANNOUNCEMENTS_ID ? {} : state.announcementReactionsByMessage,
+        favoriteByMessageId: nextFavorites,
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [conversationId]: ''
+        },
+        unreadByConversation: {
+          ...state.unreadByConversation,
+          [conversationId]: 0
+        },
+        unreadAnchorMessageIdByConversation: {
+          ...state.unreadAnchorMessageIdByConversation,
+          [conversationId]: null
+        }
+      };
+    });
   },
   forgetContactConversation: async (conversationId) => {
     const wasSelected = get().selectedConversationId === conversationId;
@@ -1291,6 +1413,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     await ipcClient.forgetContactConversation(conversationId);
 
     set((state) => {
+      const messageIdsToDrop = (state.messagesByConversation[conversationId] || []).map(
+        (row) => row.messageId
+      );
       const nextMessages = { ...state.messagesByConversation };
       delete nextMessages[conversationId];
 
@@ -1310,6 +1435,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
       const nextTyping = { ...state.typingByConversation };
       delete nextTyping[conversationId];
+      const nextFavorites = { ...state.favoriteByMessageId };
+      for (const messageId of messageIdsToDrop) {
+        delete nextFavorites[messageId];
+      }
 
       return {
         peers: peerId ? state.peers.filter((peer) => peer.deviceId !== peerId) : state.peers,
@@ -1323,7 +1452,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         conversationPreviewById: nextPreview,
         unreadByConversation: nextUnread,
         unreadAnchorMessageIdByConversation: nextUnreadAnchor,
-        typingByConversation: nextTyping
+        typingByConversation: nextTyping,
+        favoriteByMessageId: nextFavorites
       };
     });
 

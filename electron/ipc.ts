@@ -64,6 +64,13 @@ export interface IpcBindings {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<DbMessage | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
+  toggleMessageFavorite: (
+    conversationId: string,
+    messageId: string,
+    favorite: boolean
+  ) => Promise<boolean> | boolean;
+  getMessageFavorites: (messageIds: string[]) => Record<string, boolean>;
+  getFavoriteMessages: (conversationId: string) => DbMessage[];
   resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => DbMessage[];
   getMessagesByIds: (messageIds: string[]) => DbMessage[];
@@ -389,6 +396,17 @@ export const registerIpc = (
     'lantern:deleteMessageForEveryone',
     (_event, conversationId: string, messageId: string) =>
       bindings.deleteMessageForEveryone(conversationId, messageId)
+  );
+  ipcMain.handle(
+    'lantern:toggleMessageFavorite',
+    (_event, conversationId: string, messageId: string, favorite: boolean) =>
+      bindings.toggleMessageFavorite(conversationId, messageId, favorite)
+  );
+  ipcMain.handle('lantern:getMessageFavorites', (_event, messageIds: string[]) =>
+    bindings.getMessageFavorites(messageIds)
+  );
+  ipcMain.handle('lantern:getFavoriteMessages', (_event, conversationId: string) =>
+    bindings.getFavoriteMessages(conversationId)
   );
   ipcMain.handle('lantern:resyncConversation', (_event, conversationId: string) =>
     bindings.resyncConversation(conversationId)

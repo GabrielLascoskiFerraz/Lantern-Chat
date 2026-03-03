@@ -21,7 +21,9 @@ import {
   Delete20Regular,
   Dismiss20Regular,
   MoreHorizontal20Regular,
-  Search20Regular
+  Search20Regular,
+  Star20Filled,
+  Star20Regular
 } from '@fluentui/react-icons';
 import {
   AnnouncementReactionSummary,
@@ -47,6 +49,7 @@ interface ChatViewProps {
   localProfile: Profile;
   messages: MessageRow[];
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
+  favoriteByMessageId: Record<string, boolean>;
   transferByFileId: Record<string, { transferred: number; total: number }>;
   hasMoreOlder: boolean;
   loadingOlder: boolean;
@@ -58,6 +61,8 @@ interface ChatViewProps {
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
+  onToggleFavoriteMessage: (messageId: string, favorite: boolean) => Promise<void>;
+  onGetFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onResyncConversation: () => Promise<void>;
   onClearConversation: () => Promise<void>;
@@ -260,6 +265,7 @@ export const ChatView = ({
   localProfile,
   messages,
   reactionsByMessageId,
+  favoriteByMessageId,
   transferByFileId,
   hasMoreOlder,
   loadingOlder,
@@ -271,6 +277,8 @@ export const ChatView = ({
   onSendFile,
   onForwardMessage,
   onReactToMessage,
+  onToggleFavoriteMessage,
+  onGetFavoriteMessages,
   onDeleteMessage,
   onResyncConversation,
   onClearConversation,
@@ -304,6 +312,9 @@ export const ChatView = ({
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [favoriteMessages, setFavoriteMessages] = useState<MessageRow[]>([]);
+  const [favoriteMessagesLoading, setFavoriteMessagesLoading] = useState(false);
   const [activeMatchIndex, setActiveMatchIndex] = useState(-1);
   const [matchedMessageIds, setMatchedMessageIds] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -318,6 +329,8 @@ export const ChatView = ({
     messageId: string;
     canDelete: boolean;
     canForward: boolean;
+    canFavorite: boolean;
+    isFavorite: boolean;
     selectedText: string;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
@@ -386,6 +399,8 @@ export const ChatView = ({
         !isLocalOnly &&
         (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
         forwardTargets.length > 0;
+      const canFavorite = !isDeleted && !isLocalOnly;
+      const isFavorite = canFavorite ? Boolean(favoriteByMessageId[message.messageId]) : false;
       const canDelete =
         !isDeleted &&
         !isLocalOnly &&
@@ -394,6 +409,7 @@ export const ChatView = ({
       const itemCount =
         (canReply ? 1 : 0) +
         (canForward ? 1 : 0) +
+        (canFavorite ? 1 : 0) +
         (selectedText ? 1 : 0) +
         (canDelete ? 1 : 0);
       if (itemCount <= 0) {
@@ -417,10 +433,12 @@ export const ChatView = ({
         messageId: message.messageId,
         canDelete,
         canForward,
+        canFavorite,
+        isFavorite,
         selectedText
       });
     },
-    [forwardTargets.length, localProfile.deviceId]
+    [forwardTargets.length, localProfile.deviceId, favoriteByMessageId]
   );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
@@ -432,11 +450,23 @@ export const ChatView = ({
   const loadingOlderRef = useRef(loadingOlder);
   const searchJumpInFlightRef = useRef(false);
 
+  const displayedMessages = useMemo(
+    () =>
+      favoritesOnly
+        ? [...favoriteMessages].sort((a, b) => {
+            const at = Number(a.createdAt) || 0;
+            const bt = Number(b.createdAt) || 0;
+            if (at !== bt) return at - bt;
+            return a.messageId.localeCompare(b.messageId);
+          })
+        : messages,
+    [favoriteMessages, favoritesOnly, messages]
+  );
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const matchedMessageIdSet = useMemo(() => new Set(matchedMessageIds), [matchedMessageIds]);
   const loadedMessageIdSet = useMemo(
-    () => new Set(messages.map((row) => row.messageId)),
-    [messages]
+    () => new Set(displayedMessages.map((row) => row.messageId)),
+    [displayedMessages]
   );
   const messageById = useMemo(
     () => new Map(messages.map((row) => [row.messageId, row])),
@@ -529,7 +559,64 @@ export const ChatView = ({
 
   useEffect(() => {
     setReplyDraft(null);
+    setFavoritesOnly(false);
+    setFavoriteMessages([]);
+    setFavoriteMessagesLoading(false);
   }, [conversationId]);
+
+  useEffect(() => {
+    if (!favoritesOnly) {
+      return;
+    }
+    if (searchOpen) {
+      setSearchOpen(false);
+    }
+    let cancelled = false;
+    setFavoriteMessagesLoading(true);
+    void onGetFavoriteMessages(conversationId)
+      .then((rows) => {
+        if (cancelled) return;
+        setFavoriteMessages(rows);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFavoriteMessages([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFavoriteMessagesLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [favoritesOnly, conversationId, onGetFavoriteMessages, searchOpen]);
+
+  useEffect(() => {
+    if (!favoritesOnly) {
+      return;
+    }
+    setFavoriteMessages((current) => {
+      const map = new Map<string, MessageRow>();
+      for (const row of current) {
+        if (favoriteByMessageId[row.messageId]) {
+          map.set(row.messageId, row);
+        }
+      }
+      for (const row of messages) {
+        if (favoriteByMessageId[row.messageId]) {
+          map.set(row.messageId, row);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => {
+        const at = Number(a.createdAt) || 0;
+        const bt = Number(b.createdAt) || 0;
+        if (at !== bt) return at - bt;
+        return a.messageId.localeCompare(b.messageId);
+      });
+    });
+  }, [favoritesOnly, favoriteByMessageId, messages]);
 
   useEffect(() => {
     if (unreadSeparatorHideTimeoutRef.current) {
@@ -669,6 +756,7 @@ export const ChatView = ({
   }, []);
 
   const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
+    if (favoritesOnly) return 0;
     const node = messagesScrollRef.current;
     if (!node) return 0;
     if (loadingOlderRef.current) return 0;
@@ -688,7 +776,7 @@ export const ChatView = ({
       nextNode.scrollTop = previousTop + delta;
     }
     return loadedCount;
-  }, [onLoadOlderMessages]);
+  }, [favoritesOnly, onLoadOlderMessages]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -775,7 +863,7 @@ export const ChatView = ({
 
   useEffect(() => {
     if (normalizedQuery) return;
-    const lastMessage = messages[messages.length - 1];
+    const lastMessage = displayedMessages[displayedMessages.length - 1];
     const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
     const isOutgoingFileTransfer =
       Boolean(lastMessage) &&
@@ -787,7 +875,7 @@ export const ChatView = ({
       maybeFollowBottom(isOutgoingFileTransfer || forceForComposer, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [transferByFileId, normalizedQuery, messages, localProfile.deviceId]);
+  }, [transferByFileId, normalizedQuery, displayedMessages, localProfile.deviceId]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -890,7 +978,7 @@ export const ChatView = ({
     const node = messagesScrollRef.current;
     if (!node) return;
 
-    const lastMessage = messages[messages.length - 1];
+    const lastMessage = displayedMessages[displayedMessages.length - 1];
     if (!lastMessage || lastMessage.type !== 'file' || !isImageName(lastMessage.fileName)) {
       return;
     }
@@ -912,7 +1000,7 @@ export const ChatView = ({
       maybeFollowBottom(shouldForce, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [previewStateByMessageId, messages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
+  }, [previewStateByMessageId, displayedMessages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -929,8 +1017,12 @@ export const ChatView = ({
 
   useEffect(() => {
     if (normalizedQuery) return;
-    const currentLastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-    const currentLastId = messages.length > 0 ? messages[messages.length - 1].messageId : null;
+    const currentLastMessage =
+      displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1] : null;
+    const currentLastId =
+      displayedMessages.length > 0
+        ? displayedMessages[displayedMessages.length - 1].messageId
+        : null;
     const previousLastId = lastMessageIdRef.current;
     const hasNewTailMessage = currentLastId !== null && currentLastId !== previousLastId;
     const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
@@ -954,7 +1046,7 @@ export const ChatView = ({
 
     lastMessageIdRef.current = currentLastId;
     return undefined;
-  }, [messages, normalizedQuery, localProfile.deviceId]);
+  }, [displayedMessages, normalizedQuery, localProfile.deviceId]);
 
   useEffect(
     () => () => {
@@ -1152,9 +1244,18 @@ export const ChatView = ({
             <Button
               appearance="subtle"
               icon={searchOpen ? <Dismiss20Regular /> : <Search20Regular />}
+              disabled={favoritesOnly}
               onClick={() => setSearchOpen((open) => !open)}
             />
           </div>
+          <Button
+            appearance="subtle"
+            className={`chat-favorites-toggle ${favoritesOnly ? 'active' : ''}`}
+            icon={favoritesOnly ? <Star20Filled /> : <Star20Regular />}
+            title={favoritesOnly ? 'Mostrar todas as mensagens' : 'Mostrar favoritas'}
+            aria-label={favoritesOnly ? 'Mostrar todas as mensagens' : 'Mostrar favoritas'}
+            onClick={() => setFavoritesOnly((current) => !current)}
+          />
           <div className="header-menu-wrap" ref={headerMenuRef}>
             <Button
               appearance="subtle"
@@ -1163,6 +1264,19 @@ export const ChatView = ({
             />
             {headerMenuOpen && (
               <div className="header-menu">
+                <button
+                  type="button"
+                  className={`header-menu-item ${favoritesOnly ? 'active' : ''}`}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    setFavoritesOnly((current) => !current);
+                  }}
+                >
+                  <span className="menu-item-icon">
+                    {favoritesOnly ? <Star20Filled /> : <Star20Regular />}
+                  </span>
+                  <span>{favoritesOnly ? 'Mostrar todas as mensagens' : 'Mostrar favoritas'}</span>
+                </button>
                 <button
                   type="button"
                   className="header-menu-item"
@@ -1209,7 +1323,7 @@ export const ChatView = ({
       </header>
 
       <div className="messages-scroll" ref={messagesScrollRef}>
-        {loading && messages.length === 0 && (
+        {loading && displayedMessages.length === 0 && !favoritesOnly && (
           <div className="messages-skeleton-list" aria-hidden>
             <div className="message-skeleton-row in" />
             <div className="message-skeleton-row in" />
@@ -1217,8 +1331,17 @@ export const ChatView = ({
             <div className="message-skeleton-row out" />
           </div>
         )}
-        {messages.map((message, index) => {
-          const previousMessage = index > 0 ? messages[index - 1] : null;
+        {favoriteMessagesLoading && (
+          <div className="messages-skeleton-list" aria-hidden>
+            <div className="message-skeleton-row in" />
+            <div className="message-skeleton-row out" />
+          </div>
+        )}
+        {!favoriteMessagesLoading && favoritesOnly && displayedMessages.length === 0 && (
+          <div className="chat-favorites-empty">Nenhuma mensagem favorita nesta conversa.</div>
+        )}
+        {displayedMessages.map((message, index) => {
+          const previousMessage = index > 0 ? displayedMessages[index - 1] : null;
           const startsNewDay =
             !previousMessage || !isSameDay(previousMessage.createdAt, message.createdAt);
           const groupedWithPrevious =
@@ -1232,6 +1355,7 @@ export const ChatView = ({
           const isDeleted = Boolean(message.deletedAt);
           const isLocalOnly = Boolean(message.localOnly);
           const canShowActions = !isDeleted && !isLocalOnly;
+          const isFavorite = Boolean(favoriteByMessageId[message.messageId]);
           const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
           const reactionPickerOpen = reactionPickerMessageId === message.messageId;
@@ -1263,6 +1387,7 @@ export const ChatView = ({
               )}
               {unreadSeparatorState !== 'hidden' &&
                 !normalizedQuery &&
+                !favoritesOnly &&
                 unreadAnchorMessageId === message.messageId && (
                   <div
                     className={`messages-new-separator ${
@@ -1273,7 +1398,7 @@ export const ChatView = ({
                   </div>
                 )}
               <div
-                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''}`}
+                className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''} ${isFavorite ? 'is-favorite' : ''}`}
                 ref={(node) => {
                   messageRowRefs.current[message.messageId] = node;
                   if (matchedMessageIdSet.has(message.messageId)) {
@@ -1400,6 +1525,11 @@ export const ChatView = ({
                   )}
 
                   <div className="bubble-meta">
+                    {isFavorite && (
+                      <span className="bubble-favorite-indicator" title="Mensagem favoritada">
+                        <Star20Filled />
+                      </span>
+                    )}
                     <span className="bubble-time">
                       {outgoing ? renderOutgoingStatusIcon(message.status) : null}
                       <span>{formatTime(message.createdAt)}</span>
@@ -1439,6 +1569,19 @@ export const ChatView = ({
                       aria-label="Responder"
                     >
                       <ArrowReply20Regular />
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`reaction-trigger favorite-trigger ${isFavorite ? 'active' : ''}`}
+                      onClick={() => {
+                        void onToggleFavoriteMessage(message.messageId, !isFavorite);
+                        closeMessageContextMenu();
+                      }}
+                      title={isFavorite ? 'Remover dos favoritos' : 'Favoritar mensagem'}
+                      aria-label={isFavorite ? 'Remover dos favoritos' : 'Favoritar mensagem'}
+                    >
+                      {isFavorite ? <Star20Filled /> : <Star20Regular />}
                     </button>
 
                       <div
@@ -1624,6 +1767,24 @@ export const ChatView = ({
                 <ArrowForward20Regular />
               </span>
               <span>Encaminhar</span>
+            </button>
+          )}
+          {messageContextMenu.canFavorite && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                void onToggleFavoriteMessage(
+                  messageContextMenu.messageId,
+                  !messageContextMenu.isFavorite
+                );
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                {messageContextMenu.isFavorite ? <Star20Filled /> : <Star20Regular />}
+              </span>
+              <span>{messageContextMenu.isFavorite ? 'Desfavoritar' : 'Favoritar'}</span>
             </button>
           )}
           {Boolean(messageContextMenu.selectedText.trim()) && (

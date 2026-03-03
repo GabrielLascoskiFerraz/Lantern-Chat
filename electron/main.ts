@@ -287,6 +287,10 @@ class LanternApp {
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
         this.deleteMessageForEveryone(conversationId, messageId),
+      toggleMessageFavorite: (conversationId, messageId, favorite) =>
+        this.toggleMessageFavorite(conversationId, messageId, favorite),
+      getMessageFavorites: (messageIds) => this.db.getMessageFavoritesMap(messageIds),
+      getFavoriteMessages: (conversationId) => this.db.getFavoriteMessages(conversationId),
       resyncConversation: (conversationId) => this.resyncConversation(conversationId),
       getMessages: (conversationId, limit, before) => this.db.getMessages(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
@@ -1131,6 +1135,29 @@ class LanternApp {
       summary
     });
     return targetMessage;
+  }
+
+  private toggleMessageFavorite(
+    conversationId: string,
+    messageId: string,
+    favorite: boolean
+  ): boolean {
+    const existing = this.db.getMessageById(messageId);
+    if (!existing || existing.deletedAt) {
+      throw new Error('Mensagem não encontrada para favoritar.');
+    }
+    if (existing.conversationId !== conversationId) {
+      throw new Error('Mensagem não pertence a esta conversa.');
+    }
+
+    const nextFavorite = this.db.setMessageFavorite(messageId, Boolean(favorite));
+    this.emitEvent({
+      type: 'message:favorite',
+      conversationId: existing.conversationId,
+      messageId: existing.messageId,
+      favorite: nextFavorite
+    });
+    return nextFavorite;
   }
 
   private async deleteMessageForEveryone(

@@ -853,6 +853,15 @@ body {
   color: var(--teams-muted);
 }
 
+.chat-favorites-toggle {
+  color: var(--teams-muted);
+}
+
+.chat-favorites-toggle.active {
+  color: color-mix(in srgb, #f5c542 70%, var(--teams-accent) 30%);
+  background: color-mix(in srgb, #ffe082 30%, transparent);
+}
+
 .header-menu-wrap {
   position: relative;
 }
@@ -886,6 +895,11 @@ body {
 
 .header-menu-item:hover {
   background: var(--teams-row-hover);
+}
+
+.header-menu-item.active {
+  background: color-mix(in srgb, var(--teams-accent-soft) 60%, var(--teams-surface) 40%);
+  color: color-mix(in srgb, var(--teams-accent) 82%, var(--teams-text) 18%);
 }
 
 .header-menu-item.danger {
@@ -1001,6 +1015,16 @@ body {
   border: 1px solid color-mix(in srgb, var(--teams-accent) 30%, var(--teams-border) 70%);
   border-radius: 999px;
   padding: 4px 12px;
+}
+
+.chat-favorites-empty {
+  margin: 18px auto 6px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 82%, transparent);
+  background: color-mix(in srgb, var(--teams-surface) 84%, transparent);
+  color: var(--teams-muted);
+  font-size: 12px;
 }
 
 .bubble-row {
@@ -1225,10 +1249,23 @@ body {
 .bubble-meta {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
   color: var(--teams-muted);
   font-size: 11px;
   line-height: 1.2;
+}
+
+.bubble-favorite-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, #f5c542 68%, var(--teams-accent) 32%);
+}
+
+.bubble-favorite-indicator svg {
+  width: 12px;
+  height: 12px;
 }
 
 .bubble-time {
@@ -1652,6 +1689,12 @@ body {
   background: var(--teams-row-hover);
   transform: translateY(-0.5px);
   box-shadow: 0 1px 4px color-mix(in srgb, var(--teams-border) 30%, transparent);
+}
+
+.reaction-trigger.favorite-trigger.active {
+  border-color: color-mix(in srgb, #f5c542 42%, var(--teams-border));
+  background: color-mix(in srgb, #ffe082 36%, var(--teams-surface) 64%);
+  color: color-mix(in srgb, #ad6a00 72%, var(--teams-text) 28%);
 }
 
 .reaction-trigger:active {
@@ -3068,6 +3111,17 @@ body {
 :root[data-theme='dark'] .bubble.out.pending {
   --bubble-pending-border: color-mix(in srgb, #9aa2b3 48%, var(--teams-border) 52%);
   --bubble-pending-bg: color-mix(in srgb, #2a313f 70%, var(--teams-bubble-out) 30%);
+}
+
+:root[data-theme='dark'] .reaction-trigger.favorite-trigger.active {
+  border-color: color-mix(in srgb, #f5c542 45%, var(--teams-border));
+  background: color-mix(in srgb, #4b3d17 64%, var(--teams-surface) 36%);
+  color: #ffd26a;
+}
+
+:root[data-theme='dark'] .chat-favorites-toggle.active {
+  color: #ffd26a;
+  background: color-mix(in srgb, #5a4414 56%, transparent);
 }
 
 :root[data-theme='dark'] .bubble.out.failed .bubble-meta {

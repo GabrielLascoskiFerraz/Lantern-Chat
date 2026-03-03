@@ -191,6 +191,7 @@ export type AppEvent =
   | { type: 'message:received'; message: DbMessage }
   | { type: 'message:updated'; message: DbMessage }
   | { type: 'message:removed'; conversationId: string; messageId: string }
+  | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
   | {
       type: 'message:status';

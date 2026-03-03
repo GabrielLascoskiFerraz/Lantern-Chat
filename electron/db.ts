@@ -540,6 +540,68 @@ export class DbService {
       .all(conversationId, limit) as DbMessage[];
   }
 
+  setMessageFavorite(messageId: string, favorite: boolean): boolean {
+    const upsert = this.db.prepare(
+      `INSERT INTO message_favorites (messageId, createdAt)
+       VALUES (?, ?)
+       ON CONFLICT(messageId) DO UPDATE SET createdAt = excluded.createdAt`
+    );
+    const remove = this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?');
+    const tx = this.db.transaction((id: string, setFavorite: boolean) => {
+      if (setFavorite) {
+        upsert.run(id, Date.now());
+      } else {
+        remove.run(id);
+      }
+    });
+    tx(messageId, favorite);
+    return this.db
+      .prepare('SELECT 1 FROM message_favorites WHERE messageId = ? LIMIT 1')
+      .get(messageId)
+      ? true
+      : false;
+  }
+
+  getMessageFavoritesMap(messageIds: string[]): Record<string, boolean> {
+    if (messageIds.length === 0) {
+      return {};
+    }
+    const uniqueIds = Array.from(
+      new Set(messageIds.map((value) => value.trim()).filter((value) => value.length > 0))
+    );
+    if (uniqueIds.length === 0) {
+      return {};
+    }
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT messageId
+         FROM message_favorites
+         WHERE messageId IN (${placeholders})`
+      )
+      .all(...uniqueIds) as Array<{ messageId: string }>;
+    const result: Record<string, boolean> = {};
+    for (const row of rows) {
+      result[row.messageId] = true;
+    }
+    return result;
+  }
+
+  getFavoriteMessages(conversationId: string, limit = 5000): DbMessage[] {
+    const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.trunc(limit), 20_000)) : 5000;
+    return this.db
+      .prepare(
+        `SELECT m.*
+         FROM messages m
+         INNER JOIN message_favorites f ON f.messageId = m.messageId
+         WHERE m.conversationId = ?
+           AND m.deletedAt IS NULL
+         ORDER BY m.createdAt ASC, m.messageId ASC
+         LIMIT ?`
+      )
+      .all(conversationId, normalizedLimit) as DbMessage[];
+  }
+
   setMessageReaction(
     messageId: string,
     reactorDeviceId: string,
@@ -721,6 +783,7 @@ export class DbService {
       )
       .run(deletedAt, messageId);
     this.db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
     this.db
       .prepare(
         `UPDATE conversations
@@ -931,6 +994,14 @@ export class DbService {
          WHERE conversationId = ?
        )`
     );
+    const deleteFavorites = this.db.prepare(
+      `DELETE FROM message_favorites
+       WHERE messageId IN (
+         SELECT messageId
+         FROM messages
+         WHERE conversationId = ?
+       )`
+    );
     const deleteMessages = this.db.prepare('DELETE FROM messages WHERE conversationId = ?');
     const resetConversation = this.db.prepare(
       'UPDATE conversations SET unreadCount = 0, updatedAt = ? WHERE id = ?'
@@ -939,6 +1010,7 @@ export class DbService {
     const tx = this.db.transaction((id: string) => {
       const rows = listFiles.all(id) as Array<{ filePath: string | null }>;
       deleteReactions.run(id);
+      deleteFavorites.run(id);
       deleteMessages.run(id);
       resetConversation.run(Date.now(), id);
       return rows
@@ -950,6 +1022,7 @@ export class DbService {
   }
 
   removeMessageById(messageId: string): void {
+    this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM messages WHERE messageId = ?').run(messageId);
   }
 
