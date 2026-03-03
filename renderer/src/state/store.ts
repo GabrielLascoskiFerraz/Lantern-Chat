@@ -81,6 +81,7 @@ interface LanternState {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<void>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<void>;
+  resyncConversation: (conversationId: string) => Promise<void>;
   markConversationUnread: (conversationId: string) => Promise<void>;
   clearConversation: (conversationId: string) => Promise<void>;
   forgetContactConversation: (conversationId: string) => Promise<void>;
@@ -1238,6 +1239,19 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return { conversationPreviewById: merged };
       });
     });
+  },
+  resyncConversation: async (conversationId) => {
+    try {
+      await ipcClient.resyncConversation(conversationId);
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível ressincronizar a conversa.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
   },
   clearConversation: async (conversationId) => {
     await ipcClient.clearConversation(conversationId);

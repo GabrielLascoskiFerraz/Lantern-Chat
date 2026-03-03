@@ -38,6 +38,7 @@ export const Shell = () => {
     forwardMessageToPeer,
     reactToMessage,
     deleteMessageForEveryone,
+    resyncConversation,
     markConversationUnread,
     clearConversation,
     forgetContactConversation,
@@ -174,6 +175,7 @@ export const Shell = () => {
         onDeleteMessage={(messageId) =>
           deleteMessageForEveryone(conversationId, messageId)
         }
+        onResyncConversation={() => resyncConversation(conversationId)}
         onClearConversation={() => clearConversation(conversationId)}
         onForgetContactConversation={() => forgetContactConversation(conversationId)}
         onOpenFile={openFile}

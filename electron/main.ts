@@ -287,6 +287,7 @@ class LanternApp {
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
         this.deleteMessageForEveryone(conversationId, messageId),
+      resyncConversation: (conversationId) => this.resyncConversation(conversationId),
       getMessages: (conversationId, limit, before) => this.db.getMessages(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
       searchConversationMessageIds: (conversationId, query, limit, offset) =>
@@ -685,13 +686,34 @@ class LanternApp {
     return undefined;
   }
 
-  private async requestSync(peer: Peer): Promise<void> {
+  private async requestSync(
+    peer: Peer,
+    options?: {
+      force?: boolean;
+      throwOnFail?: boolean;
+      since?: number;
+      limit?: number;
+      fullResync?: boolean;
+    }
+  ): Promise<void> {
     const now = Date.now();
+    const force = Boolean(options?.force);
+    const throwOnFail = Boolean(options?.throwOnFail);
+    const fullResync = Boolean(options?.fullResync);
     const last = this.syncRequestAtByPeer.get(peer.deviceId) || 0;
-    if (now - last < this.syncRetryMinIntervalMs) {
+    if (!force && now - last < this.syncRetryMinIntervalMs) {
       return;
     }
     this.syncRequestAtByPeer.set(peer.deviceId, now);
+
+    const normalizedSince =
+      typeof options?.since === 'number' && Number.isFinite(options.since) && options.since >= 0
+        ? Math.trunc(options.since)
+        : this.db.getLatestRelevantMessageTimestamp(peer.deviceId);
+    const normalizedLimit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+        ? Math.trunc(options.limit)
+        : 1000;
 
     const frame: ProtocolFrame<SyncRequestPayload> = {
       type: 'chat:sync:request',
@@ -700,8 +722,9 @@ class LanternApp {
       to: peer.deviceId,
       createdAt: now,
       payload: {
-        since: this.db.getLatestRelevantMessageTimestamp(peer.deviceId),
-        limit: 1000
+        since: normalizedSince,
+        limit: normalizedLimit,
+        fullResync
       }
     };
 
@@ -709,11 +732,44 @@ class LanternApp {
     try {
       await this.sendToPeer(peer, frame);
       await this.messageService.replayPendingFilesForPeer(peer);
-    } catch {
+    } catch (error) {
+      if (throwOnFail) {
+        throw error;
+      }
       // peer offline ou inacessível; próxima presença online tentará novamente
     } finally {
       this.endSyncActivity();
     }
+  }
+
+  private async resyncConversation(conversationId: string): Promise<void> {
+    if (!conversationId.startsWith('dm:')) {
+      throw new Error('Ressincronização disponível apenas para conversas diretas.');
+    }
+
+    const peerId = conversationId.slice(3).trim();
+    if (!peerId) {
+      throw new Error('Contato inválido para ressincronizar.');
+    }
+
+    const peer = this.resolvePeerForTransport(peerId);
+    if (!peer) {
+      throw new Error('Contato offline no relay.');
+    }
+
+    await this.requestSync(peer, {
+      force: true,
+      throwOnFail: true,
+      since: 0,
+      limit: 100_000,
+      fullResync: true
+    });
+
+    this.emitEvent({
+      type: 'ui:toast',
+      level: 'success',
+      message: 'Ressincronização iniciada. A conversa será alinhada nos dois clientes.'
+    });
   }
 
   private async sendToPeer(peer: Peer, frame: ProtocolFrame): Promise<void> {
@@ -1434,6 +1490,11 @@ class LanternApp {
         this.beginSyncActivity();
         try {
           const payload = frame.payload as SyncRequestPayload;
+          const fullResyncRequested = Boolean(payload.fullResync);
+          const requestedLimit = fullResyncRequested
+            ? 100_000
+            : Math.max(100, Math.min(payload.limit || 1000, 5000));
+          const requestedSince = fullResyncRequested ? 0 : payload.since;
           const syncFrame: ProtocolFrame<SyncResponsePayload> = {
             type: 'chat:sync:response',
             messageId: randomUUID(),
@@ -1443,8 +1504,8 @@ class LanternApp {
             payload: {
               messages: this.syncService.buildSyncMessages(
                 frame.from,
-                Math.max(100, Math.min(payload.limit || 1000, 2000)),
-                payload.since
+                requestedLimit,
+                requestedSince
               )
             }
           };
@@ -1459,6 +1520,15 @@ class LanternApp {
           if (activePeer) {
             await this.messageService.retryFailedMessagesForPeer(activePeer);
             await this.messageService.replayPendingFilesForPeer(activePeer);
+            if (fullResyncRequested) {
+              // Garante alinhamento bidirecional completo sem loop infinito.
+              await this.requestSync(activePeer, {
+                force: true,
+                since: 0,
+                limit: 100_000,
+                fullResync: false
+              });
+            }
           }
         } finally {
           this.endSyncActivity();

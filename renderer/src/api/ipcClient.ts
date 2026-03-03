@@ -147,6 +147,7 @@ interface LanternApi {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<MessageRow | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
+  resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => Promise<MessageRow[]>;
   getMessagesByIds: (messageIds: string[]) => Promise<MessageRow[]>;
   searchConversationMessageIds: (
@@ -221,6 +222,8 @@ export const ipcClient = {
   ) => window.lantern.reactToMessage(conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     window.lantern.deleteMessageForEveryone(conversationId, messageId),
+  resyncConversation: (conversationId: string) =>
+    window.lantern.resyncConversation(conversationId),
   getMessages: (conversationId: string, limit: number, before?: number) =>
     window.lantern.getMessages(conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) => window.lantern.getMessagesByIds(messageIds),

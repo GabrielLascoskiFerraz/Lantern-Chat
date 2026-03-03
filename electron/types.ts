@@ -81,6 +81,7 @@ export interface TypingPayload {
 export interface SyncRequestPayload {
   since: number;
   limit: number;
+  fullResync?: boolean;
 }
 
 export interface SyncMessagePayload {

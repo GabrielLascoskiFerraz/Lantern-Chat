@@ -64,6 +64,7 @@ export interface IpcBindings {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<DbMessage | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
+  resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => DbMessage[];
   getMessagesByIds: (messageIds: string[]) => DbMessage[];
   searchConversationMessageIds: (
@@ -388,6 +389,9 @@ export const registerIpc = (
     'lantern:deleteMessageForEveryone',
     (_event, conversationId: string, messageId: string) =>
       bindings.deleteMessageForEveryone(conversationId, messageId)
+  );
+  ipcMain.handle('lantern:resyncConversation', (_event, conversationId: string) =>
+    bindings.resyncConversation(conversationId)
   );
   ipcMain.handle(
     'lantern:getMessages',

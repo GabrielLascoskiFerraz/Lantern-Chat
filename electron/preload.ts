@@ -33,6 +33,8 @@ const api = {
   ) => ipcRenderer.invoke('lantern:reactToMessage', conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     ipcRenderer.invoke('lantern:deleteMessageForEveryone', conversationId, messageId),
+  resyncConversation: (conversationId: string) =>
+    ipcRenderer.invoke('lantern:resyncConversation', conversationId),
   getMessages: (conversationId: string, limit: number, before?: number) =>
     ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) =>

@@ -11,6 +11,7 @@ import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/r
 import {
   ArrowReply20Regular,
   ArrowForward20Regular,
+  ArrowSync20Regular,
   ChevronDown20Regular,
   ChevronUp20Regular,
   Checkmark20Regular,
@@ -58,6 +59,7 @@ interface ChatViewProps {
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
+  onResyncConversation: () => Promise<void>;
   onClearConversation: () => Promise<void>;
   onForgetContactConversation: () => Promise<void>;
   onOpenFile: (filePath: string) => Promise<void>;
@@ -270,6 +272,7 @@ export const ChatView = ({
   onForwardMessage,
   onReactToMessage,
   onDeleteMessage,
+  onResyncConversation,
   onClearConversation,
   onForgetContactConversation,
   onOpenFile,
@@ -1160,6 +1163,19 @@ export const ChatView = ({
             />
             {headerMenuOpen && (
               <div className="header-menu">
+                <button
+                  type="button"
+                  className="header-menu-item"
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    void onResyncConversation();
+                  }}
+                >
+                  <span className="menu-item-icon">
+                    <ArrowSync20Regular />
+                  </span>
+                  <span>Ressincronizar conversa</span>
+                </button>
                 <button
                   type="button"
                   className="header-menu-item"
