@@ -3,18 +3,32 @@ import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { ANNOUNCEMENTS_CONVERSATION_ID } from './config';
 import { runMigrations } from './migrations';
-import { AnnouncementReactionSummary, ConversationRow, DbMessage, Peer, Profile } from './types';
+import {
+  AnnouncementReactionSummary,
+  ConversationRow,
+  DbMessage,
+  Peer,
+  Profile,
+  ReactPayload
+} from './types';
 
-type PendingPeerOperationType = 'chat:clear' | 'chat:forget';
+type PendingPeerOperationType = 'chat:clear' | 'chat:forget' | 'chat:react';
+
+type PendingPeerOperationPayload =
+  | {
+      scope: 'dm';
+    }
+  | {
+      targetMessageId: string;
+      reaction: ReactPayload['reaction'];
+    };
 
 interface PendingPeerOperation {
   id: string;
   peerId: string;
   type: PendingPeerOperationType;
   createdAt: number;
-  payload: {
-    scope: 'dm';
-  };
+  payload: PendingPeerOperationPayload;
 }
 
 const colorFromDeviceId = (deviceId: string): string => {
@@ -1197,27 +1211,55 @@ export class DbService {
   enqueuePendingPeerOperation(
     peerId: string,
     type: PendingPeerOperationType,
-    payload: { scope: 'dm' } = { scope: 'dm' }
+    payload: PendingPeerOperationPayload = { scope: 'dm' }
   ): PendingPeerOperation {
     const cleanPeerId = (peerId || '').trim();
     if (!cleanPeerId) {
       throw new Error('peerId inválido para enfileirar operação pendente.');
     }
     const now = Date.now();
-    const scope = payload.scope === 'dm' ? 'dm' : 'dm';
+    const normalizedPayload: PendingPeerOperationPayload =
+      type === 'chat:react'
+        ? {
+            targetMessageId:
+              'targetMessageId' in payload ? (payload.targetMessageId || '').trim() : '',
+            reaction: 'reaction' in payload ? payload.reaction ?? null : null
+          }
+        : {
+            scope: 'scope' in payload && payload.scope === 'dm' ? 'dm' : 'dm'
+          };
+
+    const targetMessageId =
+      type === 'chat:react' && 'targetMessageId' in normalizedPayload
+        ? normalizedPayload.targetMessageId
+        : '';
+    if (type === 'chat:react' && !targetMessageId) {
+      throw new Error('targetMessageId inválido para reação pendente.');
+    }
+
     const operation: PendingPeerOperation = {
       id: randomUUID(),
       peerId: cleanPeerId,
       type,
       createdAt: now,
-      payload: {
-        scope
-      }
+      payload: normalizedPayload
     };
 
     const all = this.readPendingPeerOperations();
-    all.push(operation);
-    this.writePendingPeerOperations(all);
+    const next =
+      type === 'chat:react'
+        ? all.filter(
+            (row) =>
+              !(
+                row.peerId === cleanPeerId &&
+                row.type === 'chat:react' &&
+                'targetMessageId' in row.payload &&
+                row.payload.targetMessageId === targetMessageId
+              )
+          )
+        : all;
+    next.push(operation);
+    this.writePendingPeerOperations(next);
     return operation;
   }
 
@@ -1235,6 +1277,24 @@ export class DbService {
     if (!cleanPeerId) return;
     const all = this.readPendingPeerOperations();
     const next = all.filter((row) => row.peerId !== cleanPeerId);
+    if (next.length === all.length) return;
+    this.writePendingPeerOperations(next);
+  }
+
+  removePendingReactionOperation(peerId: string, targetMessageId: string): void {
+    const cleanPeerId = (peerId || '').trim();
+    const cleanTargetMessageId = (targetMessageId || '').trim();
+    if (!cleanPeerId || !cleanTargetMessageId) return;
+    const all = this.readPendingPeerOperations();
+    const next = all.filter(
+      (row) =>
+        !(
+          row.peerId === cleanPeerId &&
+          row.type === 'chat:react' &&
+          'targetMessageId' in row.payload &&
+          row.payload.targetMessageId === cleanTargetMessageId
+        )
+    );
     if (next.length === all.length) return;
     this.writePendingPeerOperations(next);
   }
@@ -1354,18 +1414,46 @@ export class DbService {
           record.payload && typeof record.payload === 'object' && !Array.isArray(record.payload)
             ? (record.payload as Record<string, unknown>)
             : {};
-        const scope = payloadRecord.scope === 'dm' ? 'dm' : 'dm';
 
         if (!id || !peerId || createdAt <= 0) continue;
-        if (type !== 'chat:clear' && type !== 'chat:forget') continue;
-
-        rows.push({
-          id,
-          peerId,
-          type,
-          createdAt,
-          payload: { scope }
-        });
+        if (type === 'chat:clear' || type === 'chat:forget') {
+          const scope = payloadRecord.scope === 'dm' ? 'dm' : 'dm';
+          rows.push({
+            id,
+            peerId,
+            type,
+            createdAt,
+            payload: { scope }
+          });
+          continue;
+        }
+        if (type === 'chat:react') {
+          const targetMessageId =
+            typeof payloadRecord.targetMessageId === 'string'
+              ? payloadRecord.targetMessageId.trim()
+              : '';
+          const reaction =
+            payloadRecord.reaction === '👍' ||
+            payloadRecord.reaction === '👎' ||
+            payloadRecord.reaction === '❤️' ||
+            payloadRecord.reaction === '😢' ||
+            payloadRecord.reaction === '😊' ||
+            payloadRecord.reaction === '😂' ||
+            payloadRecord.reaction === null
+              ? payloadRecord.reaction
+              : null;
+          if (!targetMessageId) continue;
+          rows.push({
+            id,
+            peerId,
+            type,
+            createdAt,
+            payload: {
+              targetMessageId,
+              reaction
+            }
+          });
+        }
       }
       return rows;
     } catch {

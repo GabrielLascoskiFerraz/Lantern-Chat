@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, Menu } from 'electron';
 import { randomUUID } from 'node:crypto';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
@@ -617,6 +617,10 @@ class LanternApp {
     const isWin = process.platform === 'win32';
     const appIconPath = this.resolveAppIconPath();
 
+    if (isWin) {
+      Menu.setApplicationMenu(null);
+    }
+
     const window = new BrowserWindow({
       width: 1280,
       height: 820,
@@ -645,6 +649,7 @@ class LanternApp {
 
     window.once('ready-to-show', () => window.show());
     if (isWin) {
+      window.removeMenu();
       window.setMenuBarVisibility(false);
     }
 
@@ -1254,6 +1259,20 @@ class LanternApp {
     this.db.enqueuePendingPeerOperation(cleanPeerId, type, { scope: 'dm' });
   }
 
+  private enqueuePendingReactionOperation(
+    peerId: string,
+    targetMessageId: string,
+    reaction: ReactPayload['reaction']
+  ): void {
+    const cleanPeerId = (peerId || '').trim();
+    const cleanTargetMessageId = (targetMessageId || '').trim();
+    if (!cleanPeerId || !cleanTargetMessageId) return;
+    this.db.enqueuePendingPeerOperation(cleanPeerId, 'chat:react', {
+      targetMessageId: cleanTargetMessageId,
+      reaction
+    });
+  }
+
   private async flushPendingPeerOperations(peerId: string, peerOverride?: Peer): Promise<void> {
     const cleanPeerId = (peerId || '').trim();
     if (!cleanPeerId) return;
@@ -1266,24 +1285,41 @@ class LanternApp {
     if (pending.length === 0) return;
 
     for (const operation of pending) {
-      const frame =
-        operation.type === 'chat:clear'
-          ? ({
-              type: 'chat:clear',
-              messageId: randomUUID(),
-              from: this.profile.deviceId,
-              to: cleanPeerId,
-              createdAt: Date.now(),
-              payload: { scope: operation.payload.scope }
-            } satisfies ProtocolFrame<ClearConversationPayload>)
-          : ({
-              type: 'chat:forget',
-              messageId: randomUUID(),
-              from: this.profile.deviceId,
-              to: cleanPeerId,
-              createdAt: Date.now(),
-              payload: { scope: operation.payload.scope }
-            } satisfies ProtocolFrame<ForgetPeerPayload>);
+      let frame: ProtocolFrame;
+      if (operation.type === 'chat:clear' && 'scope' in operation.payload) {
+        frame = {
+          type: 'chat:clear',
+          messageId: randomUUID(),
+          from: this.profile.deviceId,
+          to: cleanPeerId,
+          createdAt: Date.now(),
+          payload: { scope: operation.payload.scope }
+        } satisfies ProtocolFrame<ClearConversationPayload>;
+      } else if (operation.type === 'chat:react' && 'targetMessageId' in operation.payload) {
+        frame = {
+          type: 'chat:react',
+          messageId: randomUUID(),
+          from: this.profile.deviceId,
+          to: cleanPeerId,
+          createdAt: operation.createdAt,
+          payload: {
+            targetMessageId: operation.payload.targetMessageId,
+            reaction: operation.payload.reaction
+          }
+        } satisfies ProtocolFrame<ReactPayload>;
+      } else if (operation.type === 'chat:forget' && 'scope' in operation.payload) {
+        frame = {
+          type: 'chat:forget',
+          messageId: randomUUID(),
+          from: this.profile.deviceId,
+          to: cleanPeerId,
+          createdAt: Date.now(),
+          payload: { scope: operation.payload.scope }
+        } satisfies ProtocolFrame<ForgetPeerPayload>;
+      } else {
+        this.db.removePendingPeerOperation(operation.id);
+        continue;
+      }
       try {
         await this.sendToPeer(peer, frame);
         this.db.removePendingPeerOperation(operation.id);
@@ -1408,6 +1444,18 @@ class LanternApp {
 
     const isAnnouncementConversation =
       conversationId === ANNOUNCEMENTS_CONVERSATION_ID || targetMessage.type === 'announcement';
+    const summary = this.db.setMessageReaction(
+      messageId,
+      this.profile.deviceId,
+      reaction,
+      this.profile.deviceId
+    );
+    this.emitEvent({
+      type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
+      messageId,
+      summary
+    });
+
     const peer = this.getPeerFromConversationId(conversationId);
     if (peer) {
       const frame: ProtocolFrame<ReactPayload> = {
@@ -1423,11 +1471,13 @@ class LanternApp {
       };
       try {
         await this.sendToPeer(peer, frame);
+        this.db.removePendingReactionOperation(peer.deviceId, messageId);
       } catch {
+        this.enqueuePendingReactionOperation(peer.deviceId, messageId, reaction);
         this.emitEvent({
           type: 'ui:toast',
-          level: 'warning',
-          message: 'Contato offline. Reação não enviada.'
+          level: 'info',
+          message: 'Contato offline. A reação será sincronizada quando ele voltar.'
         });
         return targetMessage;
       }
@@ -1453,18 +1503,6 @@ class LanternApp {
         return targetMessage;
       }
     }
-
-    const summary = this.db.setMessageReaction(
-      messageId,
-      this.profile.deviceId,
-      reaction,
-      this.profile.deviceId
-    );
-    this.emitEvent({
-      type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
-      messageId,
-      summary
-    });
     return targetMessage;
   }
 
