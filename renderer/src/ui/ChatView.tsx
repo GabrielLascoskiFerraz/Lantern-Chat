@@ -591,10 +591,25 @@ export const ChatView = ({
   );
 
   useEffect(() => {
+    if (searchCloseTimerRef.current) {
+      window.clearTimeout(searchCloseTimerRef.current);
+      searchCloseTimerRef.current = null;
+    }
     setReplyDraft(null);
     setFavoritesOnly(false);
     setFavoriteMessages([]);
     setFavoriteMessagesLoading(false);
+    setSearchOpen(false);
+    setSearchClosing(false);
+    setSearchQuery('');
+    setSearchLoading(false);
+    setMatchedMessageIds([]);
+    setActiveMatchIndex(-1);
+    setReactionPickerMessageId(null);
+    setMessageContextMenu(null);
+    lastMessageIdRef.current = null;
+    matchRowRefs.current = {};
+    messageRowRefs.current = {};
   }, [conversationId]);
 
   useEffect(() => {
@@ -834,7 +849,11 @@ export const ChatView = ({
     const loadedCount = await onLoadOlderMessages();
     if (loadedCount <= 0) return 0;
 
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
 
     const nextNode = messagesScrollRef.current;
     if (!nextNode) return loadedCount;
@@ -1208,7 +1227,12 @@ export const ChatView = ({
     let cancelled = false;
 
     const jumpToMatch = async () => {
-      if (searchJumpInFlightRef.current) {
+      let waitGuard = 0;
+      while (searchJumpInFlightRef.current && !cancelled && waitGuard < 80) {
+        waitGuard += 1;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      }
+      if (cancelled || searchJumpInFlightRef.current) {
         return;
       }
       searchJumpInFlightRef.current = true;

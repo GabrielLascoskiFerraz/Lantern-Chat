@@ -76,6 +76,17 @@ export const runMigrations = (db: Database.Database): void => {
     CREATE INDEX IF NOT EXISTS idx_message_reactions_message
       ON message_reactions(messageId);
 
+    CREATE TABLE IF NOT EXISTS pending_message_reactions (
+      messageId TEXT NOT NULL,
+      reactorDeviceId TEXT NOT NULL,
+      reaction TEXT,
+      updatedAt INTEGER NOT NULL,
+      PRIMARY KEY (messageId, reactorDeviceId)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pending_message_reactions_message
+      ON pending_message_reactions(messageId);
+
     CREATE TABLE IF NOT EXISTS message_favorites (
       messageId TEXT PRIMARY KEY,
       createdAt INTEGER NOT NULL
@@ -133,5 +144,14 @@ export const runMigrations = (db: Database.Database): void => {
     );
     CREATE INDEX IF NOT EXISTS idx_message_favorites_created_at
       ON message_favorites(createdAt DESC);
+    CREATE TABLE IF NOT EXISTS pending_message_reactions (
+      messageId TEXT NOT NULL,
+      reactorDeviceId TEXT NOT NULL,
+      reaction TEXT,
+      updatedAt INTEGER NOT NULL,
+      PRIMARY KEY (messageId, reactorDeviceId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_message_reactions_message
+      ON pending_message_reactions(messageId);
   `);
 };

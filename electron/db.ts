@@ -31,6 +31,13 @@ interface PendingPeerOperation {
   payload: PendingPeerOperationPayload;
 }
 
+interface PendingMessageReaction {
+  messageId: string;
+  reactorDeviceId: string;
+  reaction: ReactPayload['reaction'];
+  updatedAt: number;
+}
+
 const colorFromDeviceId = (deviceId: string): string => {
   const hex = createHash('sha256').update(deviceId).digest('hex').slice(0, 6);
   return `#${hex}`;
@@ -48,6 +55,10 @@ export class DbService {
 
   close(): void {
     this.db.close();
+  }
+
+  async backupDatabaseTo(destinationFile: string): Promise<void> {
+    await this.db.backup(destinationFile);
   }
 
   getProfile(): Profile {
@@ -715,6 +726,54 @@ export class DbService {
     return tx();
   }
 
+  upsertPendingMessageReaction(
+    messageId: string,
+    reactorDeviceId: string,
+    reaction: ReactPayload['reaction'],
+    updatedAt = Date.now()
+  ): void {
+    const cleanMessageId = (messageId || '').trim();
+    const cleanReactorDeviceId = (reactorDeviceId || '').trim();
+    if (!cleanMessageId || !cleanReactorDeviceId) return;
+
+    const normalizedUpdatedAt =
+      Number.isFinite(updatedAt) && updatedAt > 0 ? Math.trunc(updatedAt) : Date.now();
+
+    this.db
+      .prepare(
+        `INSERT INTO pending_message_reactions(messageId, reactorDeviceId, reaction, updatedAt)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(messageId, reactorDeviceId) DO UPDATE SET
+           reaction = excluded.reaction,
+           updatedAt = excluded.updatedAt
+         WHERE excluded.updatedAt >= pending_message_reactions.updatedAt`
+      )
+      .run(cleanMessageId, cleanReactorDeviceId, reaction, normalizedUpdatedAt);
+  }
+
+  consumePendingMessageReactions(messageId: string): PendingMessageReaction[] {
+    const cleanMessageId = (messageId || '').trim();
+    if (!cleanMessageId) return [];
+
+    const selectRows = this.db.prepare(
+      `SELECT messageId, reactorDeviceId, reaction, updatedAt
+       FROM pending_message_reactions
+       WHERE messageId = ?
+       ORDER BY updatedAt ASC, reactorDeviceId ASC`
+    );
+    const deleteRows = this.db.prepare(
+      'DELETE FROM pending_message_reactions WHERE messageId = ?'
+    );
+
+    const tx = this.db.transaction((targetMessageId: string) => {
+      const rows = selectRows.all(targetMessageId) as PendingMessageReaction[];
+      deleteRows.run(targetMessageId);
+      return rows;
+    });
+
+    return tx(cleanMessageId);
+  }
+
   setAnnouncementReaction(
     messageId: string,
     reactorDeviceId: string,
@@ -858,6 +917,7 @@ export class DbService {
       )
       .run(deletedAt, messageId);
     this.db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM pending_message_reactions WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
     this.db
       .prepare(
@@ -1077,6 +1137,14 @@ export class DbService {
          WHERE conversationId = ?
        )`
     );
+    const deletePendingReactions = this.db.prepare(
+      `DELETE FROM pending_message_reactions
+       WHERE messageId IN (
+         SELECT messageId
+         FROM messages
+         WHERE conversationId = ?
+       )`
+    );
     const deleteMessages = this.db.prepare('DELETE FROM messages WHERE conversationId = ?');
     const resetConversation = this.db.prepare(
       'UPDATE conversations SET unreadCount = 0, updatedAt = ? WHERE id = ?'
@@ -1085,6 +1153,7 @@ export class DbService {
     const tx = this.db.transaction((id: string) => {
       const rows = listFiles.all(id) as Array<{ filePath: string | null }>;
       deleteReactions.run(id);
+      deletePendingReactions.run(id);
       deleteFavorites.run(id);
       deleteMessages.run(id);
       resetConversation.run(Date.now(), id);
@@ -1098,6 +1167,8 @@ export class DbService {
 
   removeMessageById(messageId: string): void {
     this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM pending_message_reactions WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM messages WHERE messageId = ?').run(messageId);
   }
 
@@ -1138,6 +1209,20 @@ export class DbService {
       `DELETE FROM messages
        WHERE type = 'announcement' AND createdAt <= ?`
     );
+    const removeReactions = this.db.prepare(
+      `DELETE FROM message_reactions
+       WHERE messageId IN (
+         SELECT messageId FROM messages
+         WHERE type = 'announcement' AND createdAt <= ?
+       )`
+    );
+    const removePendingReactions = this.db.prepare(
+      `DELETE FROM pending_message_reactions
+       WHERE messageId IN (
+         SELECT messageId FROM messages
+         WHERE type = 'announcement' AND createdAt <= ?
+       )`
+    );
     const touchConversation = this.db.prepare(
       'UPDATE conversations SET updatedAt = ? WHERE id = ?'
     );
@@ -1145,6 +1230,8 @@ export class DbService {
     const tx = this.db.transaction((cutoff: number) => {
       const rows = list.all(cutoff) as Array<{ messageId: string }>;
       if (rows.length === 0) return [] as string[];
+      removeReactions.run(cutoff);
+      removePendingReactions.run(cutoff);
       remove.run(cutoff);
       touchConversation.run(Date.now(), ANNOUNCEMENTS_CONVERSATION_ID);
       return rows.map((row) => row.messageId);
@@ -1171,6 +1258,10 @@ export class DbService {
       `DELETE FROM message_reactions
        WHERE messageId IN (${placeholders})`
     );
+    const removePendingReactions = this.db.prepare(
+      `DELETE FROM pending_message_reactions
+       WHERE messageId IN (${placeholders})`
+    );
     const touchConversation = this.db.prepare(
       'UPDATE conversations SET updatedAt = ? WHERE id = ?'
     );
@@ -1178,8 +1269,9 @@ export class DbService {
     const tx = this.db.transaction(() => {
       const rows = list.all(...uniqueIds) as Array<{ messageId: string }>;
       if (rows.length === 0) return [] as string[];
-      removeMessages.run(...uniqueIds);
       removeReactions.run(...uniqueIds);
+      removePendingReactions.run(...uniqueIds);
+      removeMessages.run(...uniqueIds);
       touchConversation.run(Date.now(), ANNOUNCEMENTS_CONVERSATION_ID);
       return rows.map((row) => row.messageId);
     });

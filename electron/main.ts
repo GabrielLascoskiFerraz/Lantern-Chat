@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { app, BrowserWindow, dialog, Menu } from 'electron';
 import { randomUUID } from 'node:crypto';
+import Database from 'better-sqlite3';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
   APP_ID,
@@ -10,6 +11,7 @@ import {
 import { DbService } from './db';
 import { FileTransferService } from './fileTransfer';
 import { registerIpc } from './ipc';
+import { runMigrations } from './migrations';
 import { NotificationService } from './notifications';
 import { RelayClient, RelayEndpointSettings, RelayPeerSnapshot } from './relayClient';
 import { MessageService } from './services/MessageService';
@@ -73,6 +75,7 @@ class LanternApp {
   private syncActivityCount = 0;
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
+  private incomingFrameQueue: Promise<void> = Promise.resolve();
 
   private formatBackupTimestamp(value: number): string {
     const date = new Date(value);
@@ -110,6 +113,8 @@ class LanternApp {
       const markerRaw = await fs.promises.readFile(markerPath, 'utf8');
       const marker = JSON.parse(markerRaw) as {
         targetAttachmentsDir?: string;
+        currentProfile?: Profile;
+        currentRelaySettings?: RelayEndpointSettings;
       };
       const stagedDbDir = path.join(stagingRoot, 'db');
       const stagedDbFile = path.join(stagedDbDir, 'lantern.db');
@@ -129,6 +134,11 @@ class LanternApp {
         await fs.promises.copyFile(stagedPath, targetPath);
       }
 
+      const restoredDbPath = path.join(userDataDir, 'lantern.db');
+      if (fs.existsSync(restoredDbPath)) {
+        this.sanitizeRestoredDatabase(restoredDbPath, marker);
+      }
+
       const stagedAttachmentsDir = path.join(stagingRoot, 'attachments');
       const targetAttachmentsDir = (marker.targetAttachmentsDir || '').trim();
       if (targetAttachmentsDir && fs.existsSync(stagedAttachmentsDir)) {
@@ -143,6 +153,161 @@ class LanternApp {
       );
     } finally {
       await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private sanitizeRestoredDatabase(
+    dbPath: string,
+    marker: {
+      targetAttachmentsDir?: string;
+      currentProfile?: Profile;
+      currentRelaySettings?: RelayEndpointSettings;
+    }
+  ): void {
+    const currentProfile = marker.currentProfile;
+    const currentRelaySettings = marker.currentRelaySettings;
+    const targetAttachmentsDir = (marker.targetAttachmentsDir || '').trim();
+    const db = new Database(dbPath);
+
+    try {
+      runMigrations(db);
+      const restoredProfile = db
+        .prepare(
+          `SELECT deviceId, displayName, avatarEmoji, avatarBg, statusMessage, createdAt, updatedAt
+           FROM profile
+           LIMIT 1`
+        )
+        .get() as Profile | undefined;
+
+      if (currentProfile?.deviceId && restoredProfile?.deviceId) {
+        const currentDeviceId = currentProfile.deviceId.trim();
+        const restoredDeviceId = restoredProfile.deviceId.trim();
+        if (currentDeviceId && restoredDeviceId && currentDeviceId !== restoredDeviceId) {
+          const removeConversationIds = (conversationIds: string[]) => {
+            const uniqueIds = Array.from(
+              new Set(conversationIds.map((value) => value.trim()).filter(Boolean))
+            );
+            if (uniqueIds.length === 0) return;
+
+            const placeholders = uniqueIds.map(() => '?').join(', ');
+            db.prepare(
+              `DELETE FROM message_reactions
+               WHERE messageId IN (
+                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
+               )`
+            ).run(...uniqueIds);
+            db.prepare(
+              `DELETE FROM pending_message_reactions
+               WHERE messageId IN (
+                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
+               )`
+            ).run(...uniqueIds);
+            db.prepare(
+              `DELETE FROM message_favorites
+               WHERE messageId IN (
+                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
+               )`
+            ).run(...uniqueIds);
+            db.prepare(`DELETE FROM messages WHERE conversationId IN (${placeholders})`).run(...uniqueIds);
+            db.prepare(`DELETE FROM conversations WHERE id IN (${placeholders})`).run(...uniqueIds);
+          };
+
+          const tx = db.transaction(() => {
+            const selfConversationRows = db
+              .prepare(
+                `SELECT id
+                 FROM conversations
+                 WHERE kind = 'dm'
+                   AND (
+                     peerDeviceId IN (?, ?)
+                     OR id IN (?, ?)
+                   )`
+              )
+              .all(
+                currentDeviceId,
+                restoredDeviceId,
+                `dm:${currentDeviceId}`,
+                `dm:${restoredDeviceId}`
+              ) as Array<{ id: string }>;
+            removeConversationIds(selfConversationRows.map((row) => row.id));
+
+            db.prepare(
+              `UPDATE profile
+               SET deviceId = ?,
+                   updatedAt = ?
+               WHERE deviceId = ?`
+            ).run(currentDeviceId, Date.now(), restoredDeviceId);
+
+            db.prepare(
+              `UPDATE messages
+               SET senderDeviceId = CASE WHEN senderDeviceId = ? THEN ? ELSE senderDeviceId END,
+                   receiverDeviceId = CASE WHEN receiverDeviceId = ? THEN ? ELSE receiverDeviceId END`
+            ).run(restoredDeviceId, currentDeviceId, restoredDeviceId, currentDeviceId);
+
+            db.prepare(
+              `UPDATE message_reactions
+               SET reactorDeviceId = ?
+               WHERE reactorDeviceId = ?`
+            ).run(currentDeviceId, restoredDeviceId);
+
+            db.prepare(
+              `UPDATE pending_message_reactions
+               SET reactorDeviceId = ?
+               WHERE reactorDeviceId = ?`
+            ).run(currentDeviceId, restoredDeviceId);
+
+            db.prepare(
+              `DELETE FROM peers_cache
+               WHERE deviceId IN (?, ?)`
+            ).run(restoredDeviceId, currentDeviceId);
+
+            db.prepare(`DELETE FROM app_settings WHERE key = 'pending.peerOps'`).run();
+          });
+          tx();
+        } else {
+          db.prepare(
+            `DELETE FROM peers_cache
+             WHERE deviceId = ?`
+          ).run(currentDeviceId);
+        }
+      }
+
+      if (targetAttachmentsDir) {
+        db.prepare(
+          `INSERT INTO app_settings(key, value)
+           VALUES ('attachments.dir', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+        ).run(path.resolve(targetAttachmentsDir));
+      }
+
+      if (currentRelaySettings) {
+        if (currentRelaySettings.automatic) {
+          db.prepare(`DELETE FROM app_settings WHERE key IN ('relay.host', 'relay.port')`).run();
+          db.prepare(
+            `INSERT INTO app_settings(key, value)
+             VALUES ('relay.mode', 'auto')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+          ).run();
+        } else {
+          db.prepare(
+            `INSERT INTO app_settings(key, value)
+             VALUES ('relay.mode', 'manual')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+          ).run();
+          db.prepare(
+            `INSERT INTO app_settings(key, value)
+             VALUES ('relay.host', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+          ).run(currentRelaySettings.host || '');
+          db.prepare(
+            `INSERT INTO app_settings(key, value)
+             VALUES ('relay.port', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+          ).run(String(currentRelaySettings.port || 43190));
+        }
+      }
+    } finally {
+      db.close();
     }
   }
 
@@ -249,14 +414,7 @@ class LanternApp {
     }
 
     await fs.promises.mkdir(backupDbDir, { recursive: true });
-    const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
-    for (const fileName of dbFileNames) {
-      const sourcePath = path.join(userDataDir, fileName);
-      if (!fs.existsSync(sourcePath)) {
-        continue;
-      }
-      await fs.promises.copyFile(sourcePath, path.join(backupDbDir, fileName));
-    }
+    await this.db.backupDatabaseTo(path.join(backupDbDir, 'lantern.db'));
 
     const attachmentsDir = this.getConfiguredAttachmentsDir();
     let copiedAttachments = false;
@@ -345,7 +503,9 @@ class LanternApp {
         {
           createdAt: Date.now(),
           sourceBackupPath: backupRoot,
-          targetAttachmentsDir
+          targetAttachmentsDir,
+          currentProfile: this.profile,
+          currentRelaySettings: this.relaySettings
         },
         null,
         2
@@ -393,20 +553,7 @@ class LanternApp {
 
     this.relay = new RelayClient(this.profile, {
       onFrame: (frame) => {
-        void this.handleIncomingFrame(frame).catch((error) => {
-          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
-            console.warn(
-              '[Lantern][Relay] falha ao processar frame recebido:',
-              JSON.stringify({
-                type: frame.type,
-                messageId: frame.messageId,
-                from: frame.from,
-                to: frame.to,
-                error: error instanceof Error ? error.message : String(error)
-              })
-            );
-          }
-        });
+        this.enqueueIncomingFrame(frame);
       },
       onPresence: (peers) => {
         try {
@@ -1003,6 +1150,25 @@ class LanternApp {
     }
   }
 
+  private enqueueIncomingFrame(frame: ProtocolFrame): void {
+    const task = this.incomingFrameQueue.then(() => this.handleIncomingFrame(frame));
+    this.incomingFrameQueue = task.catch(() => undefined);
+    void task.catch((error) => {
+      if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+        console.warn(
+          '[Lantern][Relay] falha ao processar frame recebido:',
+          JSON.stringify({
+            type: frame.type,
+            messageId: frame.messageId,
+            from: frame.from,
+            to: frame.to,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        );
+      }
+    });
+  }
+
   private async resyncConversation(conversationId: string): Promise<void> {
     if (!conversationId.startsWith('dm:')) {
       throw new Error('Ressincronização disponível apenas para conversas diretas.');
@@ -1098,6 +1264,58 @@ class LanternApp {
       previewText: previewText ? previewText.slice(0, 300) : null,
       fileName: fileName ? fileName.slice(0, 260) : null
     };
+  }
+
+  private applyQueuedReactionsForMessage(message: Pick<DbMessage, 'messageId' | 'type'>): void {
+    const pendingReactions = this.db.consumePendingMessageReactions(message.messageId);
+    if (pendingReactions.length === 0) {
+      return;
+    }
+
+    let summary = null as ReturnType<DbService['setMessageReaction']> | null;
+    for (const pending of pendingReactions) {
+      summary = this.db.setMessageReaction(
+        pending.messageId,
+        pending.reactorDeviceId,
+        pending.reaction,
+        this.profile.deviceId
+      );
+    }
+
+    if (!summary) {
+      return;
+    }
+
+    this.emitEvent({
+      type: message.type === 'announcement' ? 'announcement:reactions' : 'message:reactions',
+      messageId: message.messageId,
+      summary
+    });
+  }
+
+  private async sendDeliveredAckBestEffort(
+    toDeviceId: string,
+    ackMessageId: string,
+    activePeer?: Peer
+  ): Promise<void> {
+    const ackPeer =
+      activePeer && activePeer.deviceId === toDeviceId
+        ? activePeer
+        : this.presence.getPeer(toDeviceId) || this.resolvePeerForTransport(toDeviceId);
+    if (!ackPeer) return;
+
+    try {
+      await this.sendToPeer(ackPeer, {
+        type: 'chat:ack',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: toDeviceId,
+        createdAt: Date.now(),
+        payload: { ackMessageId, status: 'delivered' }
+      } satisfies ProtocolFrame<AckPayload>);
+    } catch {
+      // ACK best-effort: a falta dele não deve interromper o fluxo principal.
+    }
   }
 
   private markConversationRead(conversationId: string): void {
@@ -1821,6 +2039,7 @@ class LanternApp {
         if (inserted) {
           this.bumpUnreadIfBackground(conversationId);
           this.emitEvent({ type: 'message:received', message: row });
+          this.applyQueuedReactionsForMessage(row);
           this.notifyIncomingIfNeeded(
             row,
             deliverySource,
@@ -1931,9 +2150,27 @@ class LanternApp {
       case 'chat:react': {
         const payload = frame.payload as ReactPayload;
         const target = this.db.getMessageById(payload.targetMessageId);
-        const isAnnouncementReaction = target
-          ? target.type === 'announcement'
-          : frame.to === null;
+        if (!target) {
+          if (frame.to !== null) {
+            this.db.upsertPendingMessageReaction(
+              payload.targetMessageId,
+              frame.from,
+              payload.reaction,
+              frame.createdAt
+            );
+            if (deliverySource === 'live' && activePeer) {
+              void this.requestSync(activePeer, {
+                force: true,
+                since: 0,
+                limit: 100_000,
+                fullResync: true
+              }).catch(() => undefined);
+            }
+          }
+          break;
+        }
+
+        const isAnnouncementReaction = target.type === 'announcement';
         const summary = this.db.setMessageReaction(
           payload.targetMessageId,
           frame.from,
@@ -1949,7 +2186,6 @@ class LanternApp {
         if (
           deliverySource === 'live' &&
           payload.reaction &&
-          target &&
           target.senderDeviceId === this.profile.deviceId &&
           frame.from !== this.profile.deviceId
         ) {
@@ -2104,8 +2340,10 @@ class LanternApp {
                 );
               }
               this.emitEvent({ type: 'message:received', message: result.row });
+              this.applyQueuedReactionsForMessage(result.row);
             } else {
               this.emitEvent({ type: 'message:updated', message: result.row });
+              this.applyQueuedReactionsForMessage(result.row);
             }
 
             if (
@@ -2167,14 +2405,17 @@ class LanternApp {
           normalizedCreatedAt
         );
         const existingMessage = this.db.getMessageById(payload.messageId);
+        const existingFileComplete =
+          existingMessage?.type === 'file' &&
+          Boolean(existingMessage.filePath) &&
+          (existingMessage.status === 'delivered' || existingMessage.status === 'read');
         const shouldReceiveFile =
-          !existingMessage ||
-          existingMessage.type !== 'file' ||
-          !existingMessage.filePath ||
-          existingMessage.status !== 'delivered';
+          !existingFileComplete;
 
         if (shouldReceiveFile) {
           this.fileTransfer.startIncoming(payload, frame.from);
+        } else if (deliverySource === 'live') {
+          await this.sendDeliveredAckBestEffort(frame.from, payload.messageId, activePeer);
         }
 
         const row: DbMessage = {
@@ -2209,6 +2450,7 @@ class LanternApp {
         if (inserted) {
           this.bumpUnreadIfBackground(conversationId);
           this.emitEvent({ type: 'message:received', message: row });
+          this.applyQueuedReactionsForMessage(row);
           this.notifyIncomingIfNeeded(
             row,
             deliverySource,

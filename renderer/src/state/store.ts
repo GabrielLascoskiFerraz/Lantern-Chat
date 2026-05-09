@@ -105,6 +105,7 @@ const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
 const PROFILE_ONBOARDING_KEY_PREFIX = 'lantern.profile.onboarding.done';
 const MESSAGES_PAGE_SIZE = 80;
+const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
 const getInitialThemeMode = (): 'system' | 'light' | 'dark' => {
   if (typeof window === 'undefined') {
@@ -135,6 +136,15 @@ let peerRefreshTimer: number | null = null;
 let peersUpdateSeq = 0;
 let peerSnapshotSeq = 0;
 const typingTimers = new Map<string, number>();
+const transferCleanupTimers = new Map<string, number>();
+
+const clearTransferCleanupTimer = (fileId: string): void => {
+  const timer = transferCleanupTimers.get(fileId);
+  if (timer && typeof window !== 'undefined') {
+    window.clearTimeout(timer);
+  }
+  transferCleanupTimers.delete(fileId);
+};
 
 const areStringArraysEqual = (a: string[], b: string[]): boolean => {
   if (a.length !== b.length) return false;
@@ -627,6 +637,30 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           }
           return changed ? { messagesByConversation: updated } : state;
         });
+
+        if (event.status === 'delivered' || event.status === 'read' || event.status === 'failed') {
+          const completedFileIds = Object.values(get().transfers)
+            .filter((transfer) => transfer.messageId === event.messageId)
+            .map((transfer) => transfer.fileId);
+
+          for (const fileId of completedFileIds) {
+            clearTransferCleanupTimer(fileId);
+            if (typeof window !== 'undefined') {
+              const timer = window.setTimeout(() => {
+                transferCleanupTimers.delete(fileId);
+                set((state) => {
+                  if (!state.transfers[fileId]) {
+                    return state;
+                  }
+                  const nextTransfers = { ...state.transfers };
+                  delete nextTransfers[fileId];
+                  return { transfers: nextTransfers };
+                });
+              }, TRANSFER_CLEANUP_DELAY_MS);
+              transferCleanupTimers.set(fileId, timer);
+            }
+          }
+        }
         return;
       }
 
@@ -754,12 +788,33 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
 
       if (event.type === 'transfer:progress') {
+        const completed = event.total > 0 && event.transferred >= event.total;
+        if (!completed) {
+          clearTransferCleanupTimer(event.fileId);
+        }
+
         set((state) => ({
           transfers: {
             ...state.transfers,
             [event.fileId]: event
           }
         }));
+
+        if (completed && typeof window !== 'undefined') {
+          clearTransferCleanupTimer(event.fileId);
+          const timer = window.setTimeout(() => {
+            transferCleanupTimers.delete(event.fileId);
+            set((state) => {
+              if (!state.transfers[event.fileId]) {
+                return state;
+              }
+              const nextTransfers = { ...state.transfers };
+              delete nextTransfers[event.fileId];
+              return { transfers: nextTransfers };
+            });
+          }, TRANSFER_CLEANUP_DELAY_MS);
+          transferCleanupTimers.set(event.fileId, timer);
+        }
         return;
       }
 

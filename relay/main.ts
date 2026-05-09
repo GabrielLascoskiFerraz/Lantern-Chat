@@ -11,6 +11,7 @@ const RELAY_MDNS_PROTOCOL = 'tcp';
 const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
+const SEND_CALLBACK_TIMEOUT_MS = 10_000;
 const resolveRelayDataDir = (): string => {
   if ((process as NodeJS.Process & { pkg?: unknown }).pkg) {
     return path.dirname(process.execPath);
@@ -1283,7 +1284,18 @@ class LanternRelay {
     try {
       const payload = JSON.stringify(envelope);
       return await new Promise<boolean>((resolve) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          resolve(false);
+        }, SEND_CALLBACK_TIMEOUT_MS);
+        timeout.unref?.();
+
         socket.send(payload, (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
           resolve(!error);
         });
       });

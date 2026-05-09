@@ -14,11 +14,12 @@ interface IncomingTransfer {
   receivedChunks: number;
   receivedIndices: Set<number>;
   transferredBytes: number;
+  nextWriteIndex: number;
+  pendingChunks: Map<number, Buffer>;
+  pendingChunkBytes: number;
   hash: ReturnType<typeof createHash>;
   writeStream: fs.WriteStream;
   finalPath: string;
-  writeQueue: Buffer[];
-  queuedBytes: number;
   waitingDrain: boolean;
   drainListenerAttached: boolean;
   streamErrored: boolean;
@@ -193,11 +194,12 @@ export class FileTransferService {
       receivedChunks: 0,
       receivedIndices: new Set<number>(),
       transferredBytes: 0,
+      nextWriteIndex: 0,
+      pendingChunks: new Map<number, Buffer>(),
+      pendingChunkBytes: 0,
       hash: createHash('sha256'),
       writeStream,
       finalPath,
-      writeQueue: [],
-      queuedBytes: 0,
       waitingDrain: false,
       drainListenerAttached: false,
       streamErrored: false,
@@ -217,7 +219,7 @@ export class FileTransferService {
   }
 
   private hasWriteBacklog(transfer: IncomingTransfer): boolean {
-    return transfer.waitingDrain || transfer.writeQueue.length > 0;
+    return transfer.waitingDrain || transfer.pendingChunks.size > 0;
   }
 
   private resolveWritableWaiters(transfer: IncomingTransfer): void {
@@ -274,6 +276,8 @@ export class FileTransferService {
     }
     this.rejectWritableWaiters(transfer, new Error('Transferência interrompida por backpressure.'));
     this.incoming.delete(transfer.fileId);
+    transfer.pendingChunks.clear();
+    transfer.pendingChunkBytes = 0;
     try {
       fs.unlinkSync(transfer.finalPath);
     } catch {
@@ -286,10 +290,13 @@ export class FileTransferService {
       return;
     }
 
-    while (transfer.writeQueue.length > 0) {
-      const nextBuffer = transfer.writeQueue.shift()!;
-      transfer.queuedBytes = Math.max(0, transfer.queuedBytes - nextBuffer.length);
+    while (transfer.pendingChunks.has(transfer.nextWriteIndex)) {
+      const nextBuffer = transfer.pendingChunks.get(transfer.nextWriteIndex)!;
+      transfer.pendingChunks.delete(transfer.nextWriteIndex);
+      transfer.pendingChunkBytes = Math.max(0, transfer.pendingChunkBytes - nextBuffer.length);
+      transfer.hash.update(nextBuffer);
       const canContinue = transfer.writeStream.write(nextBuffer);
+      transfer.nextWriteIndex += 1;
       if (!canContinue) {
         transfer.waitingDrain = true;
         this.attachDrainListener(transfer);
@@ -312,10 +319,28 @@ export class FileTransferService {
     });
   }
 
+  private expectedChunkLength(
+    transfer: IncomingTransfer,
+    index: number,
+    totalChunks: number
+  ): number {
+    if (transfer.totalBytes === 0) {
+      return 0;
+    }
+    const lastIndex = totalChunks - 1;
+    if (index === lastIndex) {
+      return transfer.totalBytes - FILE_CHUNK_SIZE_BYTES * lastIndex;
+    }
+    return FILE_CHUNK_SIZE_BYTES;
+  }
+
   onChunk(chunk: FileChunkPayload): { done: boolean; transferred: number; total: number } {
     const transfer = this.incoming.get(chunk.fileId);
     if (!transfer) {
       throw new Error('Transferência desconhecida');
+    }
+    if (transfer.streamErrored) {
+      throw new Error('Transferência em estado inválido.');
     }
 
     if (!Number.isInteger(chunk.index) || !Number.isInteger(chunk.total)) {
@@ -323,6 +348,11 @@ export class FileTransferService {
     }
     if (chunk.total <= 0 || chunk.index < 0 || chunk.index >= chunk.total) {
       throw new Error('Índice de chunk inválido');
+    }
+    const expectedTotal = this.getChunkCount(transfer.totalBytes);
+    if (chunk.total !== expectedTotal) {
+      this.failIncomingTransfer(transfer);
+      throw new Error('Total de chunks incompatível com o tamanho do arquivo.');
     }
 
     transfer.totalChunks = chunk.total;
@@ -335,25 +365,25 @@ export class FileTransferService {
     }
 
     const buffer = Buffer.from(chunk.dataBase64, 'base64');
-    transfer.hash.update(buffer);
-    if (transfer.waitingDrain) {
-      const nextQueuedBytes = transfer.queuedBytes + buffer.length;
-      if (nextQueuedBytes > FileTransferService.MAX_PENDING_WRITE_QUEUE_BYTES) {
-        this.failIncomingTransfer(transfer);
-        throw new Error('Fila de escrita excedeu limite de backpressure.');
-      }
-      transfer.writeQueue.push(buffer);
-      transfer.queuedBytes = nextQueuedBytes;
-    } else {
-      const canContinue = transfer.writeStream.write(buffer);
-      if (!canContinue) {
-        transfer.waitingDrain = true;
-        this.attachDrainListener(transfer);
-      }
+    const expectedLength = this.expectedChunkLength(transfer, chunk.index, chunk.total);
+    if (buffer.length !== expectedLength) {
+      this.failIncomingTransfer(transfer);
+      throw new Error('Tamanho de chunk incompatível com o manifesto do arquivo.');
     }
+
+    const nextPendingBytes = transfer.pendingChunkBytes + buffer.length;
+    if (nextPendingBytes > FileTransferService.MAX_PENDING_WRITE_QUEUE_BYTES) {
+      this.failIncomingTransfer(transfer);
+      throw new Error('Fila de escrita excedeu limite de backpressure.');
+    }
+
+    transfer.pendingChunks.set(chunk.index, buffer);
+    transfer.pendingChunkBytes = nextPendingBytes;
     transfer.receivedIndices.add(chunk.index);
     transfer.receivedChunks = transfer.receivedIndices.size;
     transfer.transferredBytes += buffer.length;
+
+    this.flushQueuedWrites(transfer);
 
     if (!this.hasWriteBacklog(transfer)) {
       this.resolveWritableWaiters(transfer);
@@ -372,6 +402,9 @@ export class FileTransferService {
     const transfer = this.incoming.get(fileId);
     if (!transfer) {
       throw new Error('Transferência não encontrada');
+    }
+    if (transfer.totalChunks === null || transfer.receivedChunks < transfer.totalChunks) {
+      throw new Error('Transferência ainda incompleta');
     }
 
     let streamClosed = true;
