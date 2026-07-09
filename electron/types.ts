@@ -177,6 +177,7 @@ export interface ConversationRow {
   createdAt: number;
   updatedAt: number;
   unreadCount: number;
+  lastReadAt: number;
 }
 
 export interface AnnouncementReactionSummary {
@@ -193,6 +194,7 @@ export type AppEvent =
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
+  | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | {
       type: 'message:status';
       messageId: string;

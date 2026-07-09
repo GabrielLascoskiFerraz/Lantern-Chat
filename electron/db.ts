@@ -300,18 +300,60 @@ export class DbService {
     return result;
   }
 
-  incrementUnread(conversationId: string): void {
-    this.db
-      .prepare(
-        'UPDATE conversations SET unreadCount = unreadCount + 1, updatedAt = ? WHERE id = ?'
-      )
-      .run(Date.now(), conversationId);
+  getConversationUnreadCount(conversationId: string): number {
+    const row = this.db
+      .prepare('SELECT unreadCount FROM conversations WHERE id = ?')
+      .get(conversationId) as { unreadCount: number | null } | undefined;
+    return Math.max(0, Number(row?.unreadCount || 0));
   }
 
-  markConversationRead(conversationId: string): void {
-    this.db
-      .prepare('UPDATE conversations SET unreadCount = 0, updatedAt = ? WHERE id = ?')
-      .run(Date.now(), conversationId);
+  getConversationLastReadAt(conversationId: string): number {
+    const row = this.db
+      .prepare('SELECT lastReadAt FROM conversations WHERE id = ?')
+      .get(conversationId) as { lastReadAt: number | null } | undefined;
+    return Math.max(0, Number(row?.lastReadAt || 0));
+  }
+
+  incrementUnread(conversationId: string, messageCreatedAt?: number): number {
+    const tx = this.db.transaction((id: string, createdAt?: number) => {
+      const row = this.db
+        .prepare('SELECT unreadCount, lastReadAt FROM conversations WHERE id = ?')
+        .get(id) as { unreadCount: number | null; lastReadAt: number | null } | undefined;
+      if (!row) return 0;
+
+      const currentUnread = Math.max(0, Number(row.unreadCount || 0));
+      const lastReadAt = Math.max(0, Number(row.lastReadAt || 0));
+      const normalizedCreatedAt =
+        typeof createdAt === 'number' && Number.isFinite(createdAt) && createdAt > 0
+          ? Math.trunc(createdAt)
+          : 0;
+
+      if (normalizedCreatedAt > 0 && normalizedCreatedAt <= lastReadAt) {
+        return currentUnread;
+      }
+
+      const nextUnread = currentUnread + 1;
+      this.db
+        .prepare('UPDATE conversations SET unreadCount = ?, updatedAt = ? WHERE id = ?')
+        .run(nextUnread, Date.now(), id);
+      return nextUnread;
+    });
+
+    return tx(conversationId, messageCreatedAt);
+  }
+
+  markConversationRead(conversationId: string): string[] {
+    const tx = this.db.transaction((id: string) => {
+      const previousLastReadAt = this.getConversationLastReadAt(id);
+      const latestMessageAt = this.getLatestConversationTimestamp(id);
+      const nextLastReadAt = Math.max(previousLastReadAt, latestMessageAt);
+      this.db
+        .prepare('UPDATE conversations SET unreadCount = 0, lastReadAt = ?, updatedAt = ? WHERE id = ?')
+        .run(nextLastReadAt, Date.now(), id);
+      return this.markIncomingMessagesRead(id);
+    });
+
+    return tx(conversationId);
   }
 
   markConversationUnread(conversationId: string): void {
@@ -431,8 +473,9 @@ export class DbService {
       .run(status, status, status, status, messageId);
   }
 
-  markIncomingMessagesRead(conversationId: string, limit = 500): string[] {
-    const normalizedLimit = Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 500;
+  markIncomingMessagesRead(conversationId: string, limit?: number): string[] {
+    const hasLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0;
+    const normalizedLimit = hasLimit ? Math.trunc(limit) : 0;
     const candidateRows = this.db
       .prepare(
         `SELECT messageId
@@ -443,9 +486,9 @@ export class DbService {
            AND deletedAt IS NULL
            AND status = 'delivered'
          ORDER BY createdAt ASC, messageId ASC
-         LIMIT ?`
+         ${hasLimit ? 'LIMIT ?' : ''}`
       )
-      .all(conversationId, normalizedLimit) as Array<{ messageId: string }>;
+      .all(...(hasLimit ? [conversationId, normalizedLimit] : [conversationId])) as Array<{ messageId: string }>;
 
     const ids = candidateRows.map((row) => row.messageId).filter((value) => value.length > 0);
     if (ids.length === 0) {

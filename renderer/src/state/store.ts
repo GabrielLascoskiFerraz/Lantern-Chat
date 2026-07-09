@@ -50,6 +50,7 @@ interface LanternState {
   themeMode: 'system' | 'light' | 'dark';
   resolvedTheme: 'light' | 'dark';
   ready: boolean;
+  startupError: string | null;
   syncActive: boolean;
   loadingConversationId: string | null;
   setSearch: (value: string) => void;
@@ -94,6 +95,7 @@ interface LanternState {
   forgetContactConversation: (conversationId: string) => Promise<void>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<void>;
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) => Promise<void>;
+  forceRelayRediscovery: () => Promise<void>;
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<void>;
   addManualPeer: (address: string, port: number) => Promise<void>;
   openFile: (filePath: string) => Promise<void>;
@@ -301,6 +303,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   themeMode: initialThemeMode,
   resolvedTheme: resolveTheme(initialThemeMode, initialSystemDark),
   ready: false,
+  startupError: null,
   syncActive: false,
   loadingConversationId: null,
   setSearch: (value) => set({ search: value }),
@@ -322,20 +325,22 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     });
   },
   loadInitial: async () => {
-    const [profile, relaySettings, startupSettings, peers, onlinePeers, unreadByConversation] =
-      await Promise.all([
-      ipcClient.getProfile(),
-      ipcClient.getRelaySettings(),
-      ipcClient.getStartupSettings(),
-      ipcClient.getKnownPeers(),
-      ipcClient.getOnlinePeers(),
-      ipcClient.getConversations()
-      ]);
+    try {
+      set({ startupError: null });
+      const [profile, relaySettings, startupSettings, peers, onlinePeers, unreadByConversation] =
+        await Promise.all([
+          ipcClient.getProfile(),
+          ipcClient.getRelaySettings(),
+          ipcClient.getStartupSettings(),
+          ipcClient.getKnownPeers(),
+          ipcClient.getOnlinePeers(),
+          ipcClient.getConversations()
+        ]);
 
-    const conversationIds = [
-      ANNOUNCEMENTS_ID,
-      ...peers.map((peer) => `dm:${peer.deviceId}`)
-    ];
+      const conversationIds = [
+        ANNOUNCEMENTS_ID,
+        ...peers.map((peer) => `dm:${peer.deviceId}`)
+      ];
     const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
 
     const onboardingKey = `${PROFILE_ONBOARDING_KEY_PREFIX}.${profile.deviceId}`;
@@ -416,6 +421,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
     await ipcClient.markConversationRead(current);
     await ipcClient.setActiveConversation(current);
+    set((state) => ({
+      unreadByConversation: {
+        ...state.unreadByConversation,
+        [current]: 0
+      }
+    }));
 
     if (unsubscribeEvents) {
       unsubscribeEvents();
@@ -571,12 +582,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             return state;
           }
 
-          const nextUnread = { ...state.unreadByConversation };
-          if (state.selectedConversationId !== event.message.conversationId) {
-            nextUnread[event.message.conversationId] =
-              (nextUnread[event.message.conversationId] || 0) + 1;
-          }
-
           const recent = pruneRecent(state.recentMessageIds);
           recent[event.message.messageId] = Date.now();
 
@@ -589,12 +594,27 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               ...state.conversationPreviewById,
               [event.message.conversationId]: previewFromMessage(event.message)
             },
-            unreadByConversation: nextUnread,
             typingByConversation: {
               ...state.typingByConversation,
               [event.message.conversationId]: false
             },
             recentMessageIds: recent
+          };
+        });
+        return;
+      }
+
+      if (event.type === 'conversation:unread') {
+        const unreadCount = Math.max(0, Number(event.unreadCount) || 0);
+        set((state) => {
+          if ((state.unreadByConversation[event.conversationId] || 0) === unreadCount) {
+            return state;
+          }
+          return {
+            unreadByConversation: {
+              ...state.unreadByConversation,
+              [event.conversationId]: unreadCount
+            }
           };
         });
         return;
@@ -916,6 +936,35 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     peerRefreshTimer = window.setInterval(() => {
       void refreshPeersSnapshot();
     }, 10_000);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível carregar o estado inicial do Lantern.';
+      if (get().profile) {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        set((state) => ({
+          ready: true,
+          startupError: null,
+          loadingConversationId: null,
+          toasts: [...state.toasts, { id, level: 'warning', message }]
+        }));
+        window.setTimeout(() => get().dismissToast(id), 4200);
+        return;
+      }
+      set((state) => ({
+        ready: true,
+        startupError: message,
+        relaySettings:
+          state.relaySettings || {
+            automatic: true,
+            host: '',
+            port: 43190,
+            connected: false,
+            endpoint: null
+          }
+      }));
+    }
   },
   selectConversation: async (conversationId) => {
     const preSelectState = get();
@@ -938,10 +987,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       unreadAnchorMessageIdByConversation: {
         ...state.unreadAnchorMessageIdByConversation,
         [conversationId]: existingAnchorMessageId
-      },
-      unreadByConversation: {
-        ...state.unreadByConversation,
-        [conversationId]: 0
       }
     }));
     try {
@@ -1526,6 +1571,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   },
   updateRelaySettings: async (input) => {
     const relaySettings = await ipcClient.updateRelaySettings(input);
+    set({ relaySettings });
+  },
+  forceRelayRediscovery: async () => {
+    const relaySettings = await ipcClient.forceRelayRediscovery();
     set({ relaySettings });
   },
   updateStartupSettings: async (input) => {

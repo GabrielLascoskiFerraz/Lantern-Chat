@@ -20,6 +20,7 @@ interface SettingsModalProps {
   profile: Profile;
   relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
+  onForceRelayRediscovery: () => Promise<void>;
   onClose: () => void;
   onSave: (payload: {
     profile: {
@@ -45,6 +46,7 @@ export const SettingsModal = ({
   profile,
   relaySettings,
   startupSettings,
+  onForceRelayRediscovery,
   onClose,
   onSave
 }: SettingsModalProps) => {
@@ -60,6 +62,7 @@ export const SettingsModal = ({
   const [downloadsDir, setDownloadsDir] = useState(startupSettings?.downloadsDir || '');
   const [backupBusy, setBackupBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
+  const [rediscoverBusy, setRediscoverBusy] = useState(false);
   const [backupFeedback, setBackupFeedback] = useState('');
   const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
   const emojiGroups = {
@@ -130,6 +133,7 @@ export const SettingsModal = ({
     setDownloadsDir(startupSettings?.downloadsDir || '');
     setBackupBusy(false);
     setRestoreBusy(false);
+    setRediscoverBusy(false);
     setBackupFeedback('');
   };
   const dialogSurfaceStyle = {
@@ -189,6 +193,16 @@ export const SettingsModal = ({
       );
     } finally {
       setRestoreBusy(false);
+    }
+  };
+
+  const handleForceRediscovery = async (): Promise<void> => {
+    if (rediscoverBusy) return;
+    setRediscoverBusy(true);
+    try {
+      await onForceRelayRediscovery();
+    } finally {
+      setRediscoverBusy(false);
     }
   };
 
@@ -340,6 +354,15 @@ export const SettingsModal = ({
                     />
                   </div>
                 )}
+                <div className="settings-relay-actions">
+                  <Button
+                    appearance="secondary"
+                    disabled={rediscoverBusy}
+                    onClick={() => void handleForceRediscovery()}
+                  >
+                    {rediscoverBusy ? 'Redetectando...' : 'Redetectar agora'}
+                  </Button>
+                </div>
                 <Text size={200} className="settings-relay-help">
                   Automático usa descoberta na rede local. Manual força um Relay específico.
                 </Text>

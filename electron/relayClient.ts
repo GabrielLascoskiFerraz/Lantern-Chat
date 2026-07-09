@@ -1,6 +1,8 @@
 import BonjourService, { Browser, Service } from 'bonjour-service';
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
+import { createSocket } from 'node:dgram';
+import os from 'node:os';
 import { APP_VERSION } from './config';
 import { Profile, ProtocolFrame } from './types';
 
@@ -112,6 +114,8 @@ interface DiscoveredRelayEndpoint {
 
 const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
+const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
+const RELAY_DISCOVERY_UDP_RESPONSE = 'lantern:relay:announce';
 const DEFAULT_RELAY_PORT = Number(process.env.LANTERN_RELAY_PORT || 43190);
 const DEFAULT_RELAY_URL = `ws://127.0.0.1:${DEFAULT_RELAY_PORT}`;
 const ACK_TIMEOUT_MS = 10_000;
@@ -119,11 +123,12 @@ const HEARTBEAT_INTERVAL_MS = 8_000;
 const RECONNECT_DELAY_INITIAL_MS = 1_200;
 const RECONNECT_DELAY_MAX_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 8_000;
-const DISCOVERED_ENDPOINT_TTL_MS = 35_000;
+const DISCOVERED_ENDPOINT_TTL_MS = 180_000;
 const DISCOVERY_REFRESH_INTERVAL_MS = 12_000;
 const LAST_HEALTHY_RETRY_WINDOW_MS = 14_000;
 const PRESENCE_STALE_TIMEOUT_MS = 90_000;
 const HELLO_ACK_TIMEOUT_MS = 12_000;
+const UDP_DISCOVERY_TIMEOUT_MS = 1_600;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -174,6 +179,35 @@ const formatWsUrl = (host: string, port: number): string | null => {
   } catch {
     return null;
   }
+};
+
+const ipv4ToNumber = (value: string): number | null => {
+  const parts = value.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return null;
+  }
+  return parts.reduce((acc, part) => ((acc << 8) | part) >>> 0, 0);
+};
+
+const numberToIpv4 = (value: number): string =>
+  [24, 16, 8, 0].map((shift) => String((value >>> shift) & 255)).join('.');
+
+const getUdpDiscoveryTargets = (): string[] => {
+  const targets = new Set<string>(['255.255.255.255']);
+  const interfaces = os.networkInterfaces();
+
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.family !== 'IPv4' || entry.internal) continue;
+      const address = ipv4ToNumber(entry.address);
+      const netmask = ipv4ToNumber(entry.netmask);
+      if (address === null || netmask === null) continue;
+      const broadcast = (address | (~netmask >>> 0)) >>> 0;
+      targets.add(numberToIpv4(broadcast));
+    }
+  }
+
+  return Array.from(targets);
 };
 
 const normalizeManualHostInput = (
@@ -367,6 +401,7 @@ export class RelayClient {
   private lastHealthyEndpoint: string | null = null;
   private lastHealthyEndpointFailedAt = 0;
   private lastDiscoveryRefreshAt = 0;
+  private udpProbeInFlight = false;
   private profile: Profile;
   private lastPresenceAt = 0;
   private lastPresenceRevision = -1;
@@ -386,7 +421,7 @@ export class RelayClient {
     }
 
     this.startHeartbeatLoop();
-    await this.connectNow();
+    this.connectWithBackoff(true);
   }
 
   stop(): void {
@@ -400,6 +435,7 @@ export class RelayClient {
     this.relayPeersById.clear();
     this.discoveredEndpoints.clear();
     this.discoveredEndpointByServiceKey.clear();
+    this.udpProbeInFlight = false;
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -562,6 +598,12 @@ export class RelayClient {
 
   getCurrentEndpoint(): string | null {
     return this.selectedEndpoint;
+  }
+
+  forceRediscover(): void {
+    if (!this.started) return;
+    this.refreshRelayDiscoveryIfNeeded(true);
+    this.connectWithBackoff(true);
   }
 
   async sendFrame(frame: ProtocolFrame): Promise<RelaySendResult> {
@@ -823,6 +865,7 @@ export class RelayClient {
   private scheduleReconnect(): void {
     if (!this.started) return;
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, RECONNECT_DELAY_MAX_MS);
+    this.refreshRelayDiscoveryIfNeeded();
     this.connectWithBackoff();
   }
 
@@ -1168,7 +1211,10 @@ export class RelayClient {
         }
         this.discoveredEndpointByServiceKey.set(serviceKey, url);
         this.discoveredEndpoints.set(url, { url, observedAt: Date.now() });
-        if (this.selectedEndpoint !== url && this.selectedEndpoint === DEFAULT_RELAY_URL) {
+        if (!this.isConnected() || this.selectedEndpoint !== url) {
+          if (this.selectedEndpoint && this.selectedEndpoint !== url) {
+            this.lastHealthyEndpointFailedAt = Date.now();
+          }
           this.connectWithBackoff(true);
         }
       });
@@ -1188,6 +1234,8 @@ export class RelayClient {
     } catch {
       this.callbacks.onWarning?.('Não foi possível usar descoberta automática do relay (mDNS).');
     }
+
+    this.probeRelayUdp();
   }
 
   private refreshRelayDiscoveryIfNeeded(force = false): void {
@@ -1218,6 +1266,91 @@ export class RelayClient {
       this.bonjour = null;
     }
     this.startRelayDiscovery();
+    this.probeRelayUdp();
+  }
+
+  private probeRelayUdp(): void {
+    if (!this.started) return;
+    if (!this.endpointSettings.automatic) return;
+    if (this.explicitRelayUrl) return;
+    if (this.udpProbeInFlight) return;
+
+    this.udpProbeInFlight = true;
+    const socket = createSocket('udp4');
+    let closed = false;
+    let timer: NodeJS.Timeout | null = null;
+    const port = this.endpointSettings.port || DEFAULT_RELAY_PORT;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      this.udpProbeInFlight = false;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+    };
+
+    timer = setTimeout(close, UDP_DISCOVERY_TIMEOUT_MS);
+    timer.unref?.();
+
+    socket.on('error', close);
+    socket.on('message', (raw, remote) => {
+      const endpoint = this.parseUdpRelayAnnouncement(raw, remote.address);
+      if (!endpoint) return;
+      this.discoveredEndpoints.set(endpoint, { url: endpoint, observedAt: Date.now() });
+      if (!this.isConnected() || this.selectedEndpoint !== endpoint) {
+        if (this.selectedEndpoint && this.selectedEndpoint !== endpoint) {
+          this.lastHealthyEndpointFailedAt = Date.now();
+        }
+        this.connectWithBackoff(true);
+      }
+      close();
+    });
+
+    socket.bind(0, () => {
+      if (closed) return;
+      try {
+        socket.setBroadcast(true);
+      } catch {
+        // broadcast pode ser negado em alguns ambientes; envio direto ainda pode funcionar
+      }
+
+      const payload = Buffer.from(
+        JSON.stringify({
+          type: RELAY_DISCOVERY_UDP_QUERY,
+          version: APP_VERSION
+        })
+      );
+
+      for (const target of getUdpDiscoveryTargets()) {
+        socket.send(payload, port, target, () => undefined);
+      }
+    });
+  }
+
+  private parseUdpRelayAnnouncement(raw: Buffer, remoteAddress: string): string | null {
+    let envelope: Record<string, unknown> | null = null;
+    try {
+      envelope = asRecord(JSON.parse(raw.toString('utf8')));
+    } catch {
+      return null;
+    }
+
+    if (envelope?.type !== RELAY_DISCOVERY_UDP_RESPONSE) {
+      return null;
+    }
+
+    const rawPort = Number(envelope.port || DEFAULT_RELAY_PORT);
+    const port =
+      Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535
+        ? Math.trunc(rawPort)
+        : DEFAULT_RELAY_PORT;
+    return formatWsUrl(remoteAddress, port);
   }
 
   private waitUntilReady(timeoutMs: number): Promise<void> {

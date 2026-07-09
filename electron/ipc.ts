@@ -40,6 +40,13 @@ export interface IpcBindings {
     connected: boolean;
     endpoint: string | null;
   };
+  forceRelayRediscovery: () => {
+    automatic: boolean;
+    host: string;
+    port: number;
+    connected: boolean;
+    endpoint: string | null;
+  };
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => {
     supported: boolean;
     openAtLogin: boolean;
@@ -344,6 +351,7 @@ export const registerIpc = (
   ipcMain.handle('lantern:updateRelaySettings', (_event, input) =>
     bindings.updateRelaySettings(input)
   );
+  ipcMain.handle('lantern:forceRelayRediscovery', () => bindings.forceRelayRediscovery());
   ipcMain.handle('lantern:updateStartupSettings', (_event, input) =>
     bindings.updateStartupSettings(input)
   );

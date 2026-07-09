@@ -628,19 +628,6 @@ class LanternApp {
     });
 
     this.relay.setEndpointSettings(this.relaySettings);
-    await this.relay.start();
-
-    if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
-      console.log(
-        '[Lantern] startup',
-        JSON.stringify({
-          mode: this.networkMode,
-          instance: process.env.LANTERN_INSTANCE || null,
-          userData: app.getPath('userData'),
-          deviceId: this.profile.deviceId
-        })
-      );
-    }
 
     this.notifications.setNavigateHandler((conversationId) => {
       this.mainWindow?.show();
@@ -661,6 +648,7 @@ class LanternApp {
       getRelaySettings: () => this.getRelaySettingsSnapshot(),
       getStartupSettings: () => this.getStartupSettingsSnapshot(),
       updateRelaySettings: (input) => this.updateRelaySettings(input),
+      forceRelayRediscovery: () => this.forceRelayRediscovery(),
       updateStartupSettings: (input) => this.updateStartupSettings(input),
       sendText: (peerId, text, replyTo) => this.messageService.sendText(peerId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
@@ -691,7 +679,7 @@ class LanternApp {
         this.markConversationRead(conversationId);
       },
       markConversationRead: (conversationId) => this.markConversationRead(conversationId),
-      markConversationUnread: (conversationId) => this.db.markConversationUnread(conversationId),
+      markConversationUnread: (conversationId) => this.markConversationUnread(conversationId),
       clearConversation: (conversationId) => this.clearConversation(conversationId),
       forgetContactConversation: (conversationId) => this.forgetContactConversation(conversationId),
       getConversations: () =>
@@ -729,6 +717,36 @@ class LanternApp {
     });
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
     this.reconcileLegacyIncomingFilePaths();
+
+    void this.relay.start().then(() => {
+      this.emitEvent({
+        type: 'relay:connection',
+        connected: this.relay?.isConnected() || false,
+        endpoint: this.relay?.getCurrentEndpoint() || null
+      });
+    }).catch((error) => {
+      console.error(
+        '[Lantern][Relay] falha ao iniciar cliente relay:',
+        error instanceof Error ? error.message : String(error)
+      );
+      this.emitEvent({
+        type: 'ui:toast',
+        level: 'warning',
+        message: 'Não foi possível iniciar conexão com o Relay. A UI continua disponível.'
+      });
+    });
+
+    if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+      console.log(
+        '[Lantern] startup',
+        JSON.stringify({
+          mode: this.networkMode,
+          instance: process.env.LANTERN_INSTANCE || null,
+          userData: app.getPath('userData'),
+          deviceId: this.profile.deviceId
+        })
+      );
+    }
 
     this.tray.create(this.mainWindow, {
       appName: 'Lantern',
@@ -950,6 +968,23 @@ class LanternApp {
     this.relay?.setEndpointSettings(persisted);
 
     return this.getRelaySettingsSnapshot();
+  }
+
+  private forceRelayRediscovery(): {
+    automatic: boolean;
+    host: string;
+    port: number;
+    connected: boolean;
+    endpoint: string | null;
+  } {
+    this.relay?.forceRediscover();
+    const snapshot = this.getRelaySettingsSnapshot();
+    this.emitEvent({
+      type: 'relay:connection',
+      connected: snapshot.connected,
+      endpoint: snapshot.endpoint
+    });
+    return snapshot;
   }
 
   private handleRelayPresence(relayPeers: RelayPeerSnapshot[]): void {
@@ -1318,8 +1353,17 @@ class LanternApp {
     }
   }
 
+  private emitConversationUnread(conversationId: string): void {
+    this.emitEvent({
+      type: 'conversation:unread',
+      conversationId,
+      unreadCount: this.db.getConversationUnreadCount(conversationId)
+    });
+  }
+
   private markConversationRead(conversationId: string): void {
-    this.db.markConversationRead(conversationId);
+    const readMessageIds = this.db.markConversationRead(conversationId);
+    this.emitConversationUnread(conversationId);
 
     if (!conversationId.startsWith('dm:')) {
       return;
@@ -1330,7 +1374,6 @@ class LanternApp {
       return;
     }
 
-    const readMessageIds = this.db.markIncomingMessagesRead(conversationId, 1000);
     if (readMessageIds.length === 0) {
       return;
     }
@@ -1350,7 +1393,12 @@ class LanternApp {
     }
   }
 
-  private bumpUnreadIfBackground(conversationId: string): void {
+  private markConversationUnread(conversationId: string): void {
+    this.db.markConversationUnread(conversationId);
+    this.emitConversationUnread(conversationId);
+  }
+
+  private bumpUnreadIfBackground(conversationId: string, messageCreatedAt?: number): void {
     const isVisibleFocused =
       Boolean(this.mainWindow) &&
       this.mainWindow!.isVisible() &&
@@ -1361,7 +1409,11 @@ class LanternApp {
       this.markConversationRead(conversationId);
       return;
     }
-    this.db.incrementUnread(conversationId);
+    const before = this.db.getConversationUnreadCount(conversationId);
+    const after = this.db.incrementUnread(conversationId, messageCreatedAt);
+    if (after !== before) {
+      this.emitConversationUnread(conversationId);
+    }
   }
 
   private notifyIncomingIfNeeded(
@@ -2037,7 +2089,7 @@ class LanternApp {
 
         const inserted = this.db.saveMessage(row);
         if (inserted) {
-          this.bumpUnreadIfBackground(conversationId);
+          this.bumpUnreadIfBackground(conversationId, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
           this.applyQueuedReactionsForMessage(row);
           this.notifyIncomingIfNeeded(
@@ -2104,7 +2156,7 @@ class LanternApp {
 
         const inserted = this.db.saveMessage(row);
         if (inserted) {
-          this.bumpUnreadIfBackground(ANNOUNCEMENTS_CONVERSATION_ID);
+          this.bumpUnreadIfBackground(ANNOUNCEMENTS_CONVERSATION_ID, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
           this.notifyIncomingIfNeeded(
             row,
@@ -2321,7 +2373,7 @@ class LanternApp {
 
             if (result.inserted) {
               if (result.row.direction === 'in') {
-                this.bumpUnreadIfBackground(result.row.conversationId);
+                this.bumpUnreadIfBackground(result.row.conversationId, result.row.createdAt);
                 const syncSender =
                   this.peersById.get(result.row.senderDeviceId) ||
                   (activePeer && activePeer.deviceId === result.row.senderDeviceId
@@ -2448,7 +2500,7 @@ class LanternApp {
 
         const inserted = this.db.saveMessage(row);
         if (inserted) {
-          this.bumpUnreadIfBackground(conversationId);
+          this.bumpUnreadIfBackground(conversationId, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
           this.applyQueuedReactionsForMessage(row);
           this.notifyIncomingIfNeeded(

@@ -83,6 +83,7 @@ export type AppEvent =
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
+  | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | {
       type: 'message:status';
       messageId: string;
@@ -128,6 +129,7 @@ interface LanternApi {
     host?: string;
     port?: number;
   }) => Promise<RelaySettings>;
+  forceRelayRediscovery: () => Promise<RelaySettings>;
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<StartupSettings>;
   sendText: (
     peerId: string,
@@ -214,6 +216,7 @@ export const ipcClient = {
   getStartupSettings: () => window.lantern.getStartupSettings(),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     window.lantern.updateRelaySettings(input),
+  forceRelayRediscovery: () => window.lantern.forceRelayRediscovery(),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
     window.lantern.updateStartupSettings(input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyReference | null) =>

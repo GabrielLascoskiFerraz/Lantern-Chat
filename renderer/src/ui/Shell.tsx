@@ -1,4 +1,4 @@
-import { Spinner } from '@fluentui/react-components';
+import { Button, Spinner, Text } from '@fluentui/react-components';
 import { useCallback, useMemo } from 'react';
 import { ipcClient } from '../api/ipcClient';
 import { useLanternStore } from '../state/store';
@@ -12,6 +12,7 @@ const ANNOUNCEMENTS_ID = 'announcements';
 export const Shell = () => {
   const {
     ready,
+    startupError,
     profile,
     relaySettings,
     startupSettings,
@@ -51,6 +52,7 @@ export const Shell = () => {
     setSettingsOpen,
     updateProfile,
     updateRelaySettings,
+    forceRelayRediscovery,
     updateStartupSettings,
     transfers,
     toasts,
@@ -59,6 +61,7 @@ export const Shell = () => {
     setThemeMode,
     syncActive,
     loadingConversationId,
+    loadInitial,
     loadOlderMessages,
     ensureConversationMessagesLoaded
   } = useLanternStore();
@@ -200,10 +203,33 @@ export const Shell = () => {
     );
   };
 
-  if (!ready || !profile) {
+  if (!ready) {
     return (
       <div className="loading-screen">
         <Spinner size="large" />
+      </div>
+    );
+  }
+
+  if (startupError || !profile) {
+    return (
+      <div className="loading-screen loading-screen-error">
+        <div className="startup-error-card">
+          <Text weight="semibold" size={500}>
+            Não foi possível carregar o Lantern
+          </Text>
+          <Text size={300}>
+            {startupError || 'O perfil local ainda não está disponível.'}
+          </Text>
+          <Text size={200} className="startup-error-help">
+            A conexão com o Relay não deve bloquear a abertura do app. Tente recarregar o estado local.
+          </Text>
+          <div className="startup-error-actions">
+            <Button appearance="primary" onClick={() => void loadInitial()}>
+              Tentar novamente
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -251,6 +277,7 @@ export const Shell = () => {
         profile={profile}
         relaySettings={relaySettings}
         startupSettings={startupSettings}
+        onForceRelayRediscovery={forceRelayRediscovery}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
           await updateProfile(payload.profile);

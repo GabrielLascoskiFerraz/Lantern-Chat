@@ -14,6 +14,7 @@ const api = {
   getStartupSettings: () => ipcRenderer.invoke('lantern:getStartupSettings'),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     ipcRenderer.invoke('lantern:updateRelaySettings', input),
+  forceRelayRediscovery: () => ipcRenderer.invoke('lantern:forceRelayRediscovery'),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>

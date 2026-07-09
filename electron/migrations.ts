@@ -29,11 +29,12 @@ export const runMigrations = (db: Database.Database): void => {
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
       peerDeviceId TEXT,
-      title TEXT,
-      createdAt INTEGER,
-      updatedAt INTEGER,
-      unreadCount INTEGER DEFAULT 0
-    );
+	      title TEXT,
+	      createdAt INTEGER,
+	      updatedAt INTEGER,
+	      unreadCount INTEGER DEFAULT 0,
+	      lastReadAt INTEGER DEFAULT 0
+	    );
 
     CREATE TABLE IF NOT EXISTS messages (
       messageId TEXT PRIMARY KEY,
@@ -106,12 +107,28 @@ export const runMigrations = (db: Database.Database): void => {
     db.exec("ALTER TABLE profile ADD COLUMN statusMessage TEXT NOT NULL DEFAULT 'Disponível';");
   }
 
-  const peerColumns = db.prepare('PRAGMA table_info(peers_cache)').all() as Array<{ name: string }>;
-  if (!peerColumns.some((column) => column.name === 'statusMessage')) {
-    db.exec('ALTER TABLE peers_cache ADD COLUMN statusMessage TEXT;');
-  }
+	  const peerColumns = db.prepare('PRAGMA table_info(peers_cache)').all() as Array<{ name: string }>;
+	  if (!peerColumns.some((column) => column.name === 'statusMessage')) {
+	    db.exec('ALTER TABLE peers_cache ADD COLUMN statusMessage TEXT;');
+	  }
 
-  const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+	  const conversationColumns = db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>;
+	  if (!conversationColumns.some((column) => column.name === 'lastReadAt')) {
+	    db.exec('ALTER TABLE conversations ADD COLUMN lastReadAt INTEGER DEFAULT 0;');
+	  }
+	  db.exec(`
+	    UPDATE conversations
+	    SET lastReadAt = COALESCE((
+	      SELECT MAX(messages.createdAt)
+	      FROM messages
+	      WHERE messages.conversationId = conversations.id
+	        AND messages.deletedAt IS NULL
+	    ), 0)
+	    WHERE COALESCE(unreadCount, 0) = 0
+	      AND COALESCE(lastReadAt, 0) = 0;
+	  `);
+
+	  const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
   if (!messageColumns.some((column) => column.name === 'reaction')) {
     db.exec('ALTER TABLE messages ADD COLUMN reaction TEXT;');
   }

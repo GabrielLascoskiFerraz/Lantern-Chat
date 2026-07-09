@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createSocket, type RemoteInfo, type Socket as UdpSocket } from 'node:dgram';
 import fs from 'node:fs';
 import { createServer, IncomingMessage, Server as HttpServer } from 'node:http';
 import path from 'node:path';
@@ -8,6 +9,8 @@ import { RawData, WebSocket, WebSocketServer } from 'ws';
 const RELAY_VERSION = '1.0.0';
 const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
+const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
+const RELAY_DISCOVERY_UDP_RESPONSE = 'lantern:relay:announce';
 const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
@@ -313,6 +316,7 @@ class LanternRelay {
   private announcementSweepTimer: NodeJS.Timeout | null = null;
   private bonjour: BonjourService | null = null;
   private published: Service | null = null;
+  private udpSocket: UdpSocket | null = null;
   private presenceRevision = 0;
 
   constructor(config: RelayConfig) {
@@ -336,6 +340,7 @@ class LanternRelay {
     });
 
     this.startBonjour();
+    this.startUdpDiscoveryResponder();
     this.startHeartbeatLoop();
     this.startPresenceBroadcastLoop();
     this.startAnnouncementSweepLoop();
@@ -365,6 +370,14 @@ class LanternRelay {
     if (this.announcementSweepTimer) {
       clearInterval(this.announcementSweepTimer);
       this.announcementSweepTimer = null;
+    }
+    if (this.udpSocket) {
+      try {
+        this.udpSocket.close();
+      } catch {
+        // ignore
+      }
+      this.udpSocket = null;
     }
 
     for (const session of this.sessionsBySocket.values()) {
@@ -426,6 +439,78 @@ class LanternRelay {
     } catch (error) {
       console.warn('[LanternRelay] mDNS indisponível, seguindo sem anúncio:', error);
     }
+  }
+
+  private startUdpDiscoveryResponder(): void {
+    if (this.udpSocket) return;
+
+    try {
+      const socket = createSocket('udp4');
+      this.udpSocket = socket;
+
+      socket.on('error', (error) => {
+        console.warn('[LanternRelay] aviso UDP discovery:', error);
+        if (this.udpSocket === socket) {
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          this.udpSocket = null;
+        }
+      });
+
+      socket.on('message', (raw, remote) => this.handleUdpDiscoveryMessage(raw, remote));
+
+      socket.bind(this.config.port, this.config.host, () => {
+        try {
+          socket.setBroadcast(true);
+        } catch {
+          // nem todo ambiente permite broadcast explicitamente
+        }
+        logRelay('udp_discovery_ready', {
+          endpoint: `udp://${this.config.host}:${this.config.port}`
+        });
+      });
+    } catch (error) {
+      console.warn('[LanternRelay] UDP discovery indisponível:', error);
+      this.udpSocket = null;
+    }
+  }
+
+  private handleUdpDiscoveryMessage(raw: Buffer, remote: RemoteInfo): void {
+    const socket = this.udpSocket;
+    if (!socket) return;
+
+    let message: JsonRecord | null = null;
+    try {
+      const parsed = JSON.parse(raw.toString('utf8')) as unknown;
+      message = asRecord(parsed);
+    } catch {
+      return;
+    }
+
+    if (message?.type !== RELAY_DISCOVERY_UDP_QUERY) {
+      return;
+    }
+
+    const response = Buffer.from(
+      JSON.stringify({
+        type: RELAY_DISCOVERY_UDP_RESPONSE,
+        version: RELAY_VERSION,
+        port: this.config.port,
+        serverTime: Date.now()
+      })
+    );
+
+    socket.send(response, remote.port, remote.address, (error) => {
+      if (!error) return;
+      logRelay('udp_discovery_reply_failed', {
+        remoteAddress: remote.address,
+        remotePort: remote.port,
+        message: error.message
+      });
+    });
   }
 
   private startHeartbeatLoop(): void {
