@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { Component, ErrorInfo, ReactNode, useEffect, useMemo } from 'react';
 import {
   FluentProvider,
   createDarkTheme,
@@ -30,6 +30,39 @@ const brandPalette = {
 
 const lightTheme = createLightTheme(brandPalette);
 const darkTheme = createDarkTheme(brandPalette);
+
+class AppErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[Lantern] erro fatal na interface:', error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="loading-screen loading-screen-error">
+          <div className="startup-error-card">
+            <strong>Não foi possível renderizar a interface</strong>
+            <span>O Lantern manteve o processo ativo. Recarregue a interface para tentar novamente.</span>
+            <button type="button" onClick={() => this.setState({ error: null })}>
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 const configureTheme = (theme: Theme): Theme => ({
   ...theme,
@@ -75,7 +108,9 @@ export default function App() {
 
   return (
     <FluentProvider theme={theme} className="app-root">
-      <Shell />
+      <AppErrorBoundary>
+        <Shell />
+      </AppErrorBoundary>
     </FluentProvider>
   );
 }

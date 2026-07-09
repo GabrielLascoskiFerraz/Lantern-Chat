@@ -21,6 +21,48 @@ export interface Peer {
   source: 'relay' | 'mdns' | 'udp' | 'manual' | 'cache';
 }
 
+export interface GroupInfo {
+  groupId: string;
+  name: string;
+  emoji: string;
+  avatarBg: string;
+  description: string;
+  createdByDeviceId: string;
+  createdAt: number;
+  updatedAt: number;
+  lastEventSeq: number;
+  deletedAt: number | null;
+  missingOnRelay?: boolean;
+  settings: {
+    allowMembersToPin: boolean;
+    allowMembersToEditInfo: boolean;
+  };
+}
+
+export interface StickerCatalogItem {
+  id: string;
+  label: string;
+  fileName: string;
+  relativePath: string;
+  url: string;
+  previewDataUrl: string | null;
+  size: number;
+  category: string;
+  updatedAt: number;
+}
+
+export interface GroupMember {
+  groupId: string;
+  deviceId: string;
+  role: 'owner' | 'admin' | 'member';
+  status: 'active' | 'left' | 'removed';
+  displayNameSnapshot: string | null;
+  avatarEmojiSnapshot: string | null;
+  avatarBgSnapshot: string | null;
+  joinedAt: number;
+  updatedAt: number;
+}
+
 export interface MessageRow {
   messageId: string;
   conversationId: string;
@@ -100,6 +142,9 @@ export interface StartupSettings {
 
 export type AppEvent =
   | { type: 'peers:updated'; peers: Peer[] }
+  | { type: 'groups:updated'; groups: GroupInfo[] }
+  | { type: 'group:members'; groupId: string; members: GroupMember[] }
+  | { type: 'group:pins'; groupId: string; messageIds: string[] }
   | { type: 'relay:connection'; connected: boolean; endpoint: string | null }
   | { type: 'sync:status'; active: boolean }
   | { type: 'message:received'; message: MessageRow }
@@ -147,6 +192,33 @@ interface LanternApi {
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<Profile>;
   getKnownPeers: () => Promise<Peer[]>;
   getOnlinePeers: () => Promise<Peer[]>;
+  getGroups: () => Promise<GroupInfo[]>;
+  getGroupMembers: (groupId: string) => Promise<GroupMember[]>;
+  getGroupPinnedMessageIds: (groupId: string) => Promise<string[]>;
+  createGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => Promise<GroupInfo>;
+  updateGroup: (
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ) => Promise<void>;
+  addGroupMembers: (groupId: string, memberDeviceIds: string[]) => Promise<void>;
+  removeGroupMember: (groupId: string, deviceId: string) => Promise<void>;
+  setGroupMemberRole: (groupId: string, deviceId: string, role: 'admin' | 'member') => Promise<void>;
+  transferGroupOwnership: (groupId: string, deviceId: string) => Promise<void>;
+  deleteGroup: (groupId: string) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) => Promise<void>;
   getRelaySettings: () => Promise<RelaySettings>;
   getStartupSettings: () => Promise<StartupSettings>;
   updateRelaySettings: (input: {
@@ -161,10 +233,20 @@ interface LanternApi {
     text: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
+  sendGroupText: (
+    groupId: string,
+    text: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<MessageRow>;
   sendFile: (
     peerId: string,
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow>;
+  sendGroupFile: (
+    groupId: string,
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
@@ -197,6 +279,7 @@ interface LanternApi {
   getMessageReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
   getAnnouncementReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
   getAnnouncementReactionDetails: (messageId: string) => Promise<MessageReactionDetail[]>;
+  getMessageReactionDetails: (messageId: string) => Promise<MessageReactionDetail[]>;
   getAnnouncementReadSummary: (messageIds: string[]) => Promise<Record<string, AnnouncementReadSummary>>;
   getAnnouncementReadDetails: (messageId: string) => Promise<AnnouncementReadDetail[]>;
   exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<{ canceled: boolean; filePath: string | null }>;
@@ -230,6 +313,8 @@ interface LanternApi {
   clipboardHasFileLikeData: () => Promise<boolean>;
   saveClipboardImage: (dataUrl: string, extension?: string) => Promise<string | null>;
   saveClipboardFileData: (dataUrl: string, fileName?: string) => Promise<string | null>;
+  getRelayStickers: () => Promise<StickerCatalogItem[]>;
+  prepareRelayStickerFile: (relativePath: string) => Promise<string | null>;
   onEvent: (callback: (event: AppEvent) => void) => () => void;
 }
 
@@ -246,6 +331,38 @@ export const ipcClient = {
     window.lantern.updateProfile(input),
   getKnownPeers: () => window.lantern.getKnownPeers(),
   getOnlinePeers: () => window.lantern.getOnlinePeers(),
+  getGroups: () => window.lantern.getGroups(),
+  getGroupMembers: (groupId: string) => window.lantern.getGroupMembers(groupId),
+  getGroupPinnedMessageIds: (groupId: string) => window.lantern.getGroupPinnedMessageIds(groupId),
+  createGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => window.lantern.createGroup(input),
+  updateGroup: (
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ) => window.lantern.updateGroup(groupId, input),
+  addGroupMembers: (groupId: string, memberDeviceIds: string[]) =>
+    window.lantern.addGroupMembers(groupId, memberDeviceIds),
+  removeGroupMember: (groupId: string, deviceId: string) =>
+    window.lantern.removeGroupMember(groupId, deviceId),
+  setGroupMemberRole: (groupId: string, deviceId: string, role: 'admin' | 'member') =>
+    window.lantern.setGroupMemberRole(groupId, deviceId, role),
+  transferGroupOwnership: (groupId: string, deviceId: string) =>
+    window.lantern.transferGroupOwnership(groupId, deviceId),
+  deleteGroup: (groupId: string) => window.lantern.deleteGroup(groupId),
+  leaveGroup: (groupId: string) => window.lantern.leaveGroup(groupId),
+  setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) =>
+    window.lantern.setGroupMessagePinned(groupId, messageId, pinned),
   getRelaySettings: () => window.lantern.getRelaySettings(),
   getStartupSettings: () => window.lantern.getStartupSettings(),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
@@ -255,11 +372,15 @@ export const ipcClient = {
     window.lantern.updateStartupSettings(input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendText(peerId, text, replyTo),
+  sendGroupText: (groupId: string, text: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendGroupText(groupId, text, replyTo),
   sendTyping: (peerId: string, isTyping: boolean) => window.lantern.sendTyping(peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendAnnouncement(text, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendFile(peerId, filePath, replyTo),
+  sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendGroupFile(groupId, filePath, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     window.lantern.forwardMessageToPeer(targetPeerId, sourceMessageId),
   editMessage: (conversationId: string, messageId: string, text: string) =>
@@ -297,6 +418,8 @@ export const ipcClient = {
     window.lantern.getAnnouncementReactions(messageIds),
   getAnnouncementReactionDetails: (messageId: string) =>
     window.lantern.getAnnouncementReactionDetails(messageId),
+  getMessageReactionDetails: (messageId: string) =>
+    window.lantern.getMessageReactionDetails(messageId),
   getAnnouncementReadSummary: (messageIds: string[]) =>
     window.lantern.getAnnouncementReadSummary(messageIds),
   getAnnouncementReadDetails: (messageId: string) =>
@@ -331,5 +454,7 @@ export const ipcClient = {
     window.lantern.saveClipboardImage(dataUrl, extension),
   saveClipboardFileData: (dataUrl: string, fileName?: string) =>
     window.lantern.saveClipboardFileData(dataUrl, fileName),
+  getRelayStickers: () => window.lantern.getRelayStickers(),
+  prepareRelayStickerFile: (relativePath: string) => window.lantern.prepareRelayStickerFile(relativePath),
   onEvent: (callback: (event: AppEvent) => void) => window.lantern.onEvent(callback)
 };

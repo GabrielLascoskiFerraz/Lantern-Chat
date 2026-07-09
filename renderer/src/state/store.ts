@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import {
   AnnouncementReadSummary,
   AnnouncementReactionSummary,
+  GroupInfo,
+  GroupMember,
   ipcClient,
   MessageReplyReference,
   MessageRow,
@@ -31,6 +33,9 @@ interface LanternState {
   relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
   peers: Peer[];
+  groups: GroupInfo[];
+  groupMembersById: Record<string, GroupMember[]>;
+  groupPinnedMessageIdsById: Record<string, string[]>;
   onlinePeerIds: string[];
   selectedConversationId: string;
   messagesByConversation: Record<string, MessageRow[]>;
@@ -62,6 +67,7 @@ interface LanternState {
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
+  closeConversation: () => Promise<void>;
   loadOlderMessages: (conversationId: string, limit?: number) => Promise<number>;
   ensureConversationMessagesLoaded: (
     conversationId: string,
@@ -72,6 +78,11 @@ interface LanternState {
     text: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  sendGroupText: (
+    groupId: string,
+    text: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<void>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   sendFile: (
@@ -79,6 +90,35 @@ interface LanternState {
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  sendGroupFile: (
+    groupId: string,
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<void>;
+  createGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => Promise<void>;
+  updateGroup: (
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ) => Promise<void>;
+  addGroupMembers: (groupId: string, memberDeviceIds: string[]) => Promise<void>;
+  removeGroupMember: (groupId: string, deviceId: string) => Promise<void>;
+  setGroupMemberRole: (groupId: string, deviceId: string, role: 'admin' | 'member') => Promise<void>;
+  transferGroupOwnership: (groupId: string, deviceId: string) => Promise<void>;
+  deleteGroup: (groupId: string) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) => Promise<void>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<void>;
   editMessage: (conversationId: string, messageId: string, text: string) => Promise<void>;
   reactToMessage: (
@@ -295,6 +335,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   relaySettings: null,
   startupSettings: null,
   peers: [],
+  groups: [],
+  groupMembersById: {},
+  groupPinnedMessageIdsById: {},
   onlinePeerIds: [],
   selectedConversationId: ANNOUNCEMENTS_ID,
   messagesByConversation: {},
@@ -346,6 +389,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         relaySettings,
         startupSettings,
         peers,
+        groups,
         onlinePeers,
         unreadByConversation,
         archivedConversationIds
@@ -355,13 +399,30 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ipcClient.getRelaySettings(),
           ipcClient.getStartupSettings(),
           ipcClient.getKnownPeers(),
+          ipcClient.getGroups(),
           ipcClient.getOnlinePeers(),
           ipcClient.getConversations(),
           ipcClient.getArchivedConversationIds()
         ]);
 
+      const [groupMembersEntries, groupPinnedEntries] = await Promise.all([
+        Promise.all(
+          groups.map(async (group) => [
+            group.groupId,
+            await ipcClient.getGroupMembers(group.groupId).catch(() => [])
+          ] as const)
+        ),
+        Promise.all(
+          groups.map(async (group) => [
+            group.groupId,
+            await ipcClient.getGroupPinnedMessageIds(group.groupId).catch(() => [])
+          ] as const)
+        )
+      ]);
+
       const conversationIds = [
         ANNOUNCEMENTS_ID,
+        ...groups.map((group) => `group:${group.groupId}`),
         ...peers.map((peer) => `dm:${peer.deviceId}`)
       ];
     const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
@@ -380,6 +441,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       relaySettings,
       startupSettings,
       peers,
+      groups,
+      groupMembersById: Object.fromEntries(groupMembersEntries),
+      groupPinnedMessageIdsById: Object.fromEntries(groupPinnedEntries),
       onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
       archivedConversationIds,
       unreadByConversation,
@@ -471,6 +535,21 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.clearInterval(peerRefreshTimer);
       peerRefreshTimer = null;
     }
+
+    const scheduleTransferCleanup = (fileId: string): void => {
+      clearTransferCleanupTimer(fileId);
+      if (typeof window === 'undefined') return;
+      const timer = window.setTimeout(() => {
+        transferCleanupTimers.delete(fileId);
+        set((state) => {
+          if (!state.transfers[fileId]) return state;
+          const nextTransfers = { ...state.transfers };
+          delete nextTransfers[fileId];
+          return { transfers: nextTransfers };
+        });
+      }, TRANSFER_CLEANUP_DELAY_MS);
+      transferCleanupTimers.set(fileId, timer);
+    };
 
     const refreshPeersSnapshot = async (): Promise<void> => {
       const seq = ++peerSnapshotSeq;
@@ -567,6 +646,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           if (updateSeq !== peersUpdateSeq) return;
           const ids = [
             ANNOUNCEMENTS_ID,
+            ...get().groups.map((group) => `group:${group.groupId}`),
             ...knownPeers.map((peer) => `dm:${peer.deviceId}`)
           ];
           void ipcClient.getConversationPreviews(ids).then((previewMap) => {
@@ -601,12 +681,61 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return;
       }
 
+      if (event.type === 'groups:updated') {
+        const groups = [...event.groups].sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+        const visibleGroupConversationIds = new Set(groups.map((group) => `group:${group.groupId}`));
+        const selectedConversationId = get().selectedConversationId;
+        const shouldCloseSelectedGroup =
+          selectedConversationId.startsWith('group:') &&
+          !visibleGroupConversationIds.has(selectedConversationId);
+        const ids = [
+          ANNOUNCEMENTS_ID,
+          ...groups.map((group) => `group:${group.groupId}`),
+          ...get().peers.map((peer) => `dm:${peer.deviceId}`)
+        ];
+        void ipcClient.getConversationPreviews(ids).then((previewMap) => {
+          set((state) => ({
+            groups,
+            selectedConversationId: shouldCloseSelectedGroup ? '' : state.selectedConversationId,
+            loadingConversationId: shouldCloseSelectedGroup ? null : state.loadingConversationId,
+            conversationPreviewById:
+              mergePreviewMapIfChanged(state.conversationPreviewById, previewMap) ||
+              state.conversationPreviewById
+          }));
+        });
+        if (shouldCloseSelectedGroup) {
+          void ipcClient.setActiveConversation('');
+        }
+        return;
+      }
+
+      if (event.type === 'group:members') {
+        set((state) => ({
+          groupMembersById: {
+            ...state.groupMembersById,
+            [event.groupId]: event.members
+          }
+        }));
+        return;
+      }
+
+      if (event.type === 'group:pins') {
+        set((state) => ({
+          groupPinnedMessageIdsById: {
+            ...state.groupPinnedMessageIdsById,
+            [event.groupId]: event.messageIds
+          }
+        }));
+        return;
+      }
+
       if (event.type === 'sync:status') {
         set((state) => (state.syncActive === event.active ? state : { syncActive: event.active }));
         return;
       }
 
       if (event.type === 'message:received') {
+        const selectedAtReceive = get().selectedConversationId;
         set((state) => {
           const existing = state.messagesByConversation[event.message.conversationId] || [];
           if (existing.some((row) => row.messageId === event.message.messageId)) {
@@ -625,6 +754,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               ...state.conversationPreviewById,
               [event.message.conversationId]: previewFromMessage(event.message)
             },
+            unreadByConversation:
+              selectedAtReceive === event.message.conversationId
+                ? {
+                    ...state.unreadByConversation,
+                    [event.message.conversationId]: 0
+                  }
+                : state.unreadByConversation,
             typingByConversation: {
               ...state.typingByConversation,
               [event.message.conversationId]: false
@@ -632,6 +768,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             recentMessageIds: recent
           };
         });
+        if (selectedAtReceive === event.message.conversationId) {
+          void ipcClient.markConversationRead(event.message.conversationId);
+          void ipcClient.setActiveConversation(event.message.conversationId);
+        }
         return;
       }
 
@@ -695,21 +835,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             .map((transfer) => transfer.fileId);
 
           for (const fileId of completedFileIds) {
-            clearTransferCleanupTimer(fileId);
-            if (typeof window !== 'undefined') {
-              const timer = window.setTimeout(() => {
-                transferCleanupTimers.delete(fileId);
-                set((state) => {
-                  if (!state.transfers[fileId]) {
-                    return state;
-                  }
-                  const nextTransfers = { ...state.transfers };
-                  delete nextTransfers[fileId];
-                  return { transfers: nextTransfers };
-                });
-              }, TRANSFER_CLEANUP_DELAY_MS);
-              transferCleanupTimers.set(fileId, timer);
-            }
+            scheduleTransferCleanup(fileId);
           }
         }
         return;
@@ -869,19 +995,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         }));
 
         if (completed && typeof window !== 'undefined') {
-          clearTransferCleanupTimer(event.fileId);
-          const timer = window.setTimeout(() => {
-            transferCleanupTimers.delete(event.fileId);
-            set((state) => {
-              if (!state.transfers[event.fileId]) {
-                return state;
-              }
-              const nextTransfers = { ...state.transfers };
-              delete nextTransfers[event.fileId];
-              return { transfers: nextTransfers };
-            });
-          }, TRANSFER_CLEANUP_DELAY_MS);
-          transferCleanupTimers.set(event.fileId, timer);
+          scheduleTransferCleanup(event.fileId);
         }
         return;
       }
@@ -1122,6 +1236,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           state.loadingConversationId === conversationId ? null : state.loadingConversationId
       }));
     }
+  },
+  closeConversation: async () => {
+    await ipcClient.setActiveConversation('');
+    set({
+      selectedConversationId: '',
+      loadingConversationId: null
+    });
   },
   markConversationUnread: async (conversationId) => {
     if (!conversationId) return;
@@ -1370,6 +1491,37 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }));
     }
   },
+  sendGroupText: async (groupId, text, replyTo) => {
+    const conversationId = `group:${groupId}`;
+    try {
+      const message = await ipcClient.sendGroupText(groupId, text, replyTo);
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [message.conversationId]: appendUniqueMessage(
+            state.messagesByConversation[message.conversationId] || [],
+            message
+          )
+        },
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [message.conversationId]: previewFromMessage(message)
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível enviar mensagem no grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }],
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [conversationId]: text
+        }
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
   sendTyping: async (peerId, isTyping) => {
     try {
       await ipcClient.sendTyping(peerId, isTyping);
@@ -1442,6 +1594,32 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         error instanceof Error
           ? error.message
           : 'Não foi possível enviar o anexo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  sendGroupFile: async (groupId, filePath, replyTo) => {
+    try {
+      const message = await ipcClient.sendGroupFile(groupId, filePath, replyTo);
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [message.conversationId]: appendUniqueMessage(
+            state.messagesByConversation[message.conversationId] || [],
+            message
+          )
+        },
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [message.conversationId]: previewFromMessage(message)
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível enviar o anexo no grupo.';
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set((state) => ({
         toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
@@ -1779,6 +1957,207 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.localStorage.setItem(onboardingKey, '1');
     }
     set({ profile });
+  },
+  createGroup: async (input) => {
+    try {
+      const group = await ipcClient.createGroup(input);
+      const members = await ipcClient.getGroupMembers(group.groupId).catch(() => []);
+      const pinnedMessageIds = await ipcClient.getGroupPinnedMessageIds(group.groupId).catch(() => []);
+      set((state) => ({
+        groups: [group, ...state.groups.filter((existing) => existing.groupId !== group.groupId)],
+        groupMembersById: {
+          ...state.groupMembersById,
+          [group.groupId]: members
+        },
+        groupPinnedMessageIdsById: {
+          ...state.groupPinnedMessageIdsById,
+          [group.groupId]: pinnedMessageIds
+        }
+      }));
+      await get().selectConversation(`group:${group.groupId}`);
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível criar o grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  updateGroup: async (groupId, input) => {
+    try {
+      await ipcClient.updateGroup(groupId, input);
+      const groups = await ipcClient.getGroups();
+      set({ groups });
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível atualizar o grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  addGroupMembers: async (groupId, memberDeviceIds) => {
+    try {
+      await ipcClient.addGroupMembers(groupId, memberDeviceIds);
+      const members = await ipcClient.getGroupMembers(groupId).catch(() => []);
+      set((state) => ({
+        groupMembersById: {
+          ...state.groupMembersById,
+          [groupId]: members
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível adicionar participantes.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  removeGroupMember: async (groupId, deviceId) => {
+    try {
+      await ipcClient.removeGroupMember(groupId, deviceId);
+      const members = await ipcClient.getGroupMembers(groupId).catch(() => []);
+      set((state) => ({
+        groupMembersById: {
+          ...state.groupMembersById,
+          [groupId]: members
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível remover o participante.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  setGroupMemberRole: async (groupId, deviceId, role) => {
+    try {
+      await ipcClient.setGroupMemberRole(groupId, deviceId, role);
+      const members = await ipcClient.getGroupMembers(groupId).catch(() => []);
+      set((state) => ({
+        groupMembersById: {
+          ...state.groupMembersById,
+          [groupId]: members
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível alterar a função do participante.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  transferGroupOwnership: async (groupId, deviceId) => {
+    try {
+      await ipcClient.transferGroupOwnership(groupId, deviceId);
+      const members = await ipcClient.getGroupMembers(groupId).catch(() => []);
+      set((state) => ({
+        groupMembersById: {
+          ...state.groupMembersById,
+          [groupId]: members
+        }
+      }));
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível transferir a propriedade do grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  deleteGroup: async (groupId) => {
+    try {
+      await ipcClient.deleteGroup(groupId);
+      const groups = await ipcClient.getGroups().catch(() => get().groups);
+      set((state) => ({
+        groups: groups.filter((group) => group.groupId !== groupId),
+        groupMembersById: Object.fromEntries(
+          Object.entries(state.groupMembersById).filter(([id]) => id !== groupId)
+        ),
+        groupPinnedMessageIdsById: Object.fromEntries(
+          Object.entries(state.groupPinnedMessageIdsById).filter(([id]) => id !== groupId)
+        )
+      }));
+      if (get().selectedConversationId === `group:${groupId}`) {
+        await get().closeConversation();
+      }
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível excluir o grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  leaveGroup: async (groupId) => {
+    try {
+      await ipcClient.leaveGroup(groupId);
+      const groups = await ipcClient.getGroups().catch(() => get().groups);
+      const members = await ipcClient.getGroupMembers(groupId).catch(() => []);
+      set((state) => ({
+        groups: groups.filter((group) => group.groupId !== groupId),
+        groupMembersById: {
+          ...state.groupMembersById,
+          [groupId]: members
+        }
+      }));
+      if (get().selectedConversationId === `group:${groupId}`) {
+        await get().selectConversation(ANNOUNCEMENTS_ID);
+      }
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível sair do grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  setGroupMessagePinned: async (groupId, messageId, pinned) => {
+    try {
+      const current = get().groupPinnedMessageIdsById[groupId] || [];
+      const next = pinned
+        ? Array.from(new Set([messageId, ...current]))
+        : current.filter((id) => id !== messageId);
+      set((state) => ({
+        groupPinnedMessageIdsById: {
+          ...state.groupPinnedMessageIdsById,
+          [groupId]: next
+        }
+      }));
+      await ipcClient.setGroupMessagePinned(groupId, messageId, pinned);
+    } catch (error) {
+      const pinnedMessageIds = await ipcClient.getGroupPinnedMessageIds(groupId).catch(() => []);
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível atualizar o pino do grupo.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        groupPinnedMessageIdsById: {
+          ...state.groupPinnedMessageIdsById,
+          [groupId]: pinnedMessageIds
+        },
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
   },
   updateRelaySettings: async (input) => {
     const relaySettings = await ipcClient.updateRelaySettings(input);

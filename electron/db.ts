@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -9,6 +10,11 @@ import {
   AnnouncementReactionSummary,
   ConversationRow,
   DbMessage,
+  GroupAttachmentDownload,
+  GroupEvent,
+  GroupInfo,
+  GroupMember,
+  GroupSettings,
   MessageReactionDetail,
   Peer,
   Profile,
@@ -243,6 +249,457 @@ export class DbService {
     this.db
       .prepare('UPDATE conversations SET title = ? WHERE id = ?')
       .run('Anúncios', ANNOUNCEMENTS_CONVERSATION_ID);
+  }
+
+  private groupConversationId(groupId: string): string {
+    return `group:${groupId}`;
+  }
+
+  ensureGroupConversation(groupId: string, title: string): string {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) {
+      throw new Error('groupId inválido.');
+    }
+    const id = this.groupConversationId(cleanGroupId);
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO conversations(id, kind, peerDeviceId, title, createdAt, updatedAt, unreadCount)
+         VALUES (?, 'group', NULL, ?, ?, ?, 0)
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title, updatedAt=excluded.updatedAt`
+      )
+      .run(id, title || 'Grupo', now, now);
+    return id;
+  }
+
+  upsertGroup(group: GroupInfo): GroupInfo {
+    const cleanGroupId = (group.groupId || '').trim();
+    if (!cleanGroupId) {
+      throw new Error('groupId inválido.');
+    }
+    const normalizedSettings: GroupSettings = {
+      allowMembersToPin: group.settings?.allowMembersToPin !== false,
+      allowMembersToEditInfo: group.settings?.allowMembersToEditInfo === true
+    };
+    const normalized: GroupInfo = {
+      groupId: cleanGroupId,
+      name: (group.name || '').trim() || 'Grupo',
+      emoji: (group.emoji || '').trim() || '👥',
+      avatarBg: (group.avatarBg || '').trim() || '#147ad6',
+      description: (group.description || '').trim(),
+      createdByDeviceId: (group.createdByDeviceId || '').trim(),
+      createdAt:
+        Number.isFinite(group.createdAt) && group.createdAt > 0
+          ? Math.trunc(group.createdAt)
+          : Date.now(),
+      updatedAt:
+        Number.isFinite(group.updatedAt) && group.updatedAt > 0
+          ? Math.trunc(group.updatedAt)
+          : Date.now(),
+      lastEventSeq:
+        Number.isFinite(group.lastEventSeq) && group.lastEventSeq > 0
+          ? Math.trunc(group.lastEventSeq)
+          : 0,
+      deletedAt:
+        Number.isFinite(group.deletedAt || 0) && (group.deletedAt || 0) > 0
+          ? Math.trunc(group.deletedAt || 0)
+          : null,
+      missingOnRelay: Boolean(group.missingOnRelay),
+      settings: normalizedSettings
+    };
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO groups(
+             groupId,
+             name,
+             emoji,
+             avatarBg,
+             description,
+             createdByDeviceId,
+             createdAt,
+             updatedAt,
+             lastEventSeq,
+             deletedAt,
+             missingOnRelay,
+             allowMembersToPin,
+             allowMembersToEditInfo
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(groupId) DO UPDATE SET
+             name = excluded.name,
+             emoji = excluded.emoji,
+             avatarBg = excluded.avatarBg,
+             description = excluded.description,
+             createdByDeviceId = COALESCE(NULLIF(excluded.createdByDeviceId, ''), groups.createdByDeviceId),
+             createdAt = CASE
+               WHEN groups.createdAt IS NULL OR groups.createdAt <= 0 THEN excluded.createdAt
+               ELSE groups.createdAt
+             END,
+             updatedAt = MAX(groups.updatedAt, excluded.updatedAt),
+             lastEventSeq = MAX(groups.lastEventSeq, excluded.lastEventSeq),
+             deletedAt = excluded.deletedAt,
+             missingOnRelay = excluded.missingOnRelay,
+             allowMembersToPin = excluded.allowMembersToPin,
+             allowMembersToEditInfo = excluded.allowMembersToEditInfo`
+        )
+        .run(
+          normalized.groupId,
+          normalized.name,
+          normalized.emoji,
+          normalized.avatarBg,
+          normalized.description,
+          normalized.createdByDeviceId,
+          normalized.createdAt,
+          normalized.updatedAt,
+          normalized.lastEventSeq,
+          normalized.deletedAt,
+          normalized.missingOnRelay ? 1 : 0,
+          normalized.settings.allowMembersToPin ? 1 : 0,
+          normalized.settings.allowMembersToEditInfo ? 1 : 0
+        );
+      this.ensureGroupConversation(normalized.groupId, normalized.name);
+    });
+    tx();
+    return normalized;
+  }
+
+  getGroups(): GroupInfo[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM groups
+         WHERE deletedAt IS NULL
+         ORDER BY updatedAt DESC, name ASC`
+      )
+      .all() as Array<{
+      groupId: string;
+      name: string;
+      emoji: string;
+      avatarBg: string;
+      description: string;
+      createdByDeviceId: string;
+      createdAt: number;
+      updatedAt: number;
+      lastEventSeq: number;
+      deletedAt: number | null;
+      missingOnRelay: number;
+      allowMembersToPin: number;
+      allowMembersToEditInfo: number;
+    }>;
+    return rows.map((row) => ({
+      groupId: row.groupId,
+      name: row.name,
+      emoji: row.emoji,
+      avatarBg: row.avatarBg,
+      description: row.description || '',
+      createdByDeviceId: row.createdByDeviceId,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      lastEventSeq: row.lastEventSeq || 0,
+      deletedAt: row.deletedAt || null,
+      missingOnRelay: row.missingOnRelay === 1,
+      settings: {
+        allowMembersToPin: row.allowMembersToPin !== 0,
+        allowMembersToEditInfo: row.allowMembersToEditInfo === 1
+      }
+    }));
+  }
+
+  markGroupMissingOnRelay(groupId: string, missing = true): void {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return;
+    this.db
+      .prepare('UPDATE groups SET missingOnRelay = ?, updatedAt = ? WHERE groupId = ?')
+      .run(missing ? 1 : 0, Date.now(), cleanGroupId);
+  }
+
+  deleteLocalGroup(groupId: string): string[] {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return [];
+    const conversationId = this.groupConversationId(cleanGroupId);
+    const tx = this.db.transaction(() => {
+      const filePaths = this.clearConversation(conversationId);
+      const now = Date.now();
+      this.db
+        .prepare('UPDATE groups SET deletedAt = ?, missingOnRelay = 1, updatedAt = ? WHERE groupId = ?')
+        .run(now, now, cleanGroupId);
+      this.db
+        .prepare('UPDATE group_members SET status = ?, updatedAt = ? WHERE groupId = ?')
+        .run('removed', now, cleanGroupId);
+      this.db.prepare('DELETE FROM group_pinned_messages WHERE groupId = ?').run(cleanGroupId);
+      this.removeConversation(conversationId);
+      return filePaths;
+    });
+    return tx();
+  }
+
+  getGroupById(groupId: string): GroupInfo | null {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return null;
+    return this.getGroups().find((group) => group.groupId === cleanGroupId) || null;
+  }
+
+  getGroupSeqMap(): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT groupId, lastEventSeq FROM groups')
+      .all() as Array<{ groupId: string; lastEventSeq: number | null }>;
+    return Object.fromEntries(rows.map((row) => [row.groupId, row.lastEventSeq || 0]));
+  }
+
+  upsertGroupMembers(groupId: string, members: GroupMember[]): void {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId || members.length === 0) return;
+    const upsert = this.db.prepare(
+      `INSERT INTO group_members(
+         groupId,
+         deviceId,
+         role,
+         status,
+         displayNameSnapshot,
+         avatarEmojiSnapshot,
+         avatarBgSnapshot,
+         joinedAt,
+         updatedAt
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(groupId, deviceId) DO UPDATE SET
+         role = excluded.role,
+         status = excluded.status,
+         displayNameSnapshot = COALESCE(excluded.displayNameSnapshot, group_members.displayNameSnapshot),
+         avatarEmojiSnapshot = COALESCE(excluded.avatarEmojiSnapshot, group_members.avatarEmojiSnapshot),
+         avatarBgSnapshot = COALESCE(excluded.avatarBgSnapshot, group_members.avatarBgSnapshot),
+         joinedAt = CASE
+           WHEN group_members.joinedAt IS NULL OR group_members.joinedAt <= 0 THEN excluded.joinedAt
+           ELSE group_members.joinedAt
+         END,
+         updatedAt = MAX(group_members.updatedAt, excluded.updatedAt)`
+    );
+    const tx = this.db.transaction((rows: GroupMember[]) => {
+      for (const member of rows) {
+        const deviceId = (member.deviceId || '').trim();
+        if (!deviceId) continue;
+        upsert.run(
+          cleanGroupId,
+          deviceId,
+          member.role === 'owner' || member.role === 'admin' ? member.role : 'member',
+          member.status === 'left' || member.status === 'removed' ? member.status : 'active',
+          member.displayNameSnapshot || null,
+          member.avatarEmojiSnapshot || null,
+          member.avatarBgSnapshot || null,
+          Number.isFinite(member.joinedAt) && member.joinedAt > 0 ? Math.trunc(member.joinedAt) : Date.now(),
+          Number.isFinite(member.updatedAt) && member.updatedAt > 0 ? Math.trunc(member.updatedAt) : Date.now()
+        );
+      }
+    });
+    tx(members);
+  }
+
+  getGroupMembers(groupId: string): GroupMember[] {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return [];
+    return this.db
+      .prepare(
+        `SELECT *
+         FROM group_members
+         WHERE groupId = ?
+         ORDER BY
+           CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+           COALESCE(displayNameSnapshot, deviceId) ASC`
+      )
+      .all(cleanGroupId) as GroupMember[];
+  }
+
+  replaceGroupPinnedMessages(
+    groupId: string,
+    messageIds: string[],
+    pinnedByDeviceId: string,
+    pinnedAt = Date.now()
+  ): void {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return;
+    const uniqueIds = Array.from(new Set(messageIds.map((value) => value.trim()).filter(Boolean)));
+    const deleteRows = this.db.prepare('DELETE FROM group_pinned_messages WHERE groupId = ?');
+    const insertRow = this.db.prepare(
+      `INSERT OR IGNORE INTO group_pinned_messages(groupId, messageId, pinnedByDeviceId, pinnedAt)
+       VALUES (?, ?, ?, ?)`
+    );
+    const tx = this.db.transaction(() => {
+      deleteRows.run(cleanGroupId);
+      for (const messageId of uniqueIds) {
+        insertRow.run(cleanGroupId, messageId, pinnedByDeviceId, pinnedAt);
+      }
+    });
+    tx();
+  }
+
+  setGroupMessagePinned(
+    groupId: string,
+    messageId: string,
+    pinned: boolean,
+    pinnedByDeviceId: string,
+    pinnedAt = Date.now()
+  ): string[] {
+    const cleanGroupId = (groupId || '').trim();
+    const cleanMessageId = (messageId || '').trim();
+    if (!cleanGroupId || !cleanMessageId) return this.getGroupPinnedMessageIds(cleanGroupId);
+    if (pinned) {
+      this.db
+        .prepare(
+          `INSERT INTO group_pinned_messages(groupId, messageId, pinnedByDeviceId, pinnedAt)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(groupId, messageId) DO UPDATE SET
+             pinnedByDeviceId = excluded.pinnedByDeviceId,
+             pinnedAt = excluded.pinnedAt`
+        )
+        .run(cleanGroupId, cleanMessageId, pinnedByDeviceId, pinnedAt);
+    } else {
+      this.db
+        .prepare('DELETE FROM group_pinned_messages WHERE groupId = ? AND messageId = ?')
+        .run(cleanGroupId, cleanMessageId);
+    }
+    return this.getGroupPinnedMessageIds(cleanGroupId);
+  }
+
+  getGroupPinnedMessageIds(groupId: string): string[] {
+    const cleanGroupId = (groupId || '').trim();
+    if (!cleanGroupId) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT messageId
+         FROM group_pinned_messages
+         WHERE groupId = ?
+         ORDER BY pinnedAt DESC, messageId ASC`
+      )
+      .all(cleanGroupId) as Array<{ messageId: string }>;
+    return rows.map((row) => row.messageId);
+  }
+
+  markGroupEventApplied(event: GroupEvent): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO group_events_applied(eventId, groupId, seq, type, createdAt)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(event.eventId, event.groupId, event.seq, event.type, event.createdAt);
+    if (result.changes > 0) {
+      this.db
+        .prepare(
+          `UPDATE groups
+           SET lastEventSeq = CASE WHEN lastEventSeq < ? THEN ? ELSE lastEventSeq END,
+               updatedAt = CASE WHEN updatedAt < ? THEN ? ELSE updatedAt END
+           WHERE groupId = ?`
+        )
+        .run(event.seq, event.seq, event.createdAt, event.createdAt, event.groupId);
+    }
+    return result.changes > 0;
+  }
+
+  upsertGroupAttachmentDownload(input: GroupAttachmentDownload): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO group_attachment_downloads(fileId, groupId, messageId, status, localPath, receivedAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(fileId) DO UPDATE SET
+           groupId = excluded.groupId,
+           messageId = excluded.messageId,
+           status = excluded.status,
+           localPath = COALESCE(excluded.localPath, group_attachment_downloads.localPath),
+           receivedAt = COALESCE(excluded.receivedAt, group_attachment_downloads.receivedAt),
+           updatedAt = excluded.updatedAt`
+      )
+      .run(
+        input.fileId,
+        input.groupId,
+        input.messageId,
+        input.status,
+        input.localPath || null,
+        input.receivedAt || null,
+        input.updatedAt || now
+      );
+  }
+
+  getGroupAttachmentDownload(fileId: string): GroupAttachmentDownload | null {
+    const cleanFileId = (fileId || '').trim();
+    if (!cleanFileId) return null;
+    const row = this.db
+      .prepare(
+        `SELECT fileId, groupId, messageId, status, localPath, receivedAt, updatedAt
+         FROM group_attachment_downloads
+         WHERE fileId = ?`
+      )
+      .get(cleanFileId) as GroupAttachmentDownload | undefined;
+    return row || null;
+  }
+
+  getPendingGroupAttachmentDownloads(limit = 100): GroupAttachmentDownload[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
+    return this.db
+      .prepare(
+        `SELECT fileId, groupId, messageId, status, localPath, receivedAt, updatedAt
+         FROM group_attachment_downloads
+         WHERE status IN ('pending', 'downloading', 'failed')
+         ORDER BY updatedAt ASC, fileId ASC
+         LIMIT ?`
+      )
+      .all(safeLimit) as GroupAttachmentDownload[];
+  }
+
+  getPendingOutgoingGroupFiles(limit = 50): DbMessage[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 200));
+    return this.db
+      .prepare(
+        `SELECT *
+         FROM messages
+         WHERE conversationId LIKE 'group:%'
+           AND direction = 'out'
+           AND type = 'file'
+           AND deletedAt IS NULL
+           AND COALESCE(status, 'sent') IN ('sent', 'failed')
+           AND filePath IS NOT NULL
+           AND fileId IS NOT NULL
+         ORDER BY createdAt ASC, messageId ASC
+         LIMIT ?`
+      )
+      .all(safeLimit) as DbMessage[];
+  }
+
+  private hydrateGroupAttachmentPaths(rows: DbMessage[]): DbMessage[] {
+    return rows.map((row) => {
+      if (row.type !== 'file') {
+        return row;
+      }
+
+      // Nunca devolve ao renderer uma referência local quebrada: isso evita
+      // botões de abrir/salvar apontando para um arquivo que já não existe.
+      const existingFilePath =
+        row.filePath && fs.existsSync(row.filePath) ? row.filePath : null;
+      if (existingFilePath) {
+        return row;
+      }
+
+      const rowWithoutBrokenPath = row.filePath ? { ...row, filePath: null } : row;
+      if (!row.fileId || !row.conversationId.startsWith('group:')) {
+        return rowWithoutBrokenPath;
+      }
+
+      const download = this.getGroupAttachmentDownload(row.fileId);
+      if (
+        download?.status === 'complete' &&
+        download.localPath &&
+        fs.existsSync(download.localPath)
+      ) {
+        return {
+          ...rowWithoutBrokenPath,
+          filePath: download.localPath,
+          status: rowWithoutBrokenPath.status === 'failed' ? 'delivered' : rowWithoutBrokenPath.status
+        };
+      }
+
+      return rowWithoutBrokenPath;
+    });
   }
 
   getConversations(): ConversationRow[] {
@@ -562,6 +1019,21 @@ export class DbService {
       .run(status, filePath, status, status, fileId);
   }
 
+  markIncomingFileForRetry(messageId: string): DbMessage | undefined {
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET filePath = NULL,
+             status = 'sent'
+         WHERE messageId = ?
+           AND direction = 'in'
+           AND type = 'file'
+           AND deletedAt IS NULL`
+      )
+      .run(messageId);
+    return this.getMessageById(messageId);
+  }
+
   getSyncMessagesForPeer(peerId: string, limit = 1000, since?: number): DbMessage[] {
     const dmConversationId = `dm:${peerId}`;
     if (typeof since === 'number' && since > 0) {
@@ -714,6 +1186,28 @@ export class DbService {
       .all(normalizedLimit) as DbMessage[];
   }
 
+  getIncomingFileMessagesForPeer(peerId: string, limit = 100): DbMessage[] {
+    const conversationId = `dm:${peerId}`;
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(Math.trunc(limit), 1_000))
+      : 100;
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE conversationId = ?
+           AND direction = 'in'
+           AND type = 'file'
+           AND deletedAt IS NULL
+           AND fileId IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )
+         ORDER BY createdAt ASC, messageId ASC
+         LIMIT ?`
+      )
+      .all(conversationId, normalizedLimit) as DbMessage[];
+  }
+
   setMessageFavorite(messageId: string, favorite: boolean): boolean {
     const upsert = this.db.prepare(
       `INSERT INTO message_favorites (messageId, createdAt)
@@ -783,23 +1277,25 @@ export class DbService {
     messageId: string,
     reactorDeviceId: string,
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null,
-    localDeviceId: string
+    localDeviceId: string,
+    updatedAt = Date.now()
   ): AnnouncementReactionSummary {
-    const now = Date.now();
+    const now = Number.isFinite(updatedAt) && updatedAt > 0 ? Math.trunc(updatedAt) : Date.now();
     const upsert = this.db.prepare(
       `INSERT INTO message_reactions (messageId, reactorDeviceId, reaction, updatedAt)
        VALUES (?, ?, ?, ?)
-       ON CONFLICT(messageId, reactorDeviceId) DO UPDATE SET reaction = excluded.reaction, updatedAt = excluded.updatedAt`
+       ON CONFLICT(messageId, reactorDeviceId) DO UPDATE SET reaction = excluded.reaction, updatedAt = excluded.updatedAt
+       WHERE excluded.updatedAt >= message_reactions.updatedAt`
     );
     const remove = this.db.prepare(
-      'DELETE FROM message_reactions WHERE messageId = ? AND reactorDeviceId = ?'
+      'DELETE FROM message_reactions WHERE messageId = ? AND reactorDeviceId = ? AND updatedAt <= ?'
     );
 
     const tx = this.db.transaction(() => {
       if (reaction) {
         upsert.run(messageId, reactorDeviceId, reaction, now);
       } else {
-        remove.run(messageId, reactorDeviceId);
+        remove.run(messageId, reactorDeviceId, now);
       }
       this.db
         .prepare(
@@ -1039,7 +1535,7 @@ export class DbService {
              END
          WHERE messageId = ?
            AND deletedAt IS NULL
-           AND type = 'text'`
+           AND type IN ('text', 'announcement')`
       )
       .run(cleanText, normalizedEditedAt, normalizedEditedAt, messageId);
     this.db
@@ -1384,7 +1880,7 @@ export class DbService {
 
   getMessages(conversationId: string, limit: number, before?: number): DbMessage[] {
     if (before) {
-      return this.db
+      const rows = this.db
         .prepare(
           `SELECT * FROM messages
           WHERE conversationId = ?
@@ -1398,9 +1894,10 @@ export class DbService {
         )
         .all(conversationId, before, limit)
         .reverse() as DbMessage[];
+      return this.hydrateGroupAttachmentPaths(rows);
     }
 
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE conversationId = ?
@@ -1413,6 +1910,7 @@ export class DbService {
       )
       .all(conversationId, limit)
       .reverse() as DbMessage[];
+    return this.hydrateGroupAttachmentPaths(rows);
   }
 
   getMessagesByIds(messageIds: string[]): DbMessage[] {
@@ -1436,7 +1934,7 @@ export class DbService {
       if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
       return a.messageId.localeCompare(b.messageId);
     });
-    return rows;
+    return this.hydrateGroupAttachmentPaths(rows);
   }
 
   searchConversationMessageIds(

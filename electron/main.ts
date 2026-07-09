@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { app, BrowserWindow, dialog, Menu } from 'electron';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -29,13 +30,19 @@ import {
   EditMessagePayload,
   FileChunkPayload,
   FileCompletePayload,
+  FileRequestPayload,
   ForgetPeerPayload,
   FileOfferPayload,
+  GroupEvent,
+  GroupInfo,
+  GroupMember,
+  GroupSnapshot,
   MessageReplyPayload,
   Peer,
   Profile,
   ProtocolFrame,
   ReactPayload,
+  StickerCatalogItem,
   SyncRequestPayload,
   SyncResponsePayload,
   TypingPayload
@@ -74,10 +81,21 @@ class LanternApp {
   private readonly peerUnreachableFailureThreshold = 2;
   private readonly peerUnreachableFailureWindowMs = 15_000;
   private readonly editWindowMs = 10 * 60 * 1000;
+  private readonly groupUploadWindowSize = 4;
   private syncActivityCount = 0;
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
   private incomingFrameQueue: Promise<void> = Promise.resolve();
+  private readonly groupFileDownloadByRequestId = new Map<
+    string,
+    { fileId: string; groupId: string; messageId: string; senderDeviceId: string }
+  >();
+  private readonly groupFileDownloadTimeoutByRequestId = new Map<string, NodeJS.Timeout>();
+  private readonly groupFileDownloadStartTimeoutMs = 20_000;
+  private readonly groupFileUploadsInFlight = new Set<string>();
+  private readonly directFileRequestAtByMessageId = new Map<string, number>();
+  private readonly directFileRequestInFlight = new Set<string>();
+  private readonly directFileRequestMinIntervalMs = 5_000;
 
   private formatBackupTimestamp(value: number): string {
     const date = new Date(value);
@@ -586,6 +604,29 @@ class LanternApp {
       onAnnouncementReads: (reads) => {
         this.handleRelayAnnouncementReadUpdate(reads);
       },
+      onGroupSnapshot: (snapshots) => {
+        this.handleGroupSnapshots(snapshots);
+      },
+      onGroupEvent: (event) => {
+        this.handleGroupEvent(event);
+      },
+      onGroupFileStart: (payload) => {
+        this.handleGroupFileStart(payload);
+      },
+      onGroupFileChunk: (payload) => {
+        this.handleGroupFileChunk(payload);
+      },
+      onGroupFileComplete: (payload) => {
+        void this.handleGroupFileComplete(payload).catch((error) => {
+          console.warn(
+            '[Lantern][Relay] falha ao finalizar anexo de grupo:',
+            error instanceof Error ? error.message : String(error)
+          );
+        });
+      },
+      onGroupFileRequestFailed: (payload) => {
+        this.failGroupFileDownload(payload.requestId, payload.message);
+      },
       onConnectionState: ({ connected, endpoint }) => {
         this.emitEvent({
           type: 'relay:connection',
@@ -611,6 +652,19 @@ class LanternApp {
             ? `Conectado ao Relay (${endpoint})`
             : 'Conectado ao Relay'
         });
+        void (async () => {
+          try {
+            await this.relay?.syncGroups(this.db.getGroupSeqMap());
+            // Primeiro aplicamos o snapshot canônico; depois retomamos uploads/downloads locais.
+            await this.resumePendingGroupFiles();
+            await this.resumePendingGroupAttachmentDownloads();
+          } catch (error) {
+            console.warn(
+              '[Lantern][Relay] falha ao sincronizar ou retomar dados de grupos:',
+              error instanceof Error ? error.message : String(error)
+            );
+          }
+        })();
       },
       onWarning: (message) => {
         this.emitEvent({ type: 'ui:toast', level: 'warning', message });
@@ -651,15 +705,30 @@ class LanternApp {
       },
       getKnownPeers: () => this.getKnownPeers(),
       getOnlinePeers: () => this.getVisibleOnlinePeers(),
+      getGroups: () => this.getVisibleGroups(),
+      getGroupMembers: (groupId) => this.db.getGroupMembers(groupId),
+      getGroupPinnedMessageIds: (groupId) => this.db.getGroupPinnedMessageIds(groupId),
+      createGroup: (input) => this.createGroup(input),
+      updateGroup: (groupId, input) => this.updateGroup(groupId, input),
+      addGroupMembers: (groupId, memberDeviceIds) => this.addGroupMembers(groupId, memberDeviceIds),
+      removeGroupMember: (groupId, deviceId) => this.removeGroupMember(groupId, deviceId),
+      setGroupMemberRole: (groupId, deviceId, role) => this.setGroupMemberRole(groupId, deviceId, role),
+      transferGroupOwnership: (groupId, deviceId) => this.transferGroupOwnership(groupId, deviceId),
+      deleteGroup: (groupId) => this.deleteGroup(groupId),
+      leaveGroup: (groupId) => this.leaveGroup(groupId),
+      setGroupMessagePinned: (groupId, messageId, pinned) =>
+        this.setGroupMessagePinned(groupId, messageId, pinned),
       getRelaySettings: () => this.getRelaySettingsSnapshot(),
       getStartupSettings: () => this.getStartupSettingsSnapshot(),
       updateRelaySettings: (input) => this.updateRelaySettings(input),
       forceRelayRediscovery: () => this.forceRelayRediscovery(),
       updateStartupSettings: (input) => this.updateStartupSettings(input),
       sendText: (peerId, text, replyTo) => this.messageService.sendText(peerId, text, replyTo),
+      sendGroupText: (groupId, text, replyTo) => this.sendGroupText(groupId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
       sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
       sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
+      sendGroupFile: (groupId, filePath, replyTo) => this.sendGroupFile(groupId, filePath, replyTo),
       forwardMessageToPeer: (targetPeerId, sourceMessageId) =>
         this.forwardMessageToPeer(targetPeerId, sourceMessageId),
       editMessage: (conversationId, messageId, text) =>
@@ -686,10 +755,13 @@ class LanternApp {
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
       getAnnouncementReactionDetails: (messageId) =>
         this.db.getMessageReactionDetails(messageId),
+      getMessageReactionDetails: (messageId) => this.db.getMessageReactionDetails(messageId),
       getAnnouncementReadSummary: (messageIds) =>
         this.db.getAnnouncementReadSummary(messageIds, this.profile.deviceId),
       getAnnouncementReadDetails: (messageId) =>
         this.db.getAnnouncementReadDetails(messageId),
+      getRelayStickers: () => this.getRelayStickers(),
+      prepareRelayStickerFile: (fileName) => this.prepareRelayStickerFile(fileName),
       exportConversation: (conversationId, format) =>
         this.exportConversation(conversationId, format),
       setActiveConversation: (conversationId) => {
@@ -1018,6 +1090,142 @@ class LanternApp {
     return snapshot;
   }
 
+  private getRelayHttpBaseUrl(): string {
+    const endpoint = this.relay?.getCurrentEndpoint();
+    if (!this.relay?.isConnected() || !endpoint) {
+      throw new Error('Relay desconectado.');
+    }
+    const url = new URL(endpoint);
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    url.pathname = '/';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  }
+
+  private normalizeRelayStickerRelativePath(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const normalized = value.trim().replace(/\\/g, '/');
+    if (
+      !/^(?:[a-z0-9][a-z0-9._ -]*\.gif|[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9._ -]*\.gif)$/i.test(
+        normalized
+      )
+    ) {
+      return null;
+    }
+    return normalized;
+  }
+
+  private buildRelayStickerUrl(baseUrl: string, relativePath: string, version: string): string {
+    const encodedPath = relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+    return `${baseUrl}/stickers/${encodedPath}?v=${encodeURIComponent(version)}`;
+  }
+
+  private async fetchRelayStickerBuffer(
+    baseUrl: string,
+    relativePath: string,
+    version: string
+  ): Promise<Buffer | null> {
+    try {
+      const response = await fetch(this.buildRelayStickerUrl(baseUrl, relativePath, version));
+      if (!response.ok) return null;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length === 0 || buffer.length > 20 * 1024 * 1024) return null;
+      const signature = buffer.subarray(0, 6).toString('ascii');
+      return signature === 'GIF87a' || signature === 'GIF89a' ? buffer : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getRelayStickers(): Promise<StickerCatalogItem[]> {
+    const baseUrl = this.getRelayHttpBaseUrl();
+    const response = await fetch(`${baseUrl}/stickers`);
+    if (!response.ok) {
+      throw new Error('Não foi possível carregar GIFs do Relay.');
+    }
+    const payload = (await response.json()) as { stickers?: Array<Record<string, unknown>> };
+    const stickers = Array.isArray(payload.stickers) ? payload.stickers : [];
+    const catalog: StickerCatalogItem[] = stickers
+      .map((item): StickerCatalogItem | null => {
+        const relativePath = this.normalizeRelayStickerRelativePath(item.relativePath);
+        if (!relativePath) return null;
+        const fileName = path.posix.basename(relativePath);
+        const size =
+          typeof item.size === 'number' && Number.isFinite(item.size)
+            ? Math.max(0, Math.trunc(item.size))
+            : 0;
+        const updatedAt =
+          typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)
+            ? Math.max(0, Math.trunc(item.updatedAt))
+            : 0;
+        const label =
+          typeof item.label === 'string' && item.label.trim()
+            ? item.label.trim()
+            : fileName.replace(/\.gif$/i, '').replace(/[-_]+/g, ' ');
+        const category = relativePath.includes('/') ? relativePath.split('/')[0] : 'geral';
+        return {
+          id: `${relativePath}:${updatedAt}:${size}`,
+          label,
+          fileName,
+          relativePath,
+          url: this.buildRelayStickerUrl(baseUrl, relativePath, `${updatedAt}-${size}`),
+          previewDataUrl: null,
+          size,
+          category,
+          updatedAt
+        };
+      })
+      .filter((item): item is StickerCatalogItem => item !== null)
+      .sort((left, right) => {
+        const categoryOrder = left.category.localeCompare(right.category, 'pt-BR');
+        return categoryOrder !== 0 ? categoryOrder : left.label.localeCompare(right.label, 'pt-BR');
+      });
+
+    return Promise.all(
+      catalog.map(async (sticker) => {
+        const buffer = await this.fetchRelayStickerBuffer(
+          baseUrl,
+          sticker.relativePath,
+          `${sticker.updatedAt}-${sticker.size}`
+        );
+        return {
+          ...sticker,
+          // A CSP do renderer não precisa liberar hosts arbitrários do Relay.
+          previewDataUrl: buffer ? `data:image/gif;base64,${buffer.toString('base64')}` : null
+        };
+      })
+    );
+  }
+
+  private async prepareRelayStickerFile(relativePathInput: string): Promise<string | null> {
+    const relativePath = this.normalizeRelayStickerRelativePath(relativePathInput);
+    if (!relativePath) {
+      return null;
+    }
+
+    const baseUrl = this.getRelayHttpBaseUrl();
+    const buffer = await this.fetchRelayStickerBuffer(baseUrl, relativePath, 'download');
+    if (!buffer) return null;
+
+    const tempDir = path.join(os.tmpdir(), 'lantern-stickers');
+    await fs.promises.mkdir(tempDir, { recursive: true });
+    const sourceName = path.posix.basename(relativePath, '.gif');
+    const stickerSlug =
+      sourceName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80) || 'gif';
+    const targetPath = path.join(
+      tempDir,
+      // O marcador permite que qualquer GIF do catálogo tenha apresentação de figurinha no chat.
+      `lantern-sticker-${stickerSlug}-${Date.now()}-${randomUUID()}.gif`
+    );
+    await fs.promises.writeFile(targetPath, buffer);
+    return targetPath;
+  }
+
   private handleRelayPresence(relayPeers: RelayPeerSnapshot[]): void {
     const now = Date.now();
     const incomingIds = new Set<string>();
@@ -1077,6 +1285,7 @@ class LanternApp {
         void this.requestSync(peer).catch(() => undefined);
         void this.messageService.retryFailedMessagesForPeer(peer).catch(() => undefined);
         void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
+        this.requestMissingDirectAttachmentsForPeer(peer);
       } else if (hasPendingOps) {
         void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
       }
@@ -1205,7 +1414,10 @@ class LanternApp {
     this.beginSyncActivity();
     try {
       await this.sendToPeer(peer, frame);
-      await this.messageService.replayPendingFilesForPeer(peer);
+      // Arquivos são transmitidos em segundo plano para não atrasar respostas
+      // de sync, presença e novos frames na fila do processo principal.
+      void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
+      this.requestMissingDirectAttachmentsForPeer(peer);
     } catch (error) {
       if (throwOnFail) {
         throw error;
@@ -1213,6 +1425,79 @@ class LanternApp {
       // peer offline ou inacessível; próxima presença online tentará novamente
     } finally {
       this.endSyncActivity();
+    }
+  }
+
+  private hasUsableLocalAttachment(message: DbMessage | undefined): boolean {
+    if (!message?.filePath) return false;
+    try {
+      return fs.statSync(message.filePath).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  private async requestMissingDirectAttachment(message: DbMessage, preferredPeer?: Peer): Promise<void> {
+    if (
+      message.type !== 'file' ||
+      message.direction !== 'in' ||
+      message.deletedAt ||
+      !message.fileId ||
+      !message.senderDeviceId ||
+      message.senderDeviceId === this.profile.deviceId ||
+      this.hasUsableLocalAttachment(message)
+    ) {
+      return;
+    }
+
+    const peer =
+      preferredPeer && preferredPeer.deviceId === message.senderDeviceId
+        ? preferredPeer
+        : this.presence.getPeer(message.senderDeviceId) || this.resolvePeerForTransport(message.senderDeviceId);
+    if (!peer) return;
+
+    const requestKey = message.messageId;
+    const now = Date.now();
+    const lastRequestAt = this.directFileRequestAtByMessageId.get(requestKey) || 0;
+    if (
+      this.directFileRequestInFlight.has(requestKey) ||
+      now - lastRequestAt < this.directFileRequestMinIntervalMs
+    ) {
+      return;
+    }
+
+    this.directFileRequestAtByMessageId.set(requestKey, now);
+    this.directFileRequestInFlight.add(requestKey);
+    try {
+      const waiting = this.db.markIncomingFileForRetry(message.messageId);
+      if (waiting) {
+        this.emitEvent({ type: 'message:updated', message: waiting });
+      }
+      await this.sendToPeer(peer, {
+        type: 'file:request',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: message.senderDeviceId,
+        createdAt: now,
+        payload: {
+          targetMessageId: message.messageId,
+          fileId: message.fileId
+        } satisfies FileRequestPayload
+      });
+    } catch {
+      // O próximo snapshot de presença ou sync tentará novamente.
+    } finally {
+      this.directFileRequestInFlight.delete(requestKey);
+    }
+  }
+
+  private requestMissingDirectAttachmentsForPeer(peer: Peer): void {
+    // Limita a recuperação inicial para não abrir dezenas de streams grandes
+    // quando um dispositivo volta depois de muito tempo offline.
+    for (const message of this.db.getIncomingFileMessagesForPeer(peer.deviceId, 20)) {
+      if (!this.hasUsableLocalAttachment(message)) {
+        void this.requestMissingDirectAttachment(message, peer);
+      }
     }
   }
 
@@ -1236,6 +1521,20 @@ class LanternApp {
   }
 
   private async resyncConversation(conversationId: string): Promise<void> {
+    const groupId = this.groupIdFromConversationId(conversationId);
+    if (groupId) {
+      if (!this.relay?.isConnected()) {
+        throw new Error('Relay offline.');
+      }
+      await this.relay.syncGroups({ [groupId]: 0 });
+      this.emitEvent({
+        type: 'ui:toast',
+        level: 'success',
+        message: 'Ressincronização do grupo solicitada ao Relay.'
+      });
+      return;
+    }
+
     if (!conversationId.startsWith('dm:')) {
       throw new Error('Ressincronização disponível apenas para conversas diretas.');
     }
@@ -1344,7 +1643,8 @@ class LanternApp {
         pending.messageId,
         pending.reactorDeviceId,
         pending.reaction,
-        this.profile.deviceId
+        this.profile.deviceId,
+        pending.updatedAt
       );
     }
 
@@ -1766,7 +2066,11 @@ class LanternApp {
       throw new Error('Não é possível encaminhar para você mesmo.');
     }
 
-    const source = this.db.getMessageById(cleanSourceMessageId);
+    // getMessagesByIds hidrata caminhos de anexos de grupo concluídos que
+    // podem ainda não estar gravados no registro bruto de messages.
+    const source =
+      this.db.getMessagesByIds([cleanSourceMessageId])[0] ||
+      this.db.getMessageById(cleanSourceMessageId);
     if (!source || source.deletedAt) {
       throw new Error('Mensagem de origem não encontrada.');
     }
@@ -1777,10 +2081,24 @@ class LanternApp {
     }
 
     if (source.type === 'file') {
-      const sourceFilePath = (source.filePath || '').trim();
-      if (!sourceFilePath || !fs.existsSync(sourceFilePath)) {
-        throw new Error('Este anexo não está disponível para encaminhar.');
+      if (!this.hasUsableLocalAttachment(source)) {
+        const groupId = this.groupIdFromConversationId(source.conversationId);
+        if (groupId && source.fileId && source.senderDeviceId !== this.profile.deviceId) {
+          void this.requestGroupAttachmentIfNeeded({
+            fileId: source.fileId,
+            groupId,
+            messageId: source.messageId,
+            senderDeviceId: source.senderDeviceId
+          }).catch(() => undefined);
+          throw new Error('Este anexo ainda está sendo baixado do Relay. Tente novamente em instantes.');
+        }
+        if (source.direction === 'in' && source.conversationId.startsWith('dm:')) {
+          void this.requestMissingDirectAttachment(source);
+          throw new Error('Este anexo ainda está sendo recebido. Tente novamente em instantes.');
+        }
+        throw new Error('Este anexo não está mais disponível neste dispositivo.');
       }
+      const sourceFilePath = source.filePath!;
       return this.messageService.sendFile(cleanTargetPeerId, sourceFilePath, undefined, {
         forwardedFromMessageId: source.messageId
       });
@@ -1802,6 +2120,32 @@ class LanternApp {
   ): Promise<DbMessage | null> {
     const targetMessage = this.db.getMessageById(messageId);
     if (!targetMessage) return null;
+
+    const groupId = this.groupIdFromConversationId(conversationId);
+    if (groupId) {
+      const summary = this.db.setMessageReaction(
+        messageId,
+        this.profile.deviceId,
+        reaction,
+        this.profile.deviceId
+      );
+      this.emitEvent({ type: 'message:reactions', messageId, summary });
+      try {
+        await this.relay?.sendGroupAction('react', {
+          groupId,
+          targetMessageId: messageId,
+          reaction,
+          updatedAt: Date.now()
+        });
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'warning',
+          message: 'Relay offline. Reação do grupo não enviada.'
+        });
+      }
+      return targetMessage;
+    }
 
     const isAnnouncementConversation =
       conversationId === ANNOUNCEMENTS_CONVERSATION_ID || targetMessage.type === 'announcement';
@@ -1900,7 +2244,7 @@ class LanternApp {
     if (existing.conversationId !== conversationId) {
       throw new Error('Mensagem não pertence a esta conversa.');
     }
-    if (existing.type !== 'text') {
+    if (existing.type !== 'text' && existing.type !== 'announcement') {
       throw new Error('Somente mensagens de texto podem ser editadas.');
     }
     if (existing.direction !== 'out' || existing.senderDeviceId !== this.profile.deviceId) {
@@ -1914,10 +2258,44 @@ class LanternApp {
     }
 
     const editedAt = Date.now();
-    const updated = this.db.updateMessageText(messageId, text, editedAt);
+    const normalizedText = text.trim();
+
+    if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+      await this.sendBroadcast({
+        type: 'chat:edit',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: null,
+        createdAt: editedAt,
+        payload: {
+          targetMessageId: messageId,
+          text: normalizedText,
+          editedAt
+        }
+      } satisfies ProtocolFrame<EditMessagePayload>);
+
+      const updatedAnnouncement = this.db.updateMessageText(messageId, normalizedText, editedAt);
+      if (updatedAnnouncement) {
+        this.emitEvent({ type: 'message:updated', message: updatedAnnouncement });
+      }
+      return updatedAnnouncement || null;
+    }
+
+    const updated = this.db.updateMessageText(messageId, normalizedText, editedAt);
     if (!updated) return null;
 
     this.emitEvent({ type: 'message:updated', message: updated });
+
+    const groupId = this.groupIdFromConversationId(conversationId);
+    if (groupId) {
+      await this.relay?.sendGroupAction('editMessage', {
+        groupId,
+        targetMessageId: messageId,
+        text: updated.bodyText || '',
+        editedAt
+      });
+      return updated;
+    }
 
     const peer = this.getPeerFromConversationId(conversationId);
     if (peer) {
@@ -2116,6 +2494,29 @@ class LanternApp {
     if (!updated) return null;
     this.notifications.closeMessageNotification(messageId);
 
+    const groupId = this.groupIdFromConversationId(conversationId);
+    if (groupId) {
+      try {
+        await this.relay?.sendGroupAction('deleteMessage', {
+          groupId,
+          targetMessageId: messageId,
+          deletedAt: Date.now()
+        });
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'warning',
+          message: 'Relay offline. A exclusão do grupo será aplicada apenas localmente por enquanto.'
+        });
+      }
+      this.emitEvent({
+        type: 'message:removed',
+        conversationId: updated.conversationId,
+        messageId: updated.messageId
+      });
+      return updated;
+    }
+
     const peerIdFromConversation = conversationId.startsWith('dm:')
       ? conversationId.slice(3)
       : null;
@@ -2179,6 +2580,10 @@ class LanternApp {
     try {
       result = await this.fileTransfer.finalize(fileId);
     } catch {
+      const pending = this.db.getMessageByFileId(fileId);
+      if (pending?.senderDeviceId === senderDeviceId) {
+        void this.requestMissingDirectAttachment(pending, activePeer);
+      }
       return;
     }
 
@@ -2203,8 +2608,13 @@ class LanternApp {
         level: 'error',
         message: 'Falha na validação do anexo recebido. O remetente irá reenviar.'
       });
+      if (updated?.senderDeviceId === senderDeviceId) {
+        void this.requestMissingDirectAttachment(updated, activePeer);
+      }
       return;
     }
+
+    this.directFileRequestAtByMessageId.delete(result.messageId);
 
     const ackPeer =
       activePeer && activePeer.deviceId === senderDeviceId
@@ -2444,7 +2854,10 @@ class LanternApp {
           replyToPreviewText: replyTo?.previewText || null,
           replyToFileName: replyTo?.fileName || null,
           forwardedFromMessageId: null,
-          editedAt: null,
+          editedAt:
+            typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)
+              ? this.normalizeInboundCreatedAt(payload.editedAt)
+              : null,
           createdAt
         };
 
@@ -2463,6 +2876,19 @@ class LanternApp {
                 }
               : undefined
           );
+        } else if (
+          typeof payload.editedAt === 'number' &&
+          Number.isFinite(payload.editedAt) &&
+          this.db.getMessageById(frame.messageId)?.senderDeviceId === frame.from
+        ) {
+          const updated = this.db.updateMessageText(
+            frame.messageId,
+            payload.text,
+            this.normalizeInboundCreatedAt(payload.editedAt)
+          );
+          if (updated) {
+            this.emitEvent({ type: 'message:updated', message: updated });
+          }
         }
 
         if (deliverySource === 'live' && activePeer) {
@@ -2659,7 +3085,7 @@ class LanternApp {
           }
           if (activePeer) {
             await this.messageService.retryFailedMessagesForPeer(activePeer);
-            await this.messageService.replayPendingFilesForPeer(activePeer);
+            void this.messageService.replayPendingFilesForPeer(activePeer).catch(() => undefined);
             if (fullResyncRequested) {
               // Garante alinhamento bidirecional completo sem loop infinito.
               await this.requestSync(activePeer, {
@@ -2738,6 +3164,13 @@ class LanternApp {
             ) {
               ackIds.push(result.row.messageId);
             }
+            if (
+              result.row.direction === 'in' &&
+              result.row.type === 'file' &&
+              !this.hasUsableLocalAttachment(result.row)
+            ) {
+              void this.requestMissingDirectAttachment(result.row, activePeer);
+            }
           }
 
           for (const ackMessageId of ackIds) {
@@ -2776,6 +3209,35 @@ class LanternApp {
         });
         break;
       }
+      case 'file:request': {
+        const payload = frame.payload as FileRequestPayload;
+        const targetMessageId = (payload.targetMessageId || '').trim();
+        const requestedFileId = (payload.fileId || '').trim();
+        if (!targetMessageId || !requestedFileId || !activePeer) {
+          break;
+        }
+        const target = this.db.getMessageById(targetMessageId);
+        if (
+          !target ||
+          target.type !== 'file' ||
+          target.direction !== 'out' ||
+          target.deletedAt ||
+          target.senderDeviceId !== this.profile.deviceId ||
+          target.receiverDeviceId !== frame.from ||
+          target.fileId !== requestedFileId
+        ) {
+          break;
+        }
+        void this.messageService.resendFileMessageToPeer(activePeer, target).catch((error) => {
+          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
+            console.warn(
+              '[Lantern][Files] falha ao reenviar anexo solicitado:',
+              error instanceof Error ? error.message : String(error)
+            );
+          }
+        });
+        break;
+      }
       case 'file:offer': {
         const payload = frame.payload as FileOfferPayload;
         const replyTo = this.normalizeReplyPayload(payload.replyTo);
@@ -2793,13 +3255,28 @@ class LanternApp {
         const existingMessage = this.db.getMessageById(payload.messageId);
         const existingFileComplete =
           existingMessage?.type === 'file' &&
-          Boolean(existingMessage.filePath) &&
+          this.hasUsableLocalAttachment(existingMessage) &&
           (existingMessage.status === 'delivered' || existingMessage.status === 'read');
         const shouldReceiveFile =
           !existingFileComplete;
 
         if (shouldReceiveFile) {
+          if (existingMessage) {
+            const waiting = this.db.markIncomingFileForRetry(existingMessage.messageId);
+            if (waiting) {
+              this.emitEvent({ type: 'message:updated', message: waiting });
+            }
+          }
           this.fileTransfer.startIncoming(payload, frame.from);
+          this.emitEvent({
+            type: 'transfer:progress',
+            direction: 'receive',
+            fileId: payload.fileId,
+            messageId: payload.messageId,
+            peerId: frame.from,
+            transferred: 0,
+            total: payload.size
+          });
         } else if (deliverySource === 'live') {
           await this.sendDeliveredAckBestEffort(frame.from, payload.messageId, activePeer);
         }
@@ -2859,6 +3336,10 @@ class LanternApp {
         try {
           progress = this.fileTransfer.onChunk(payload);
         } catch {
+          const pending = this.db.getMessageByFileId(payload.fileId);
+          if (pending?.senderDeviceId === frame.from) {
+            void this.requestMissingDirectAttachment(pending, activePeer);
+          }
           break;
         }
         this.emitEvent({
@@ -3119,6 +3600,1201 @@ class LanternApp {
     }
   }
 
+  private isGroupMissingOnRelayError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error || '');
+    return /grupo não encontrado|group not found|not found|não é participante ativo|not an active participant/i.test(message);
+  }
+
+  private markGroupMissingOnRelay(groupId: string): void {
+    this.db.markGroupMissingOnRelay(groupId, true);
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+    this.emitEvent({
+      type: 'ui:toast',
+      level: 'warning',
+      message: 'Este grupo não existe mais no Relay. O envio foi bloqueado; você pode excluir a conversa localmente.'
+    });
+  }
+
+  private deleteLocalGroup(groupId: string): void {
+    const filePaths = this.db.deleteLocalGroup(groupId);
+    for (const filePath of filePaths) {
+      this.removeManagedAttachment(filePath);
+    }
+    const conversationId = this.groupConversationId(groupId);
+    this.emitEvent({ type: 'conversation:cleared', conversationId });
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+  }
+
+  private getVisibleGroups(): GroupInfo[] {
+    return this.db.getGroups().filter((group) => {
+      const member = this.db
+        .getGroupMembers(group.groupId)
+        .find((candidate) => candidate.deviceId === this.profile.deviceId);
+      return member?.status === 'active';
+    });
+  }
+
+  private groupConversationId(groupId: string): string {
+    return `group:${groupId}`;
+  }
+
+  private groupIdFromConversationId(conversationId: string): string | null {
+    if (!conversationId.startsWith('group:')) return null;
+    const groupId = conversationId.slice(6).trim();
+    return groupId || null;
+  }
+
+  private sanitizeGroupReply(
+    replyTo?: MessageReplyPayload | null
+  ): MessageReplyPayload | null {
+    return this.normalizeReplyPayload(replyTo || null);
+  }
+
+  private async ensureManagedOutgoingFileCopy(filePath: string, messageId: string): Promise<string> {
+    const resolvedSource = path.resolve(filePath);
+    const sourceStat = await fs.promises.stat(resolvedSource);
+    if (!sourceStat.isFile()) {
+      throw new Error('Caminho inválido: não é arquivo.');
+    }
+    const attachmentsDir = this.fileTransfer.getAttachmentsDir();
+    const resolvedAttachmentsDir = path.resolve(attachmentsDir);
+    const relative = path.relative(resolvedAttachmentsDir, resolvedSource);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return resolvedSource;
+    }
+    await fs.promises.mkdir(resolvedAttachmentsDir, { recursive: true });
+    const safeName = path
+      .basename(resolvedSource)
+      .split('')
+      .map((character) => {
+        const code = character.codePointAt(0) || 0;
+        return code < 32 || /[<>:"/\\|?*]/.test(character) ? '_' : character;
+      })
+      .join('') || 'arquivo';
+    const managedPath = path.join(resolvedAttachmentsDir, `${messageId}_${safeName}`);
+    await fs.promises.copyFile(resolvedSource, managedPath);
+    return managedPath;
+  }
+
+  private cleanupEphemeralOutgoingFile(filePath: string): void {
+    const resolvedFile = path.resolve(filePath);
+    const temporaryDirectories = ['lantern-paste', 'lantern-stickers'].map(
+      (name) => path.resolve(os.tmpdir(), name) + path.sep
+    );
+    if (!temporaryDirectories.some((directory) => resolvedFile.startsWith(directory))) {
+      return;
+    }
+    void fs.promises.unlink(resolvedFile).catch(() => undefined);
+  }
+
+  private getGroupSenderLabel(deviceId: string): string {
+    if (deviceId === this.profile.deviceId) {
+      return 'Você';
+    }
+    const peer = this.presence.getPeer(deviceId) || this.peersById.get(deviceId) || this.db.getCachedPeerById(deviceId);
+    return peer?.displayName || `Contato ${deviceId.slice(0, 6)}`;
+  }
+
+  private applyGroupSnapshot(snapshot: GroupSnapshot): void {
+    if (!snapshot?.group?.groupId) return;
+    this.db.upsertGroup(snapshot.group);
+    this.db.upsertGroupMembers(snapshot.group.groupId, snapshot.members || []);
+    this.db.replaceGroupPinnedMessages(
+      snapshot.group.groupId,
+      snapshot.pinnedMessageIds || [],
+      snapshot.group.createdByDeviceId || this.profile.deviceId,
+      Date.now()
+    );
+    const events = [...(snapshot.events || [])].sort((a, b) => a.seq - b.seq || a.eventId.localeCompare(b.eventId));
+    for (const event of events) {
+      this.applyGroupEvent(event);
+    }
+  }
+
+  private handleGroupSnapshots(snapshots: GroupSnapshot[]): void {
+    for (const snapshot of snapshots) {
+      this.applyGroupSnapshot(snapshot);
+    }
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+    for (const snapshot of snapshots) {
+      if (!snapshot?.group?.groupId) continue;
+      this.emitEvent({
+        type: 'group:members',
+        groupId: snapshot.group.groupId,
+        members: this.db.getGroupMembers(snapshot.group.groupId)
+      });
+      this.emitEvent({
+        type: 'group:pins',
+        groupId: snapshot.group.groupId,
+        messageIds: this.db.getGroupPinnedMessageIds(snapshot.group.groupId)
+      });
+    }
+  }
+
+  private handleGroupEvent(event: GroupEvent): void {
+    this.applyGroupEvent(event);
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+  }
+
+  private applyGroupEvent(event: GroupEvent): void {
+    if (!event?.eventId || !event.groupId) return;
+    const payload = (event.payload && typeof event.payload === 'object' ? event.payload : {}) as Record<string, unknown>;
+
+    if (event.type === 'group.created' || event.type === 'group.updated' || event.type === 'group.deleted') {
+      const group = payload.group as GroupInfo | undefined;
+      if (group?.groupId) {
+        this.db.upsertGroup(group);
+      }
+      const members = Array.isArray(payload.members) ? (payload.members as GroupMember[]) : [];
+      if (members.length > 0) {
+        this.db.upsertGroupMembers(event.groupId, members);
+        this.emitEvent({ type: 'group:members', groupId: event.groupId, members: this.db.getGroupMembers(event.groupId) });
+      }
+      const pinnedMessageIds = Array.isArray(payload.pinnedMessageIds)
+        ? payload.pinnedMessageIds.filter((value): value is string => typeof value === 'string')
+        : null;
+      if (pinnedMessageIds) {
+        this.db.replaceGroupPinnedMessages(event.groupId, pinnedMessageIds, event.actorDeviceId, event.createdAt);
+        this.emitEvent({ type: 'group:pins', groupId: event.groupId, messageIds: pinnedMessageIds });
+      }
+      this.db.markGroupEventApplied(event);
+      return;
+    }
+
+    if (!this.db.markGroupEventApplied(event)) {
+      return;
+    }
+
+    if (event.type === 'group.member.added') {
+      const group = payload.group as GroupInfo | undefined;
+      if (group?.groupId) {
+        this.db.upsertGroup(group);
+      }
+      const members = Array.isArray(payload.members) ? (payload.members as GroupMember[]) : [];
+      this.db.upsertGroupMembers(event.groupId, members);
+      this.emitEvent({ type: 'group:members', groupId: event.groupId, members: this.db.getGroupMembers(event.groupId) });
+      const pinnedMessageIds = Array.isArray(payload.pinnedMessageIds)
+        ? payload.pinnedMessageIds.filter((value): value is string => typeof value === 'string')
+        : null;
+      if (pinnedMessageIds) {
+        this.db.replaceGroupPinnedMessages(event.groupId, pinnedMessageIds, event.actorDeviceId, event.createdAt);
+        this.emitEvent({ type: 'group:pins', groupId: event.groupId, messageIds: pinnedMessageIds });
+      }
+      return;
+    }
+
+    if (event.type === 'group.member.roleChanged') {
+      const members = Array.isArray(payload.members)
+        ? (payload.members as GroupMember[])
+        : payload.member && typeof payload.member === 'object'
+        ? [payload.member as GroupMember]
+        : [];
+      if (members.length > 0) {
+        this.db.upsertGroupMembers(event.groupId, members);
+        this.emitEvent({
+          type: 'group:members',
+          groupId: event.groupId,
+          members: this.db.getGroupMembers(event.groupId)
+        });
+      }
+      return;
+    }
+
+    if (event.type === 'group.member.removed' || event.type === 'group.member.left') {
+      const deviceId = typeof payload.deviceId === 'string' ? payload.deviceId : event.actorDeviceId;
+      const current = this.db.getGroupMembers(event.groupId).find((member) => member.deviceId === deviceId);
+      this.db.upsertGroupMembers(event.groupId, [
+        {
+          groupId: event.groupId,
+          deviceId,
+          role: current?.role || 'member',
+          status: event.type === 'group.member.left' ? 'left' : 'removed',
+          displayNameSnapshot: current?.displayNameSnapshot || null,
+          avatarEmojiSnapshot: current?.avatarEmojiSnapshot || null,
+          avatarBgSnapshot: current?.avatarBgSnapshot || null,
+          joinedAt: current?.joinedAt || event.createdAt,
+          updatedAt: event.createdAt
+        }
+      ]);
+      this.emitEvent({ type: 'group:members', groupId: event.groupId, members: this.db.getGroupMembers(event.groupId) });
+      return;
+    }
+
+    if (event.type === 'group.message.created') {
+      this.applyGroupMessageCreated(event, payload);
+      return;
+    }
+
+    if (event.type === 'group.message.edited') {
+      const targetMessageId = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+      const text = typeof payload.text === 'string' ? payload.text : '';
+      const editedAt = typeof payload.editedAt === 'number' ? payload.editedAt : event.createdAt;
+      const updated = targetMessageId ? this.db.updateMessageText(targetMessageId, text, editedAt) : undefined;
+      if (updated) {
+        this.emitEvent({ type: 'message:updated', message: updated });
+      }
+      return;
+    }
+
+    if (event.type === 'group.message.deletedForEveryone') {
+      const targetMessageId = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+      const updated = targetMessageId ? this.db.deleteMessageForEveryone(targetMessageId, event.createdAt) : undefined;
+      if (updated) {
+        this.emitEvent({
+          type: 'message:removed',
+          conversationId: updated.conversationId,
+          messageId: updated.messageId
+        });
+      }
+      return;
+    }
+
+    if (event.type === 'group.message.reactionChanged') {
+      const targetMessageId = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+      const reaction = payload.reaction === null ||
+        payload.reaction === '👍' ||
+        payload.reaction === '👎' ||
+        payload.reaction === '❤️' ||
+        payload.reaction === '😢' ||
+        payload.reaction === '😊' ||
+        payload.reaction === '😂'
+        ? payload.reaction
+        : null;
+      if (targetMessageId) {
+        const updatedAt =
+          typeof payload.updatedAt === 'number' && Number.isFinite(payload.updatedAt)
+            ? Math.trunc(payload.updatedAt)
+            : event.createdAt;
+        const summary = this.db.setMessageReaction(
+          targetMessageId,
+          event.actorDeviceId,
+          reaction,
+          this.profile.deviceId,
+          updatedAt
+        );
+        this.emitEvent({ type: 'message:reactions', messageId: targetMessageId, summary });
+      }
+      return;
+    }
+
+    if (event.type === 'group.message.pinned' || event.type === 'group.message.unpinned') {
+      const messageId = typeof payload.messageId === 'string' ? payload.messageId : '';
+      const next = this.db.setGroupMessagePinned(
+        event.groupId,
+        messageId,
+        event.type === 'group.message.pinned',
+        event.actorDeviceId,
+        event.createdAt
+      );
+      this.emitEvent({ type: 'group:pins', groupId: event.groupId, messageIds: next });
+      return;
+    }
+
+    if (event.type === 'group.attachment.available') {
+      const metadata = (payload.metadata && typeof payload.metadata === 'object'
+        ? payload.metadata
+        : null) as Record<string, unknown> | null;
+      if (metadata) {
+        this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
+      }
+    }
+  }
+
+  private applyGroupMessageCreated(event: GroupEvent, payload: Record<string, unknown>): void {
+    const rawMessage = (payload.message && typeof payload.message === 'object'
+      ? payload.message
+      : null) as Record<string, unknown> | null;
+    if (!rawMessage) return;
+    const messageId = typeof rawMessage.messageId === 'string' ? rawMessage.messageId : '';
+    if (!messageId) return;
+    const group = this.db.getGroupById(event.groupId);
+    const conversationId = this.db.ensureGroupConversation(event.groupId, group?.name || 'Grupo');
+    const senderDeviceId =
+      typeof rawMessage.senderDeviceId === 'string' ? rawMessage.senderDeviceId : event.actorDeviceId;
+    const direction = senderDeviceId === this.profile.deviceId ? 'out' : 'in';
+    const rawReply = this.normalizeReplyPayload(
+      (rawMessage.replyTo || null) as MessageReplyPayload | null
+    );
+    const type = rawMessage.type === 'file' ? 'file' : 'text';
+    const message: DbMessage = {
+      messageId,
+      conversationId,
+      direction,
+      senderDeviceId,
+      receiverDeviceId: null,
+      type,
+      bodyText:
+        type === 'text'
+          ? typeof rawMessage.bodyText === 'string'
+            ? rawMessage.bodyText
+            : typeof rawMessage.text === 'string'
+            ? rawMessage.text
+            : ''
+          : null,
+      fileId: typeof rawMessage.fileId === 'string' ? rawMessage.fileId : null,
+      fileName: typeof rawMessage.fileName === 'string' ? rawMessage.fileName : null,
+      fileSize: typeof rawMessage.fileSize === 'number' ? rawMessage.fileSize : null,
+      fileSha256: typeof rawMessage.fileSha256 === 'string' ? rawMessage.fileSha256 : null,
+      filePath: null,
+      status: direction === 'out' ? 'delivered' : 'delivered',
+      reaction: null,
+      deletedAt: null,
+      replyToMessageId: rawReply?.messageId || null,
+      replyToSenderDeviceId: rawReply?.senderDeviceId || null,
+      replyToType: rawReply?.type || null,
+      replyToPreviewText: rawReply?.previewText || null,
+      replyToFileName: rawReply?.fileName || null,
+      forwardedFromMessageId:
+        typeof rawMessage.forwardedFromMessageId === 'string'
+          ? rawMessage.forwardedFromMessageId
+          : null,
+      editedAt: null,
+      createdAt:
+        typeof rawMessage.createdAt === 'number' && Number.isFinite(rawMessage.createdAt)
+          ? Math.trunc(rawMessage.createdAt)
+          : event.createdAt
+    };
+
+    if (message.type === 'file' && message.fileId) {
+      const downloaded = this.db.getGroupAttachmentDownload(message.fileId);
+      if (
+        downloaded?.status === 'complete' &&
+        downloaded.localPath &&
+        fs.existsSync(downloaded.localPath)
+      ) {
+        message.filePath = downloaded.localPath;
+        message.status = 'delivered';
+      }
+    }
+
+    const inserted = this.db.saveMessage(message);
+    if (!inserted && direction === 'out') {
+      this.db.updateMessageStatus(message.messageId, 'delivered');
+    }
+    const saved = this.db.getMessageById(message.messageId) || message;
+    this.applyQueuedReactionsForMessage(saved);
+    this.emitEvent({
+      type: inserted ? 'message:received' : 'message:updated',
+      message: saved
+    });
+
+    // Snapshots and event replays can carry a message already persisted locally.
+    // Only a new insert represents an unread/notification-worthy arrival.
+    if (direction === 'in' && inserted) {
+      this.bumpUnreadIfBackground(conversationId, saved.createdAt);
+      this.notifyIncomingIfNeeded(
+        saved,
+        'live',
+        this.presence.getPeer(senderDeviceId) ||
+          this.db.getCachedPeerById(senderDeviceId) || {
+            displayName: this.getGroupSenderLabel(senderDeviceId),
+            avatarEmoji: '👥',
+            avatarBg: group?.avatarBg || '#147ad6'
+          }
+      );
+    }
+
+    const metadata = (payload.attachment && typeof payload.attachment === 'object'
+      ? payload.attachment
+      : null) as Record<string, unknown> | null;
+    if (metadata) {
+      this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
+    }
+  }
+
+  private async requestGroupAttachmentIfNeeded(metadata: Record<string, unknown>): Promise<void> {
+    const fileId = typeof metadata.fileId === 'string' ? metadata.fileId : '';
+    const groupId = typeof metadata.groupId === 'string' ? metadata.groupId : '';
+    const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
+    const senderDeviceId = typeof metadata.senderDeviceId === 'string' ? metadata.senderDeviceId : '';
+    if (!fileId || !groupId || !messageId || senderDeviceId === this.profile.deviceId) {
+      return;
+    }
+    const message = this.db.getMessageById(messageId);
+    if (this.hasUsableLocalAttachment(message)) {
+      await this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
+      return;
+    }
+    if (message) {
+      const waiting = this.db.markIncomingFileForRetry(message.messageId);
+      if (waiting) {
+        this.emitEvent({ type: 'message:updated', message: waiting });
+      }
+    }
+    if (Array.from(this.groupFileDownloadByRequestId.values()).some((item) => item.fileId === fileId)) {
+      return;
+    }
+    this.db.upsertGroupAttachmentDownload({
+      fileId,
+      groupId,
+      messageId,
+      status: 'pending',
+      localPath: null,
+      receivedAt: null,
+      updatedAt: Date.now()
+    });
+    const requestId = await this.relay?.requestGroupFile(fileId).catch(() => null);
+    if (!requestId) {
+      this.db.updateMessageStatus(messageId, 'failed');
+      this.db.upsertGroupAttachmentDownload({
+        fileId,
+        groupId,
+        messageId,
+        status: 'failed',
+        localPath: null,
+        receivedAt: null,
+        updatedAt: Date.now()
+      });
+      const failed = this.db.getMessageById(messageId);
+      if (failed) {
+        this.emitEvent({ type: 'message:updated', message: failed });
+        this.emitEvent({
+          type: 'message:status',
+          messageId,
+          conversationId: failed.conversationId,
+          status: 'failed'
+        });
+      }
+      return;
+    }
+    this.groupFileDownloadByRequestId.set(requestId, {
+      fileId,
+      groupId,
+      messageId,
+      senderDeviceId
+    });
+    this.scheduleGroupFileDownloadTimeout(requestId);
+  }
+
+  private scheduleGroupFileDownloadTimeout(requestId: string): void {
+    const previous = this.groupFileDownloadTimeoutByRequestId.get(requestId);
+    if (previous) clearTimeout(previous);
+    const timeout = setTimeout(() => {
+      this.failGroupFileDownload(requestId, 'Tempo esgotado ao iniciar download do anexo.');
+    }, this.groupFileDownloadStartTimeoutMs);
+    timeout.unref?.();
+    this.groupFileDownloadTimeoutByRequestId.set(requestId, timeout);
+  }
+
+  private clearGroupFileDownloadTimeout(requestId: string): void {
+    const timeout = this.groupFileDownloadTimeoutByRequestId.get(requestId);
+    if (timeout) clearTimeout(timeout);
+    this.groupFileDownloadTimeoutByRequestId.delete(requestId);
+  }
+
+  private failGroupFileDownload(requestId: string, reason: string): void {
+    const download = this.groupFileDownloadByRequestId.get(requestId);
+    if (!download) return;
+    this.clearGroupFileDownloadTimeout(requestId);
+    this.groupFileDownloadByRequestId.delete(requestId);
+    this.fileTransfer.abortIncoming(download.fileId);
+    this.db.updateMessageStatus(download.messageId, 'failed');
+    this.db.upsertGroupAttachmentDownload({
+      fileId: download.fileId,
+      groupId: download.groupId,
+      messageId: download.messageId,
+      status: 'failed',
+      localPath: null,
+      receivedAt: null,
+      updatedAt: Date.now()
+    });
+    const message = this.db.getMessageById(download.messageId);
+    if (message) this.emitEvent({ type: 'message:updated', message });
+    console.warn(`[Lantern][Relay] download de anexo de grupo interrompido: ${reason}`);
+  }
+
+  private handleGroupFileStart(payload: { requestId: string; fileId: string; metadata: unknown }): void {
+    const metadata = (payload.metadata && typeof payload.metadata === 'object'
+      ? payload.metadata
+      : null) as Record<string, unknown> | null;
+    if (!metadata) return;
+    const fileId = typeof metadata.fileId === 'string' ? metadata.fileId : payload.fileId;
+    const groupId = typeof metadata.groupId === 'string' ? metadata.groupId : '';
+    const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
+    const senderDeviceId = typeof metadata.senderDeviceId === 'string' ? metadata.senderDeviceId : '';
+    const filename = typeof metadata.fileName === 'string' ? metadata.fileName : 'arquivo';
+    const size = typeof metadata.fileSize === 'number' ? metadata.fileSize : 0;
+    const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
+    if (!fileId || !groupId || !messageId || !senderDeviceId) return;
+
+    // A replayed request can arrive after a previous download already completed.
+    // Do not truncate the verified local copy just because the Relay is replaying it.
+    const existingMessage = this.db.getMessageById(messageId);
+    if (this.hasUsableLocalAttachment(existingMessage)) {
+      this.clearGroupFileDownloadTimeout(payload.requestId);
+      this.groupFileDownloadByRequestId.delete(payload.requestId);
+      void this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
+      return;
+    }
+
+    // O mesmo timeout passa a vigiar inatividade durante a transferência.
+    this.scheduleGroupFileDownloadTimeout(payload.requestId);
+    const finalPath = this.fileTransfer.startIncoming(
+      {
+        fileId,
+        messageId,
+        filename,
+        size,
+        sha256
+      },
+      senderDeviceId
+    );
+    this.groupFileDownloadByRequestId.set(payload.requestId, {
+      fileId,
+      groupId,
+      messageId,
+      senderDeviceId
+    });
+    this.db.upsertGroupAttachmentDownload({
+      fileId,
+      groupId,
+      messageId,
+      status: 'downloading',
+      localPath: finalPath,
+      receivedAt: null,
+      updatedAt: Date.now()
+    });
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'receive',
+      fileId,
+      messageId,
+      peerId: senderDeviceId,
+      transferred: 0,
+      total: size
+    });
+  }
+
+  private handleGroupFileChunk(payload: {
+    requestId: string;
+    fileId: string;
+    index: number;
+    total: number;
+    dataBase64: string;
+  }): void {
+    const download = this.groupFileDownloadByRequestId.get(payload.requestId);
+    if (!download) return;
+    let progress: { transferred: number; total: number };
+    try {
+      progress = this.fileTransfer.onChunk({
+        fileId: payload.fileId,
+        index: payload.index,
+        total: payload.total,
+        dataBase64: payload.dataBase64
+      });
+    } catch (error) {
+      this.failGroupFileDownload(
+        payload.requestId,
+        error instanceof Error ? error.message : 'Chunk inválido recebido do Relay.'
+      );
+      return;
+    }
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'receive',
+      fileId: payload.fileId,
+      messageId: download.messageId,
+      peerId: download.senderDeviceId,
+      transferred: progress.transferred,
+      total: progress.total
+    });
+    this.scheduleGroupFileDownloadTimeout(payload.requestId);
+  }
+
+  private async handleGroupFileComplete(payload: { requestId: string; fileId: string }): Promise<void> {
+    const download = this.groupFileDownloadByRequestId.get(payload.requestId);
+    if (!download) return;
+    this.clearGroupFileDownloadTimeout(payload.requestId);
+    this.groupFileDownloadByRequestId.delete(payload.requestId);
+    try {
+      const result = await this.fileTransfer.finalize(payload.fileId);
+      this.db.updateFilePath(payload.fileId, result.finalPath, result.ok ? 'delivered' : 'failed');
+      this.db.upsertGroupAttachmentDownload({
+        fileId: payload.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        status: result.ok ? 'complete' : 'failed',
+        localPath: result.ok ? result.finalPath : null,
+        receivedAt: result.ok ? Date.now() : null,
+        updatedAt: Date.now()
+      });
+      const updated = this.db.getMessageById(download.messageId);
+      if (updated) {
+        this.emitEvent({ type: 'message:updated', message: updated });
+      }
+      this.emitEvent({
+        type: 'message:status',
+        messageId: download.messageId,
+        conversationId: updated?.conversationId || null,
+        status: result.ok ? 'delivered' : 'failed'
+      });
+      if (result.ok) {
+        await this.relay?.markGroupFileReceived(payload.fileId).catch(() => undefined);
+      }
+    } catch (error) {
+      this.db.updateMessageStatus(download.messageId, 'failed');
+      this.db.upsertGroupAttachmentDownload({
+        fileId: payload.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        status: 'failed',
+        localPath: null,
+        receivedAt: null,
+        updatedAt: Date.now()
+      });
+      const updated = this.db.getMessageById(download.messageId);
+      if (updated) {
+        this.emitEvent({ type: 'message:updated', message: updated });
+      }
+      this.emitEvent({
+        type: 'message:status',
+        messageId: download.messageId,
+        conversationId: updated?.conversationId || null,
+        status: 'failed'
+      });
+      console.warn(
+        '[Lantern][Relay] falha ao validar anexo de grupo:',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async createGroup(input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }): Promise<GroupInfo> {
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    const ack = await this.relay.sendGroupAction('create', {
+      name: input.name,
+      emoji: input.emoji,
+      avatarBg: input.avatarBg,
+      description: input.description,
+      memberDeviceIds: input.memberDeviceIds
+    });
+    const group = ack.group as GroupInfo | undefined;
+    if (!group?.groupId) {
+      throw new Error('Relay não retornou o grupo criado.');
+    }
+    this.db.upsertGroup(group);
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+    return group;
+  }
+
+  private async updateGroup(
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('update', {
+        groupId,
+        ...input
+      });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async addGroupMembers(groupId: string, memberDeviceIds: string[]): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('addMembers', {
+        groupId,
+        memberDeviceIds
+      });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async removeGroupMember(groupId: string, deviceId: string): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('removeMember', {
+        groupId,
+        deviceId
+      });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async setGroupMemberRole(
+    groupId: string,
+    deviceId: string,
+    role: 'admin' | 'member'
+  ): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('changeRole', {
+        groupId,
+        deviceId,
+        role
+      });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async transferGroupOwnership(groupId: string, deviceId: string): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('transferOwnership', {
+        groupId,
+        deviceId
+      });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async deleteGroup(groupId: string): Promise<void> {
+    const localGroup = this.db.getGroupById(groupId);
+    if (localGroup?.missingOnRelay) {
+      this.deleteLocalGroup(groupId);
+      return;
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('deleteGroup', { groupId });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.deleteLocalGroup(groupId);
+        return;
+      }
+      throw error;
+    }
+    const group = this.db.getGroupById(groupId);
+    if (group) {
+      this.db.upsertGroup({ ...group, deletedAt: Date.now(), updatedAt: Date.now() });
+    }
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+  }
+
+  private async leaveGroup(groupId: string): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (group?.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    try {
+      await this.relay.sendGroupAction('leave', { groupId });
+    } catch (error) {
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(groupId);
+      }
+      throw error;
+    }
+    const current = this.db
+      .getGroupMembers(groupId)
+      .find((member) => member.deviceId === this.profile.deviceId);
+    this.db.upsertGroupMembers(groupId, [
+      {
+        groupId,
+        deviceId: this.profile.deviceId,
+        role: current?.role || 'member',
+        status: 'left',
+        displayNameSnapshot: current?.displayNameSnapshot || this.profile.displayName,
+        avatarEmojiSnapshot: current?.avatarEmojiSnapshot || this.profile.avatarEmoji,
+        avatarBgSnapshot: current?.avatarBgSnapshot || this.profile.avatarBg,
+        joinedAt: current?.joinedAt || Date.now(),
+        updatedAt: Date.now()
+      }
+    ]);
+    this.emitEvent({
+      type: 'group:members',
+      groupId,
+      members: this.db.getGroupMembers(groupId)
+    });
+    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+  }
+
+  private async setGroupMessagePinned(
+    groupId: string,
+    messageId: string,
+    pinned: boolean
+  ): Promise<void> {
+    const group = this.db.getGroupById(groupId);
+    if (!group) {
+      throw new Error('Grupo não encontrado.');
+    }
+    if (group.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+
+    const next = this.db.setGroupMessagePinned(
+      group.groupId,
+      messageId,
+      pinned,
+      this.profile.deviceId,
+      Date.now()
+    );
+    this.emitEvent({ type: 'group:pins', groupId: group.groupId, messageIds: next });
+
+    try {
+      await this.relay.sendGroupAction(pinned ? 'pin' : 'unpin', {
+        groupId: group.groupId,
+        messageId
+      });
+    } catch (error) {
+      const reverted = this.db.setGroupMessagePinned(
+        group.groupId,
+        messageId,
+        !pinned,
+        this.profile.deviceId,
+        Date.now()
+      );
+      this.emitEvent({ type: 'group:pins', groupId: group.groupId, messageIds: reverted });
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(group.groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async sendGroupText(
+    groupId: string,
+    text: string,
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage> {
+    const group = this.db.getGroupById(groupId);
+    if (!group) {
+      throw new Error('Grupo não encontrado.');
+    }
+    if (group.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    const conversationId = this.db.ensureGroupConversation(group.groupId, group.name);
+    const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
+    const messageId = randomUUID();
+    const sanitizedReply = this.sanitizeGroupReply(replyTo);
+    const message: DbMessage = {
+      messageId,
+      conversationId,
+      direction: 'out',
+      senderDeviceId: this.profile.deviceId,
+      receiverDeviceId: null,
+      type: 'text',
+      bodyText: text,
+      fileId: null,
+      fileName: null,
+      fileSize: null,
+      fileSha256: null,
+      filePath: null,
+      status: 'sent',
+      reaction: null,
+      deletedAt: null,
+      replyToMessageId: sanitizedReply?.messageId || null,
+      replyToSenderDeviceId: sanitizedReply?.senderDeviceId || null,
+      replyToType: sanitizedReply?.type || null,
+      replyToPreviewText: sanitizedReply?.previewText || null,
+      replyToFileName: sanitizedReply?.fileName || null,
+      forwardedFromMessageId: null,
+      editedAt: null,
+      createdAt
+    };
+    this.db.saveMessage(message);
+    this.emitEvent({ type: 'message:received', message });
+    try {
+      await this.relay.sendGroupAction('sendText', {
+        groupId: group.groupId,
+        messageId,
+        text,
+        replyTo: sanitizedReply,
+        createdAt
+      });
+      this.db.updateMessageStatus(messageId, 'delivered');
+      const delivered = this.db.getMessageById(messageId) || { ...message, status: 'delivered' as const };
+      this.emitEvent({ type: 'message:updated', message: delivered });
+    } catch (error) {
+      this.db.updateMessageStatus(messageId, 'failed');
+      const failed = this.db.getMessageById(messageId) || { ...message, status: 'failed' as const };
+      this.emitEvent({ type: 'message:updated', message: failed });
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(group.groupId);
+      }
+      throw error;
+    }
+    return this.db.getMessageById(messageId) || message;
+  }
+
+  private async sendGroupFile(
+    groupId: string,
+    filePath: string,
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage> {
+    const group = this.db.getGroupById(groupId);
+    if (!group) {
+      throw new Error('Grupo não encontrado.');
+    }
+    if (group.missingOnRelay) {
+      throw new Error('Grupo não existe mais no Relay.');
+    }
+    if (!this.relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    const conversationId = this.db.ensureGroupConversation(group.groupId, group.name);
+    const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
+    const messageId = randomUUID();
+    const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
+    const { offer } = await this.fileTransfer.createOffer(group.groupId, managedFilePath, messageId);
+    this.cleanupEphemeralOutgoingFile(filePath);
+    const sanitizedReply = this.sanitizeGroupReply(replyTo);
+    const message: DbMessage = {
+      messageId,
+      conversationId,
+      direction: 'out',
+      senderDeviceId: this.profile.deviceId,
+      receiverDeviceId: null,
+      type: 'file',
+      bodyText: null,
+      fileId: offer.fileId,
+      fileName: offer.filename,
+      fileSize: offer.size,
+      fileSha256: offer.sha256,
+      filePath: managedFilePath,
+      status: 'sent',
+      reaction: null,
+      deletedAt: null,
+      replyToMessageId: sanitizedReply?.messageId || null,
+      replyToSenderDeviceId: sanitizedReply?.senderDeviceId || null,
+      replyToType: sanitizedReply?.type || null,
+      replyToPreviewText: sanitizedReply?.previewText || null,
+      replyToFileName: sanitizedReply?.fileName || null,
+      forwardedFromMessageId: null,
+      editedAt: null,
+      createdAt
+    };
+    this.db.saveMessage(message);
+    this.emitEvent({ type: 'message:received', message });
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'send',
+      fileId: offer.fileId,
+      messageId,
+      peerId: group.groupId,
+      transferred: 0,
+      total: offer.size
+    });
+
+    try {
+      await this.uploadGroupFileToRelay(group, message, offer, sanitizedReply);
+      this.db.updateMessageStatus(messageId, 'delivered');
+      const delivered = this.db.getMessageById(messageId) || { ...message, status: 'delivered' as const };
+      this.emitEvent({ type: 'message:updated', message: delivered });
+      return delivered;
+    } catch (error) {
+      this.db.updateMessageStatus(messageId, 'failed');
+      const failed = this.db.getMessageById(messageId) || message;
+      this.emitEvent({ type: 'message:updated', message: failed });
+      if (this.isGroupMissingOnRelayError(error)) {
+        this.markGroupMissingOnRelay(group.groupId);
+      }
+      throw error;
+    }
+  }
+
+  private async uploadGroupFileToRelay(
+    group: GroupInfo,
+    message: DbMessage,
+    offer: FileOfferPayload,
+    replyTo: MessageReplyPayload | null
+  ): Promise<void> {
+    const relay = this.relay;
+    if (!relay?.isConnected()) {
+      throw new Error('Relay offline.');
+    }
+    if (!message.filePath || !fs.existsSync(message.filePath)) {
+      throw new Error('Arquivo local não está mais disponível para envio.');
+    }
+    if (this.groupFileUploadsInFlight.has(offer.fileId)) {
+      return;
+    }
+    this.groupFileUploadsInFlight.add(offer.fileId);
+    try {
+      const initAck = await relay.sendGroupAction('file:init', {
+        createdAt: message.createdAt,
+        offer: { ...offer, groupId: group.groupId, replyTo }
+      });
+
+      const requestedResumeIndex = Number(initAck.nextIndex);
+      const resumeIndex = Number.isSafeInteger(requestedResumeIndex) && requestedResumeIndex >= 0
+        ? requestedResumeIndex
+        : 0;
+
+      let transferred = 0;
+      const inFlightChunks: Promise<void>[] = [];
+      for await (const chunk of this.fileTransfer.createChunkStream(message.filePath, offer.fileId)) {
+        const bytes = Buffer.byteLength(chunk.dataBase64, 'base64');
+        if (chunk.index < resumeIndex) {
+          transferred = Math.min(offer.size, transferred + bytes);
+          continue;
+        }
+        const sendChunk = relay.sendGroupFileChunk(chunk).then(() => {
+          transferred = Math.min(offer.size, transferred + bytes);
+          this.emitEvent({
+            type: 'transfer:progress',
+            direction: 'send',
+            fileId: offer.fileId,
+            messageId: message.messageId,
+            peerId: group.groupId,
+            transferred,
+            total: offer.size
+          });
+        });
+        inFlightChunks.push(sendChunk);
+        if (inFlightChunks.length >= this.groupUploadWindowSize) {
+          await inFlightChunks.shift();
+        }
+      }
+      if (transferred > 0) {
+        this.emitEvent({
+          type: 'transfer:progress',
+          direction: 'send',
+          fileId: offer.fileId,
+          messageId: message.messageId,
+          peerId: group.groupId,
+          transferred,
+          total: offer.size
+        });
+      }
+      await Promise.all(inFlightChunks);
+      await relay.completeGroupFile(offer.fileId);
+    } finally {
+      this.groupFileUploadsInFlight.delete(offer.fileId);
+    }
+  }
+
+  private async resumePendingGroupFiles(): Promise<void> {
+    if (!this.relay?.isConnected()) return;
+    for (const message of this.db.getPendingOutgoingGroupFiles()) {
+      const groupId = this.groupIdFromConversationId(message.conversationId);
+      if (!groupId || !message.fileId || !message.filePath || !fs.existsSync(message.filePath)) continue;
+      const group = this.db.getGroupById(groupId);
+      if (!group || group.missingOnRelay || this.groupFileUploadsInFlight.has(message.fileId)) continue;
+      try {
+        const { offer } = await this.fileTransfer.createOffer(
+          group.groupId,
+          message.filePath,
+          message.messageId,
+          message.fileId,
+          message.fileName || undefined
+        );
+        const replyTo = this.sanitizeGroupReply(
+          message.replyToMessageId && message.replyToSenderDeviceId && message.replyToType
+            ? {
+                messageId: message.replyToMessageId,
+                senderDeviceId: message.replyToSenderDeviceId,
+                type: message.replyToType,
+                previewText: message.replyToPreviewText,
+                fileName: message.replyToFileName
+              }
+            : null
+        );
+        await this.uploadGroupFileToRelay(group, message, offer, replyTo);
+        this.db.updateMessageStatus(message.messageId, 'delivered');
+        const updated = this.db.getMessageById(message.messageId);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      } catch (error) {
+        if (this.isGroupMissingOnRelayError(error)) {
+          this.markGroupMissingOnRelay(group.groupId);
+        }
+        break;
+      }
+    }
+  }
+
+  private async resumePendingGroupAttachmentDownloads(): Promise<void> {
+    if (!this.relay?.isConnected()) return;
+    for (const download of this.db.getPendingGroupAttachmentDownloads()) {
+      const message = this.db.getMessageById(download.messageId);
+      if (!message?.fileId || !message.senderDeviceId) continue;
+      if (message.filePath && fs.existsSync(message.filePath)) {
+        this.db.upsertGroupAttachmentDownload({
+          ...download,
+          status: 'complete',
+          localPath: message.filePath,
+          receivedAt: Date.now(),
+          updatedAt: Date.now()
+        });
+        await this.relay.markGroupFileReceived(message.fileId).catch(() => undefined);
+        continue;
+      }
+      await this.requestGroupAttachmentIfNeeded({
+        fileId: message.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        senderDeviceId: message.senderDeviceId
+      });
+    }
+  }
+
   private handleRelayAnnouncementExpiry(messageIds: string[]): void {
     const removedIds = this.db.purgeAnnouncementMessageIds(messageIds);
     for (const messageId of removedIds) {
@@ -3175,9 +4851,24 @@ class LanternApp {
             replyToPreviewText: replyTo?.previewText || null,
             replyToFileName: replyTo?.fileName || null,
             forwardedFromMessageId: null,
-            editedAt: null,
+            editedAt:
+              typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)
+                ? this.normalizeInboundCreatedAt(payload.editedAt)
+                : null,
             createdAt
           });
+        } else {
+          const payload = frame.payload as AnnouncementPayload;
+          if (typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)) {
+            const updated = this.db.updateMessageText(
+              frame.messageId,
+              payload.text,
+              this.normalizeInboundCreatedAt(payload.editedAt)
+            );
+            if (updated) {
+              this.emitEvent({ type: 'message:updated', message: updated });
+            }
+          }
         }
         continue;
       }

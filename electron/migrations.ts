@@ -117,6 +117,76 @@ export const runMigrations = (db: Database.Database): void => {
 
     CREATE INDEX IF NOT EXISTS idx_announcement_reads_message
       ON announcement_reads(messageId);
+
+    CREATE TABLE IF NOT EXISTS groups (
+      groupId TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      avatarBg TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      createdByDeviceId TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      lastEventSeq INTEGER NOT NULL DEFAULT 0,
+      deletedAt INTEGER,
+      missingOnRelay INTEGER NOT NULL DEFAULT 0,
+      allowMembersToPin INTEGER NOT NULL DEFAULT 1,
+      allowMembersToEditInfo INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS group_members (
+      groupId TEXT NOT NULL,
+      deviceId TEXT NOT NULL,
+      role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      displayNameSnapshot TEXT,
+      avatarEmojiSnapshot TEXT,
+      avatarBgSnapshot TEXT,
+      joinedAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      PRIMARY KEY (groupId, deviceId)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_members_group
+      ON group_members(groupId, status, role);
+
+    CREATE INDEX IF NOT EXISTS idx_group_members_device
+      ON group_members(deviceId, status);
+
+    CREATE TABLE IF NOT EXISTS group_pinned_messages (
+      groupId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      pinnedByDeviceId TEXT NOT NULL,
+      pinnedAt INTEGER NOT NULL,
+      PRIMARY KEY (groupId, messageId)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_pinned_messages_group
+      ON group_pinned_messages(groupId, pinnedAt DESC);
+
+    CREATE TABLE IF NOT EXISTS group_events_applied (
+      eventId TEXT PRIMARY KEY,
+      groupId TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      createdAt INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_events_applied_group_seq
+      ON group_events_applied(groupId, seq);
+
+    CREATE TABLE IF NOT EXISTS group_attachment_downloads (
+      fileId TEXT PRIMARY KEY,
+      groupId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      status TEXT NOT NULL,
+      localPath TEXT,
+      receivedAt INTEGER,
+      updatedAt INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_attachment_downloads_group
+      ON group_attachment_downloads(groupId, status);
   `);
 
   const profileColumns = db.prepare('PRAGMA table_info(profile)').all() as Array<{ name: string }>;
@@ -205,5 +275,70 @@ export const runMigrations = (db: Database.Database): void => {
     );
     CREATE INDEX IF NOT EXISTS idx_announcement_reads_message
       ON announcement_reads(messageId);
+    CREATE TABLE IF NOT EXISTS groups (
+      groupId TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      avatarBg TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      createdByDeviceId TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      lastEventSeq INTEGER NOT NULL DEFAULT 0,
+      deletedAt INTEGER,
+      missingOnRelay INTEGER NOT NULL DEFAULT 0,
+      allowMembersToPin INTEGER NOT NULL DEFAULT 1,
+      allowMembersToEditInfo INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS group_members (
+      groupId TEXT NOT NULL,
+      deviceId TEXT NOT NULL,
+      role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      displayNameSnapshot TEXT,
+      avatarEmojiSnapshot TEXT,
+      avatarBgSnapshot TEXT,
+      joinedAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      PRIMARY KEY (groupId, deviceId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_members_group
+      ON group_members(groupId, status, role);
+    CREATE INDEX IF NOT EXISTS idx_group_members_device
+      ON group_members(deviceId, status);
+    CREATE TABLE IF NOT EXISTS group_pinned_messages (
+      groupId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      pinnedByDeviceId TEXT NOT NULL,
+      pinnedAt INTEGER NOT NULL,
+      PRIMARY KEY (groupId, messageId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_pinned_messages_group
+      ON group_pinned_messages(groupId, pinnedAt DESC);
+    CREATE TABLE IF NOT EXISTS group_events_applied (
+      eventId TEXT PRIMARY KEY,
+      groupId TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      createdAt INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_events_applied_group_seq
+      ON group_events_applied(groupId, seq);
+    CREATE TABLE IF NOT EXISTS group_attachment_downloads (
+      fileId TEXT PRIMARY KEY,
+      groupId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      status TEXT NOT NULL,
+      localPath TEXT,
+      receivedAt INTEGER,
+      updatedAt INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_attachment_downloads_group
+      ON group_attachment_downloads(groupId, status);
   `);
+
+  const groupColumns = db.prepare('PRAGMA table_info(groups)').all() as Array<{ name: string }>;
+  if (!groupColumns.some((column) => column.name === 'missingOnRelay')) {
+    db.exec('ALTER TABLE groups ADD COLUMN missingOnRelay INTEGER NOT NULL DEFAULT 0;');
+  }
 };

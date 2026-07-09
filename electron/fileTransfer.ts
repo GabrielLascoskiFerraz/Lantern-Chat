@@ -285,6 +285,12 @@ export class FileTransferService {
     }
   }
 
+  abortIncoming(fileId: string): void {
+    const transfer = this.incoming.get(fileId);
+    if (!transfer) return;
+    this.failIncomingTransfer(transfer);
+  }
+
   private flushQueuedWrites(transfer: IncomingTransfer): void {
     if (transfer.streamErrored || transfer.waitingDrain) {
       return;

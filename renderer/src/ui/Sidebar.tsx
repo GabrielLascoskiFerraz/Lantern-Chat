@@ -1,7 +1,7 @@
 import {
   CSSProperties,
   KeyboardEvent,
-  MouseEvent,
+  MouseEvent as ReactMouseEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -32,15 +32,19 @@ import {
   Desktop20Regular,
   Settings20Regular,
   Chat20Regular,
-  MailUnread20Regular
+  MailUnread20Regular,
+  PeopleTeam20Regular,
+  Add20Regular
 } from '@fluentui/react-icons';
-import { Peer, Profile } from '../api/ipcClient';
+import { GroupInfo, GroupMember, Peer, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 
 interface SidebarProps {
   profile: Profile;
   peers: Peer[];
+  groups: GroupInfo[];
+  groupMembersById: Record<string, GroupMember[]>;
   search: string;
   selectedConversationId: string;
   unreadByConversation: Record<string, number>;
@@ -55,8 +59,21 @@ interface SidebarProps {
   onUnarchiveConversation: (id: string) => Promise<void>;
   onClearConversation: (id: string) => Promise<void>;
   onForgetContactConversation: (id: string) => Promise<void>;
+  onResyncConversation: (id: string) => Promise<void>;
+  onOpenGroupDetails: (groupId: string) => void;
+  onLeaveGroup: (groupId: string) => Promise<void>;
+  onDeleteGroup: (groupId: string) => Promise<void>;
+  onCreateGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => Promise<void>;
   onOpenSettings: () => void;
   onQuickStatusChange: (statusMessage: string) => Promise<void>;
+  startupSettings: StartupSettings | null;
+  onDoNotDisturbUntilChange: (value: number) => Promise<void>;
   themeMode: 'system' | 'light' | 'dark';
   onThemeModeChange: (mode: 'system' | 'light' | 'dark') => void;
   relayConnected: boolean;
@@ -64,9 +81,25 @@ interface SidebarProps {
   syncActive: boolean;
 }
 
+const GROUP_EMOJI_CHOICES = ['👥', '💬', '🏢', '🚀', '🎯', '🧠', '🛠️', '📌', '📣', '☕', '🐱', '🦊', '🍕', '🌟', '🔥', '✅'];
+const GROUP_COLOR_CHOICES = [
+  '#147ad6',
+  '#00b7c3',
+  '#8cbd18',
+  '#ff8c00',
+  '#d13438',
+  '#8764b8',
+  '#107c10',
+  '#5c2e91',
+  '#69797e',
+  '#ca5010'
+];
+
 export const Sidebar = ({
   profile,
   peers,
+  groups,
+  groupMembersById,
   search,
   selectedConversationId,
   unreadByConversation,
@@ -81,8 +114,15 @@ export const Sidebar = ({
   onUnarchiveConversation,
   onClearConversation,
   onForgetContactConversation,
+  onResyncConversation,
+  onOpenGroupDetails,
+  onLeaveGroup,
+  onDeleteGroup,
+  onCreateGroup,
   onOpenSettings,
   onQuickStatusChange,
+  startupSettings,
+  onDoNotDisturbUntilChange,
   themeMode,
   onThemeModeChange,
   relayConnected,
@@ -111,10 +151,20 @@ export const Sidebar = ({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; conversationId: string } | null>(null);
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
   const [pendingForgetConversationId, setPendingForgetConversationId] = useState<string | null>(null);
+  const [pendingLeaveGroupId, setPendingLeaveGroupId] = useState<string | null>(null);
+  const [pendingDeleteGroupId, setPendingDeleteGroupId] = useState<string | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [quickStatusOpen, setQuickStatusOpen] = useState(false);
   const [quickStatusClosing, setQuickStatusClosing] = useState(false);
   const [customStatusDraft, setCustomStatusDraft] = useState('');
+  const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  const [groupDraft, setGroupDraft] = useState({
+    name: '',
+    emoji: '👥',
+    avatarBg: '#147ad6',
+    description: ''
+  });
+  const [groupMemberIds, setGroupMemberIds] = useState<string[]>([]);
   const quickStatusRef = useRef<HTMLDivElement | null>(null);
   const quickStatusButtonRef = useRef<HTMLButtonElement | null>(null);
   const quickStatusCloseTimeoutRef = useRef<number | null>(null);
@@ -128,6 +178,16 @@ export const Sidebar = ({
   const statusOptions = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
   const CONTACT_ITEM_HEIGHT = 70;
   const CONTACT_OVERSCAN = 8;
+  const activeDoNotDisturbUntil = Math.max(0, Number(startupSettings?.doNotDisturbUntil || 0));
+  const setDoNotDisturbFor = (milliseconds: number): void => {
+    void onDoNotDisturbUntilChange(Date.now() + milliseconds);
+  };
+  const setDoNotDisturbUntilTomorrow = (): void => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(8, 0, 0, 0);
+    void onDoNotDisturbUntilChange(tomorrow.getTime());
+  };
 
   const TypingInline = () => (
     <span className="sidebar-typing-inline" aria-label="Digitando">
@@ -201,6 +261,10 @@ export const Sidebar = ({
     [unreadByConversation]
   );
   const unreadLabel = totalUnreadCount === 1 ? '1 não lida' : `${totalUnreadCount} não lidas`;
+  const filteredGroups = useMemo(
+    () => groups.filter((group) => group.name.toLowerCase().includes(search.toLowerCase())),
+    [groups, search]
+  );
   const shouldVirtualizeContacts = orderedFiltered.length > 70;
   const contactVisibleStart = shouldVirtualizeContacts
     ? Math.max(0, Math.floor(contactsScrollTop / CONTACT_ITEM_HEIGHT) - CONTACT_OVERSCAN)
@@ -261,7 +325,7 @@ export const Sidebar = ({
 
   useEffect(() => {
     const onClose = () => setContextMenu(null);
-    const onCloseQuickStatus = (event: MouseEvent) => {
+    const onCloseQuickStatus = (event: globalThis.MouseEvent) => {
       if (!quickStatusRef.current) return;
       if (!quickStatusRef.current.contains(event.target as Node)) {
         closeQuickStatusMenu();
@@ -398,7 +462,7 @@ export const Sidebar = ({
   }, [shouldVirtualizeContacts]);
 
   const openContextMenu = (
-    event: MouseEvent<HTMLElement>,
+    event: ReactMouseEvent<HTMLElement>,
     conversationId: string
   ): void => {
     if (conversationId === 'announcements') {
@@ -407,12 +471,35 @@ export const Sidebar = ({
     event.preventDefault();
     const menuWidth = Math.max(140, Math.min(228, window.innerWidth - 24));
     const isDm = conversationId.startsWith('dm:');
-    const actionCount = isDm ? 5 : 2;
+    const groupId = conversationId.startsWith('group:') ? conversationId.slice('group:'.length) : '';
+    const group = groupId ? groups.find((candidate) => candidate.groupId === groupId) : null;
+    const localMember = group
+      ? (groupMembersById[group.groupId] || []).find(
+          (member) => member.deviceId === profile.deviceId && member.status === 'active'
+        )
+      : null;
+    const canDeleteGroup = Boolean(group?.missingOnRelay || localMember?.role === 'owner');
+    const actionCount = isDm ? 5 : group ? 5 + (canDeleteGroup ? 1 : 0) : 2;
     const menuHeight = Math.max(112, Math.min(actionCount * 46 + 16, window.innerHeight - 24));
     const x = Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth - 12));
     const y = Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight - 12));
     setContextMenu({ x, y, conversationId });
   };
+
+  const contextGroup = useMemo(() => {
+    if (!contextMenu?.conversationId.startsWith('group:')) return null;
+    const groupId = contextMenu.conversationId.slice('group:'.length);
+    return groups.find((group) => group.groupId === groupId) || null;
+  }, [contextMenu, groups]);
+
+  const contextGroupMembership = contextGroup
+    ? (groupMembersById[contextGroup.groupId] || []).find(
+        (member) => member.deviceId === profile.deviceId && member.status === 'active'
+      )
+    : null;
+  const canDeleteContextGroup = Boolean(
+    contextGroup?.missingOnRelay || contextGroupMembership?.role === 'owner'
+  );
 
   const isConversationPinned = (conversationId: string): boolean =>
     pinnedConversationIds.includes(conversationId);
@@ -514,6 +601,49 @@ export const Sidebar = ({
     );
   };
 
+  const renderGroupItem = (group: GroupInfo) => {
+    const conversationId = `group:${group.groupId}`;
+    const unread = unreadByConversation[conversationId] || 0;
+    const previewText = conversationPreviewById[conversationId] || group.description || 'Grupo';
+
+    return (
+      <div
+        key={group.groupId}
+        role="button"
+        tabIndex={0}
+        className={`conversation-item group ${selectedConversationId === conversationId ? 'active' : ''}`}
+        onClick={() => onSelectConversation(conversationId)}
+        onKeyDown={(event) => handleConversationKeyDown(event, conversationId)}
+        onContextMenu={(event) => openContextMenu(event, conversationId)}
+      >
+        <div className="conversation-meta">
+          <div className="avatar-presence-wrap">
+            <Avatar emoji={group.emoji} bg={group.avatarBg} size={36} />
+            <span className={`presence-dot ${relayConnected ? 'online' : 'offline'}`} />
+          </div>
+          <div className="conversation-text">
+            <Text weight="semibold">{group.name}</Text>
+            <div className="conversation-submeta">
+              <Caption1 className="conversation-status-line">
+                <span className={`conversation-status-pill ${relayConnected ? 'online' : 'offline'}`}>
+                  {relayConnected ? 'Grupo conectado' : 'Relay offline'}
+                </span>
+              </Caption1>
+              <Caption1 className="conversation-preview conversation-preview-slot">
+                <span className="conversation-preview-text">{previewText}</span>
+              </Caption1>
+            </div>
+          </div>
+        </div>
+        {unread > 0 && (
+          <Badge appearance="filled" color="danger">
+            {unread}
+          </Badge>
+        )}
+      </div>
+    );
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar-topbar">
@@ -575,6 +705,31 @@ export const Sidebar = ({
                     Aplicar
                   </Button>
                 </div>
+                <div className="quick-status-dnd">
+                  <div className="quick-status-dnd-title">
+                    <WeatherMoon20Regular />
+                    <span>Não perturbe</span>
+                    <span className={`quick-status-dnd-badge ${activeDoNotDisturbUntil > Date.now() ? 'active' : ''}`}>
+                      {activeDoNotDisturbUntil > Date.now() ? 'Ativo' : 'Desativado'}
+                    </span>
+                  </div>
+                  <div className="quick-status-dnd-actions">
+                    <button type="button" onClick={() => setDoNotDisturbFor(15 * 60 * 1000)}>
+                      15 min
+                    </button>
+                    <button type="button" onClick={() => setDoNotDisturbFor(60 * 60 * 1000)}>
+                      1h
+                    </button>
+                    <button type="button" onClick={setDoNotDisturbUntilTomorrow}>
+                      Até amanhã
+                    </button>
+                    {activeDoNotDisturbUntil > Date.now() && (
+                      <button type="button" onClick={() => void onDoNotDisturbUntilChange(0)}>
+                        Desativar
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -625,6 +780,43 @@ export const Sidebar = ({
           </Badge>
         )}
       </button>
+
+      {(groups.length > 0 || search.trim().length === 0) && (
+        <div className="sidebar-groups-section">
+          <div className="sidebar-section-title">
+            <Caption1>Grupos</Caption1>
+            <Button
+              size="small"
+              appearance="subtle"
+              icon={<Add20Regular />}
+              onClick={() => setCreateGroupOpen(true)}
+            >
+              Novo
+            </Button>
+          </div>
+          <div className="groups-list">
+            {filteredGroups.map((group) => renderGroupItem(group))}
+            {filteredGroups.length === 0 && groups.length > 0 && (
+              <Caption1 className="archived-conversations-empty">
+                Nenhum grupo corresponde à pesquisa.
+              </Caption1>
+            )}
+            {groups.length === 0 && (
+              <button
+                type="button"
+                className="archived-conversations-toggle create-group-empty"
+                onClick={() => setCreateGroupOpen(true)}
+              >
+                <span className="archived-conversations-label">
+                  <PeopleTeam20Regular />
+                  <span>Criar primeiro grupo</span>
+                </span>
+                <Add20Regular />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="sidebar-section-title">
         <Caption1>Contatos</Caption1>
@@ -695,6 +887,38 @@ export const Sidebar = ({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
+          {contextGroup && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                onSelectConversation(contextMenu.conversationId);
+                onOpenGroupDetails(contextGroup.groupId);
+                setContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <PeopleTeam20Regular />
+              </span>
+              <span>Detalhes do grupo</span>
+            </button>
+          )}
+          {contextGroup && !contextGroup.missingOnRelay && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                onSelectConversation(contextMenu.conversationId);
+                void onResyncConversation(contextMenu.conversationId);
+                setContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <ArrowSync20Regular />
+              </span>
+              <span>Ressincronizar grupo</span>
+            </button>
+          )}
           {contextMenu.conversationId.startsWith('dm:') &&
             !isConversationArchived(contextMenu.conversationId) && (
             <button
@@ -767,7 +991,7 @@ export const Sidebar = ({
             <span className="menu-item-icon">
               <Delete20Regular />
             </span>
-            <span>Limpar conversa</span>
+            <span>{contextGroup ? 'Limpar conversa local' : 'Limpar conversa'}</span>
           </button>
           {contextMenu.conversationId.startsWith('dm:') && (
             <button
@@ -784,6 +1008,179 @@ export const Sidebar = ({
               <span>Excluir contato e conversa</span>
             </button>
           )}
+          {contextGroup && !contextGroup.missingOnRelay && (
+            <button
+              type="button"
+              className="chat-context-item danger"
+              onClick={() => {
+                setPendingLeaveGroupId(contextGroup.groupId);
+                setContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <Dismiss20Regular />
+              </span>
+              <span>Sair do grupo</span>
+            </button>
+          )}
+          {contextGroup && canDeleteContextGroup && (
+            <button
+              type="button"
+              className="chat-context-item danger"
+              onClick={() => {
+                setPendingDeleteGroupId(contextGroup.groupId);
+                setContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                <Delete20Regular />
+              </span>
+              <span>{contextGroup.missingOnRelay ? 'Remover grupo local' : 'Excluir grupo'}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {createGroupOpen && (
+        <div
+          className="group-create-backdrop"
+          onClick={() => setCreateGroupOpen(false)}
+        >
+          <div className="group-create-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="group-create-header">
+              <div className="group-create-title">
+                <PeopleTeam20Regular />
+                <Text weight="semibold">Novo grupo</Text>
+              </div>
+              <Button
+                appearance="subtle"
+                icon={<Dismiss20Regular />}
+                onClick={() => setCreateGroupOpen(false)}
+              />
+            </div>
+            <div className="group-create-form">
+              <div className="group-create-avatar-row">
+                <Avatar emoji={groupDraft.emoji || '👥'} bg={groupDraft.avatarBg || '#147ad6'} size={42} />
+                <Input
+                  value={groupDraft.emoji}
+                  maxLength={4}
+                  placeholder="Emoji"
+                  onChange={(_, data) => setGroupDraft((current) => ({ ...current, emoji: data.value || '👥' }))}
+                />
+                <Input
+                  value={groupDraft.avatarBg}
+                  placeholder="#147ad6"
+                  onChange={(_, data) => setGroupDraft((current) => ({ ...current, avatarBg: data.value || '#147ad6' }))}
+                />
+              </div>
+              <div className="group-choice-grid emoji">
+                {GROUP_EMOJI_CHOICES.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    className={`group-choice-btn ${groupDraft.emoji === emoji ? 'selected' : ''}`}
+                    onClick={() => setGroupDraft((current) => ({ ...current, emoji }))}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+              <div className="group-choice-grid colors">
+                {GROUP_COLOR_CHOICES.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    className={`group-color-btn ${
+                      groupDraft.avatarBg.toLowerCase() === color.toLowerCase() ? 'selected' : ''
+                    }`}
+                    style={{ background: color }}
+                    aria-label={`Usar cor ${color}`}
+                    onClick={() => setGroupDraft((current) => ({ ...current, avatarBg: color }))}
+                  />
+                ))}
+                <label
+                  className="group-color-picker-btn"
+                  title="Escolher cor customizada"
+                  aria-label="Escolher cor customizada"
+                >
+                  <input
+                    type="color"
+                    value={/^#[0-9a-f]{6}$/i.test(groupDraft.avatarBg) ? groupDraft.avatarBg : '#147ad6'}
+                    onChange={(event) =>
+                      setGroupDraft((current) => ({ ...current, avatarBg: event.target.value }))
+                    }
+                  />
+                  <span style={{ background: groupDraft.avatarBg || '#147ad6' }} />
+                </label>
+              </div>
+              <Input
+                value={groupDraft.name}
+                placeholder="Nome do grupo"
+                onChange={(_, data) => setGroupDraft((current) => ({ ...current, name: data.value }))}
+              />
+              <Input
+                value={groupDraft.description}
+                placeholder="Descrição"
+                onChange={(_, data) => setGroupDraft((current) => ({ ...current, description: data.value }))}
+              />
+              <div className="group-create-members">
+                <Caption1>Participantes</Caption1>
+                <div className="group-create-members-list">
+                  {peers.map((peer) => {
+                    const checked = groupMemberIds.includes(peer.deviceId);
+                    const isOnline = onlinePeerIds.includes(peer.deviceId);
+                    return (
+                      <label key={peer.deviceId} className="group-member-option">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setGroupMemberIds((current) =>
+                              current.includes(peer.deviceId)
+                                ? current.filter((id) => id !== peer.deviceId)
+                                : [...current, peer.deviceId]
+                            );
+                          }}
+                        />
+                        <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} size={26} />
+                        <span>{peer.displayName}</span>
+                        <span className={`presence-dot inline ${isOnline ? 'online' : 'offline'}`} />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="group-create-actions">
+              <Button appearance="secondary" onClick={() => setCreateGroupOpen(false)}>
+                Cancelar
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={!groupDraft.name.trim() || groupMemberIds.length === 0}
+                onClick={() => {
+                  void onCreateGroup({
+                    name: groupDraft.name.trim(),
+                    emoji: groupDraft.emoji.trim() || '👥',
+                    avatarBg: groupDraft.avatarBg.trim() || '#147ad6',
+                    description: groupDraft.description.trim(),
+                    memberDeviceIds: groupMemberIds
+                  }).then(() => {
+                    setCreateGroupOpen(false);
+                    setGroupDraft({
+                      name: '',
+                      emoji: '👥',
+                      avatarBg: '#147ad6',
+                      description: ''
+                    });
+                    setGroupMemberIds([]);
+                  });
+                }}
+              >
+                Criar grupo
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -811,6 +1208,36 @@ export const Sidebar = ({
             void onForgetContactConversation(pendingForgetConversationId);
           }
           setPendingForgetConversationId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingLeaveGroupId)}
+        title="Sair do grupo"
+        description="Você deixará de receber novas mensagens deste grupo. Se você for o dono, transfira a propriedade para um administrador antes de sair."
+        confirmLabel="Sair"
+        onCancel={() => setPendingLeaveGroupId(null)}
+        onConfirm={() => {
+          if (pendingLeaveGroupId) {
+            void onLeaveGroup(pendingLeaveGroupId);
+          }
+          setPendingLeaveGroupId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingDeleteGroupId)}
+        title="Excluir grupo"
+        description={
+          groups.find((group) => group.groupId === pendingDeleteGroupId)?.missingOnRelay
+            ? 'O grupo já não existe no Relay. Esta ação remove apenas os dados locais desta conversa.'
+            : 'Esta ação exclui o grupo para todos os participantes e não pode ser desfeita.'
+        }
+        confirmLabel="Excluir"
+        onCancel={() => setPendingDeleteGroupId(null)}
+        onConfirm={() => {
+          if (pendingDeleteGroupId) {
+            void onDeleteGroup(pendingDeleteGroupId);
+          }
+          setPendingDeleteGroupId(null);
         }}
       />
     </aside>

@@ -4,7 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import os from 'node:os';
 import { APP_VERSION } from './config';
-import { Profile, ProtocolFrame } from './types';
+import {
+  GroupEvent,
+  GroupSnapshot,
+  Profile,
+  ProtocolFrame
+} from './types';
 
 interface RelayPeerSnapshot {
   deviceId: string;
@@ -39,6 +44,7 @@ interface RelaySendAckPayload {
 interface RelayErrorPayload {
   code?: string;
   message?: string;
+  frameMessageId?: string;
 }
 
 interface RelayDeliverPayload {
@@ -81,6 +87,46 @@ interface RelaySendResult {
   deliveredTo: string[];
 }
 
+interface RelayGroupAckPayload {
+  requestId: string;
+  ok: boolean;
+  code?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+interface RelayGroupSnapshotPayload {
+  serverTime: number;
+  reason: string;
+  snapshots: GroupSnapshot[];
+}
+
+interface RelayGroupEventPayload {
+  serverTime: number;
+  event: GroupEvent;
+}
+
+interface RelayGroupFileStartPayload {
+  requestId: string;
+  fileId: string;
+  metadata: unknown;
+}
+
+interface RelayGroupFileChunkPayload {
+  requestId: string;
+  fileId: string;
+  index: number;
+  total: number;
+  dataBase64: string;
+}
+
+interface RelayGroupFileChunkAckPayload {
+  fileId: string;
+  index: number;
+  code?: string;
+  message?: string;
+}
+
 interface RelayConnectionState {
   connected: boolean;
   endpoint: string | null;
@@ -95,6 +141,12 @@ interface RelayEndpointSettings {
 interface RelayClientCallbacks {
   onFrame: (frame: ProtocolFrame) => void;
   onPresence: (peers: RelayPeerSnapshot[]) => void;
+  onGroupSnapshot?: (snapshots: GroupSnapshot[]) => void;
+  onGroupEvent?: (event: GroupEvent) => void;
+  onGroupFileStart?: (payload: RelayGroupFileStartPayload) => void;
+  onGroupFileChunk?: (payload: RelayGroupFileChunkPayload) => void;
+  onGroupFileComplete?: (payload: { requestId: string; fileId: string }) => void;
+  onGroupFileRequestFailed?: (payload: { requestId: string; message: string }) => void;
   onAnnouncementExpired?: (messageIds: string[]) => void;
   onAnnouncementSnapshot?: (
     frames: ProtocolFrame[],
@@ -113,6 +165,19 @@ interface RelayClientCallbacks {
 interface PendingSendAck {
   promise: Promise<RelaySendResult>;
   resolve: (result: RelaySendResult) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface PendingGroupAck {
+  promise: Promise<RelayGroupAckPayload>;
+  resolve: (result: RelayGroupAckPayload) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface PendingGroupChunkAck {
+  resolve: () => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
 }
@@ -411,6 +476,8 @@ export class RelayClient {
   private presenceStaleTimer: NodeJS.Timeout | null = null;
   private reconnectDelayMs = RECONNECT_DELAY_INITIAL_MS;
   private readonly pendingAcks = new Map<string, PendingSendAck>();
+  private readonly pendingGroupAcks = new Map<string, PendingGroupAck>();
+  private readonly pendingGroupChunkAcks = new Map<string, PendingGroupChunkAck>();
   private readonly readyWaiters = new Set<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -487,6 +554,8 @@ export class RelayClient {
     }
 
     this.rejectPendingAcks(new Error('Conexão do relay encerrada.'));
+    this.rejectPendingGroupAcks(new Error('Conexão do relay encerrada.'));
+    this.rejectPendingGroupChunkAcks(new Error('Conexão do relay encerrada.'));
     this.rejectReadyWaiters(new Error('Conexão do relay encerrada.'));
 
     if (this.browser) {
@@ -574,6 +643,8 @@ export class RelayClient {
       this.lastPresenceAt = 0;
       this.relayPeersById.clear();
       this.rejectPendingAcks(new Error('Endpoint do relay alterado.'));
+      this.rejectPendingGroupAcks(new Error('Endpoint do relay alterado.'));
+      this.rejectPendingGroupChunkAcks(new Error('Endpoint do relay alterado.'));
       this.rejectReadyWaiters(new Error('Endpoint do relay alterado.'));
       this.callbacks.onPresence([]);
       this.cancelPresenceStaleTimer();
@@ -712,6 +783,180 @@ export class RelayClient {
       payload: {
         messageIds: cleanIds,
         readAt
+      }
+    });
+  }
+
+  async syncGroups(knownSeqByGroup: Record<string, number>): Promise<void> {
+    await this.waitUntilReady(8_000);
+    this.sendEnvelope({
+      type: 'relay:groups:sync',
+      payload: {
+        knownSeqByGroup
+      }
+    });
+  }
+
+  async sendGroupAction(
+    action: string,
+    data: Record<string, unknown> = {}
+  ): Promise<RelayGroupAckPayload> {
+    await this.waitUntilReady(8_000);
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('Relay indisponível.');
+    }
+
+    const requestId = randomUUID();
+    let resolveAck!: (result: RelayGroupAckPayload) => void;
+    let rejectAck!: (error: Error) => void;
+    const promise = new Promise<RelayGroupAckPayload>((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+
+    const timeout = setTimeout(() => {
+      const pending = this.pendingGroupAcks.get(requestId);
+      if (!pending || pending.promise !== promise) {
+        return;
+      }
+      this.pendingGroupAcks.delete(requestId);
+      this.forceSocketDisconnect();
+      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
+    }, ACK_TIMEOUT_MS);
+    timeout.unref?.();
+
+    this.pendingGroupAcks.set(requestId, {
+      promise,
+      resolve: resolveAck,
+      reject: rejectAck,
+      timeout
+    });
+
+    this.sendEnvelope({
+      type: 'relay:group:request',
+      payload: {
+        requestId,
+        action,
+        data
+      }
+    }, (error) => {
+      if (!error) return;
+      const pending = this.pendingGroupAcks.get(requestId);
+      if (!pending || pending.promise !== promise) return;
+      clearTimeout(pending.timeout);
+      this.pendingGroupAcks.delete(requestId);
+      pending.reject(new Error('Falha ao enviar ação de grupo ao relay.'));
+    });
+
+    return promise;
+  }
+
+  async sendGroupFileChunk(payload: {
+    fileId: string;
+    index: number;
+    total: number;
+    dataBase64: string;
+  }): Promise<void> {
+    await this.waitUntilReady(8_000);
+    const key = `${payload.fileId}:${payload.index}`;
+    let resolveAck!: () => void;
+    let rejectAck!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+    const timeout = setTimeout(() => {
+      const pending = this.pendingGroupChunkAcks.get(key);
+      if (!pending) return;
+      this.pendingGroupChunkAcks.delete(key);
+      pending.reject(new Error('Timeout aguardando confirmação do chunk no Relay.'));
+    }, ACK_TIMEOUT_MS);
+    timeout.unref?.();
+    this.pendingGroupChunkAcks.set(key, { resolve: resolveAck, reject: rejectAck, timeout });
+    this.sendEnvelope({
+      type: 'relay:group:file:chunk',
+      payload
+    }, (error) => {
+      if (!error) return;
+      const pending = this.pendingGroupChunkAcks.get(key);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      this.pendingGroupChunkAcks.delete(key);
+      pending.reject(new Error('Falha ao enviar chunk de grupo ao Relay.'));
+    });
+    return promise;
+  }
+
+  async completeGroupFile(fileId: string): Promise<RelayGroupAckPayload> {
+    await this.waitUntilReady(8_000);
+    const requestId = randomUUID();
+    let resolveAck!: (result: RelayGroupAckPayload) => void;
+    let rejectAck!: (error: Error) => void;
+    const promise = new Promise<RelayGroupAckPayload>((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+    const timeout = setTimeout(() => {
+      const pending = this.pendingGroupAcks.get(requestId);
+      if (!pending || pending.promise !== promise) return;
+      this.pendingGroupAcks.delete(requestId);
+      this.forceSocketDisconnect();
+      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
+    }, ACK_TIMEOUT_MS);
+    timeout.unref?.();
+    this.pendingGroupAcks.set(requestId, {
+      promise,
+      resolve: resolveAck,
+      reject: rejectAck,
+      timeout
+    });
+    this.sendEnvelope({
+      type: 'relay:group:file:complete',
+      payload: {
+        requestId,
+        fileId
+      }
+    }, (error) => {
+      if (!error) return;
+      const pending = this.pendingGroupAcks.get(requestId);
+      if (!pending || pending.promise !== promise) return;
+      clearTimeout(pending.timeout);
+      this.pendingGroupAcks.delete(requestId);
+      pending.reject(new Error('Falha ao finalizar anexo de grupo.'));
+    });
+    return promise;
+  }
+
+  async requestGroupFile(fileId: string): Promise<string> {
+    await this.waitUntilReady(8_000);
+    const requestId = randomUUID();
+    return new Promise<string>((resolve, reject) => {
+      this.sendEnvelope(
+        {
+          type: 'relay:group:file:request',
+          payload: {
+            requestId,
+            fileId
+          }
+        },
+        (error) => {
+          if (error) {
+            reject(new Error('Falha ao solicitar anexo de grupo ao Relay.'));
+            return;
+          }
+          resolve(requestId);
+        }
+      );
+    });
+  }
+
+  async markGroupFileReceived(fileId: string): Promise<void> {
+    await this.waitUntilReady(8_000);
+    this.sendEnvelope({
+      type: 'relay:group:file:received',
+      payload: {
+        fileId
       }
     });
   }
@@ -937,6 +1182,8 @@ export class RelayClient {
     }
     this.relayPeersById.clear();
     this.rejectPendingAcks(new Error('Conexão com relay perdida.'));
+    this.rejectPendingGroupAcks(new Error('Conexão com relay perdida.'));
+    this.rejectPendingGroupChunkAcks(new Error('Conexão com relay perdida.'));
     this.rejectReadyWaiters(new Error('Conexão com relay perdida.'));
 
     this.callbacks.onPresence([]);
@@ -1144,6 +1391,113 @@ export class RelayClient {
         }
         return;
       }
+      case 'relay:groups:snapshot': {
+        const payload = asRecord(envelope.payload) as RelayGroupSnapshotPayload | null;
+        const snapshots = Array.isArray(payload?.snapshots)
+          ? payload!.snapshots.filter((snapshot): snapshot is GroupSnapshot =>
+              Boolean(snapshot && typeof snapshot === 'object' && snapshot.group)
+            )
+          : [];
+        this.callbacks.onGroupSnapshot?.(snapshots);
+        return;
+      }
+      case 'relay:group:event': {
+        const payload = asRecord(envelope.payload) as RelayGroupEventPayload | null;
+        const event = payload?.event;
+        if (!event || typeof event !== 'object' || typeof event.eventId !== 'string') {
+          return;
+        }
+        this.callbacks.onGroupEvent?.(event);
+        return;
+      }
+      case 'relay:group:ack': {
+        const payload = asRecord(envelope.payload) as RelayGroupAckPayload | null;
+        const requestId = asString(payload?.requestId);
+        if (!requestId) return;
+        const pending = this.pendingGroupAcks.get(requestId);
+        if (!pending) {
+          if (payload?.ok === false) {
+            this.callbacks.onGroupFileRequestFailed?.({
+              requestId,
+              message: asString(payload.message) || 'Falha ao obter anexo de grupo.'
+            });
+          }
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingGroupAcks.delete(requestId);
+        if (payload?.ok === false) {
+          pending.reject(new Error(asString(payload.message) || 'Falha na ação de grupo.'));
+          return;
+        }
+        pending.resolve({
+          requestId,
+          ok: true,
+          ...(payload || {})
+        });
+        return;
+      }
+      case 'relay:group:file:start': {
+        const payload = asRecord(envelope.payload) as RelayGroupFileStartPayload | null;
+        const requestId = asString(payload?.requestId);
+        const fileId = asString(payload?.fileId);
+        if (!requestId || !fileId) return;
+        this.callbacks.onGroupFileStart?.({
+          requestId,
+          fileId,
+          metadata: payload?.metadata || null
+        });
+        return;
+      }
+      case 'relay:group:file:chunk': {
+        const payload = asRecord(envelope.payload) as RelayGroupFileChunkPayload | null;
+        const requestId = asString(payload?.requestId);
+        const fileId = asString(payload?.fileId);
+        const dataBase64 = typeof payload?.dataBase64 === 'string' ? payload.dataBase64 : '';
+        if (!requestId || !fileId) return;
+        this.callbacks.onGroupFileChunk?.({
+          requestId,
+          fileId,
+          index:
+            typeof payload?.index === 'number' && Number.isFinite(payload.index)
+              ? Math.trunc(payload.index)
+              : 0,
+          total:
+            typeof payload?.total === 'number' && Number.isFinite(payload.total)
+              ? Math.trunc(payload.total)
+              : 0,
+          dataBase64
+        });
+        return;
+      }
+      case 'relay:group:file:chunk:ack':
+      case 'relay:group:file:chunk:error': {
+        const payload = asRecord(envelope.payload) as RelayGroupFileChunkAckPayload | null;
+        const fileId = asString(payload?.fileId);
+        const index =
+          typeof payload?.index === 'number' && Number.isFinite(payload.index)
+            ? Math.trunc(payload.index)
+            : null;
+        if (!fileId || index === null) return;
+        const pending = this.pendingGroupChunkAcks.get(`${fileId}:${index}`);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingGroupChunkAcks.delete(`${fileId}:${index}`);
+        if (envelope.type === 'relay:group:file:chunk:ack') {
+          pending.resolve();
+        } else {
+          pending.reject(new Error(asString(payload?.message) || 'Falha ao gravar chunk no Relay.'));
+        }
+        return;
+      }
+      case 'relay:group:file:complete': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        const fileId = asString(payload?.fileId);
+        if (!requestId || !fileId) return;
+        this.callbacks.onGroupFileComplete?.({ requestId, fileId });
+        return;
+      }
       case 'relay:send:ack': {
         const payload = asRecord(envelope.payload) as RelaySendAckPayload | null;
         const frameMessageId = asString(payload?.frameMessageId);
@@ -1165,7 +1519,22 @@ export class RelayClient {
         const payload = asRecord(envelope.payload) as RelayErrorPayload | null;
         const code = asString(payload?.code) || 'UNKNOWN';
         const message = asString(payload?.message) || 'Erro no relay.';
-        this.callbacks.onWarning?.(`[relay:${code}] ${message}`);
+        const frameMessageId = asString(payload?.frameMessageId);
+        let correlated = false;
+        if (frameMessageId) {
+          const pending = this.pendingAcks.get(frameMessageId);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            this.pendingAcks.delete(frameMessageId);
+            pending.reject(new Error(`[relay:${code}] ${message}`));
+            correlated = true;
+          }
+        }
+        // Operações correlacionadas recebem o erro pela Promise que as iniciou.
+        // Evita um segundo toast genérico, sem contexto, no renderer.
+        if (!correlated) {
+          this.callbacks.onWarning?.(`[relay:${code}] ${message}`);
+        }
         return;
       }
       default:
@@ -1470,6 +1839,22 @@ export class RelayClient {
     for (const [messageId, pending] of Array.from(this.pendingAcks.entries())) {
       clearTimeout(pending.timeout);
       this.pendingAcks.delete(messageId);
+      pending.reject(error);
+    }
+  }
+
+  private rejectPendingGroupAcks(error: Error): void {
+    for (const [requestId, pending] of Array.from(this.pendingGroupAcks.entries())) {
+      clearTimeout(pending.timeout);
+      this.pendingGroupAcks.delete(requestId);
+      pending.reject(error);
+    }
+  }
+
+  private rejectPendingGroupChunkAcks(error: Error): void {
+    for (const [key, pending] of Array.from(this.pendingGroupChunkAcks.entries())) {
+      clearTimeout(pending.timeout);
+      this.pendingGroupChunkAcks.delete(key);
       pending.reject(error);
     }
   }

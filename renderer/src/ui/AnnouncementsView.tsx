@@ -17,6 +17,7 @@ import { Clock20Regular } from '@fluentui/react-icons';
 import { Copy20Regular } from '@fluentui/react-icons';
 import { Delete20Regular } from '@fluentui/react-icons';
 import { Dismiss20Regular } from '@fluentui/react-icons';
+import { DocumentEdit20Regular } from '@fluentui/react-icons';
 import { Emoji20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
 import { PeopleEye20Regular } from '@fluentui/react-icons';
@@ -50,6 +51,7 @@ interface AnnouncementsViewProps {
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
+  onEditMessage: (messageId: string, text: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
 }
@@ -136,6 +138,7 @@ export const AnnouncementsView = ({
   relayConnected,
   onSend,
   onForwardMessage,
+  onEditMessage,
   onReactToMessage,
   onDeleteMessage
 }: AnnouncementsViewProps) => {
@@ -143,6 +146,7 @@ export const AnnouncementsView = ({
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
+  const [editingMessage, setEditingMessage] = useState<MessageRow | null>(null);
   const [detailsDialog, setDetailsDialog] = useState<{
     title: string;
     loading: boolean;
@@ -156,6 +160,7 @@ export const AnnouncementsView = ({
     selectedText: string;
     canDelete: boolean;
     canForward: boolean;
+    canEdit: boolean;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
@@ -226,6 +231,22 @@ export const AnnouncementsView = ({
     focusComposerInput();
   };
 
+  const canEditMessage = (message: MessageRow): boolean =>
+    message.type === 'announcement' &&
+    message.direction === 'out' &&
+    message.senderDeviceId === profile.deviceId &&
+    !message.deletedAt &&
+    Date.now() - message.createdAt <= 10 * 60 * 1000;
+
+  const startEditMessage = (message: MessageRow): void => {
+    if (!canEditMessage(message)) return;
+    setEditingMessage(message);
+    setReplyDraft(null);
+    setReactionPickerMessageId(null);
+    setMessageContextMenu(null);
+    focusComposerInput();
+  };
+
   const jumpToReferencedMessage = async (targetMessageId: string): Promise<void> => {
     if (!targetMessageId) return;
     let attempts = 0;
@@ -279,10 +300,12 @@ export const AnnouncementsView = ({
       !message.localOnly &&
       message.direction === 'out' &&
       message.senderDeviceId === profile.deviceId;
+    const canEdit = canEditMessage(message);
     const itemCount =
       (canReply ? 1 : 0) +
       (canForward ? 1 : 0) +
       (selectedText ? 1 : 0) +
+      (canEdit ? 1 : 0) +
       (canDelete ? 1 : 0);
     if (itemCount <= 0) {
       setMessageContextMenu(null);
@@ -306,7 +329,8 @@ export const AnnouncementsView = ({
       messageId: message.messageId,
       selectedText,
       canDelete,
-      canForward
+      canForward,
+      canEdit
     });
   };
 
@@ -487,6 +511,7 @@ export const AnnouncementsView = ({
             const readSummary = readsByMessageId[message.messageId] || { count: 0, readByMe: false };
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
             const reactionPickerOpen = reactionPickerMessageId === message.messageId;
+            const canEditCurrentMessage = canEditMessage(message);
             const hasReplyReference = Boolean(message.replyToMessageId);
             const replySenderLabel = message.replyToSenderDeviceId
               ? senderLabelForMessage(message.replyToSenderDeviceId)
@@ -584,6 +609,17 @@ export const AnnouncementsView = ({
                     >
                       <ArrowReply20Regular />
                     </button>
+                    {canEditCurrentMessage && (
+                      <button
+                        type="button"
+                        className="reaction-trigger edit-trigger"
+                        onClick={() => startEditMessage(message)}
+                        title="Editar anúncio"
+                        aria-label="Editar anúncio"
+                      >
+                        <DocumentEdit20Regular />
+                      </button>
+                    )}
                     {hasCounters && (
                       <button
                         type="button"
@@ -666,8 +702,18 @@ export const AnnouncementsView = ({
           await onSend(text, replyTo);
           setReplyDraft(null);
         }}
+        onSubmitEdit={async (text) => {
+          if (!editingMessage) return;
+          await onEditMessage(editingMessage.messageId, text);
+        }}
         replyDraft={replyDraft}
         onCancelReply={() => setReplyDraft(null)}
+        editDraft={
+          editingMessage
+            ? { messageId: editingMessage.messageId, text: editingMessage.bodyText || '' }
+            : null
+        }
+        onCancelEdit={() => setEditingMessage(null)}
       />
       <ConfirmDialog
         open={Boolean(pendingDeleteMessageId)}
@@ -727,6 +773,23 @@ export const AnnouncementsView = ({
               </button>
             );
           })()}
+          {messageContextMenu.canEdit && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                const message = messages.find((row) => row.messageId === messageContextMenu.messageId) || null;
+                if (message) {
+                  startEditMessage(message);
+                }
+              }}
+            >
+              <span className="menu-item-icon">
+                <DocumentEdit20Regular />
+              </span>
+              <span>Editar</span>
+            </button>
+          )}
           {(() => {
             const message = messages.find((row) => row.messageId === messageContextMenu.messageId) || null;
             if (!message || !messageContextMenu.canForward || message.deletedAt || message.localOnly) {

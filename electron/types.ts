@@ -9,8 +9,10 @@ export type MessageType =
   | 'chat:forget'
   | 'chat:sync:request'
   | 'chat:sync:response'
+  | 'group:event'
   | 'announce'
   | 'file:offer'
+  | 'file:request'
   | 'file:chunk'
   | 'file:complete'
   | 'typing';
@@ -121,6 +123,7 @@ export interface SyncResponsePayload {
 export interface AnnouncementPayload {
   text: string;
   replyTo?: MessageReplyPayload | null;
+  editedAt?: number | null;
 }
 
 export interface MessageReplyPayload {
@@ -139,6 +142,15 @@ export interface FileOfferPayload {
   sha256: string;
   replyTo?: MessageReplyPayload | null;
   forwardedFromMessageId?: string | null;
+}
+
+/**
+ * Pedido idempotente para que o remetente reenvie um anexo que existe no
+ * histórico local, mas ainda não está disponível neste dispositivo.
+ */
+export interface FileRequestPayload {
+  targetMessageId: string;
+  fileId: string;
 }
 
 export interface FileChunkPayload {
@@ -180,7 +192,7 @@ export interface DbMessage {
 
 export interface ConversationRow {
   id: string;
-  kind: 'dm' | 'announcements';
+  kind: 'dm' | 'announcements' | 'group';
   peerDeviceId: string | null;
   title: string | null;
   createdAt: number;
@@ -188,6 +200,126 @@ export interface ConversationRow {
   unreadCount: number;
   lastReadAt: number;
   archivedAt: number;
+}
+
+export type GroupRole = 'owner' | 'admin' | 'member';
+export type GroupMemberStatus = 'active' | 'left' | 'removed';
+
+export interface GroupSettings {
+  allowMembersToPin: boolean;
+  allowMembersToEditInfo: boolean;
+}
+
+export interface GroupInfo {
+  groupId: string;
+  name: string;
+  emoji: string;
+  avatarBg: string;
+  description: string;
+  createdByDeviceId: string;
+  createdAt: number;
+  updatedAt: number;
+  lastEventSeq: number;
+  deletedAt: number | null;
+  missingOnRelay?: boolean;
+  settings: GroupSettings;
+}
+
+export interface StickerCatalogItem {
+  id: string;
+  label: string;
+  fileName: string;
+  relativePath: string;
+  url: string;
+  previewDataUrl: string | null;
+  size: number;
+  category: string;
+  updatedAt: number;
+}
+
+export interface GroupMember {
+  groupId: string;
+  deviceId: string;
+  role: GroupRole;
+  status: GroupMemberStatus;
+  displayNameSnapshot: string | null;
+  avatarEmojiSnapshot: string | null;
+  avatarBgSnapshot: string | null;
+  joinedAt: number;
+  updatedAt: number;
+}
+
+export type GroupEventType =
+  | 'group.created'
+  | 'group.updated'
+  | 'group.deleted'
+  | 'group.member.added'
+  | 'group.member.removed'
+  | 'group.member.left'
+  | 'group.member.roleChanged'
+  | 'group.message.created'
+  | 'group.message.edited'
+  | 'group.message.deletedForEveryone'
+  | 'group.message.reactionChanged'
+  | 'group.message.pinned'
+  | 'group.message.unpinned'
+  | 'group.attachment.available'
+  | 'group.attachment.expired';
+
+export interface GroupEvent {
+  eventId: string;
+  groupId: string;
+  seq: number;
+  type: GroupEventType;
+  actorDeviceId: string;
+  createdAt: number;
+  payload: unknown;
+}
+
+export interface GroupSnapshot {
+  group: GroupInfo;
+  members: GroupMember[];
+  pinnedMessageIds: string[];
+  events: GroupEvent[];
+}
+
+export interface CreateGroupInput {
+  name: string;
+  emoji: string;
+  avatarBg: string;
+  description: string;
+  memberDeviceIds: string[];
+}
+
+export interface UpdateGroupInput {
+  name?: string;
+  emoji?: string;
+  avatarBg?: string;
+  description?: string;
+  settings?: Partial<GroupSettings>;
+}
+
+export interface GroupMessagePayload {
+  groupId: string;
+  text: string;
+  replyTo?: MessageReplyPayload | null;
+  forwardedFromMessageId?: string | null;
+}
+
+export interface GroupFileOfferPayload extends FileOfferPayload {
+  groupId: string;
+  replyTo?: MessageReplyPayload | null;
+  forwardedFromMessageId?: string | null;
+}
+
+export interface GroupAttachmentDownload {
+  fileId: string;
+  groupId: string;
+  messageId: string;
+  status: 'pending' | 'downloading' | 'complete' | 'expired' | 'failed';
+  localPath: string | null;
+  receivedAt: number | null;
+  updatedAt: number;
 }
 
 export interface AnnouncementReactionSummary {
@@ -219,6 +351,9 @@ export interface AnnouncementReadDetail {
 
 export type AppEvent =
   | { type: 'peers:updated'; peers: Peer[] }
+  | { type: 'groups:updated'; groups: GroupInfo[] }
+  | { type: 'group:members'; groupId: string; members: GroupMember[] }
+  | { type: 'group:pins'; groupId: string; messageIds: string[] }
   | { type: 'relay:connection'; connected: boolean; endpoint: string | null }
   | { type: 'sync:status'; active: boolean }
   | { type: 'message:received'; message: DbMessage }

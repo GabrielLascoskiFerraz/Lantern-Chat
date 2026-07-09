@@ -10,6 +10,39 @@ const api = {
     ipcRenderer.invoke('lantern:updateProfile', input),
   getKnownPeers: () => ipcRenderer.invoke('lantern:getKnownPeers'),
   getOnlinePeers: () => ipcRenderer.invoke('lantern:getOnlinePeers'),
+  getGroups: () => ipcRenderer.invoke('lantern:getGroups'),
+  getGroupMembers: (groupId: string) => ipcRenderer.invoke('lantern:getGroupMembers', groupId),
+  getGroupPinnedMessageIds: (groupId: string) =>
+    ipcRenderer.invoke('lantern:getGroupPinnedMessageIds', groupId),
+  createGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => ipcRenderer.invoke('lantern:createGroup', input),
+  updateGroup: (
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ) => ipcRenderer.invoke('lantern:updateGroup', groupId, input),
+  addGroupMembers: (groupId: string, memberDeviceIds: string[]) =>
+    ipcRenderer.invoke('lantern:addGroupMembers', groupId, memberDeviceIds),
+  removeGroupMember: (groupId: string, deviceId: string) =>
+    ipcRenderer.invoke('lantern:removeGroupMember', groupId, deviceId),
+  setGroupMemberRole: (groupId: string, deviceId: string, role: 'admin' | 'member') =>
+    ipcRenderer.invoke('lantern:setGroupMemberRole', groupId, deviceId, role),
+  transferGroupOwnership: (groupId: string, deviceId: string) =>
+    ipcRenderer.invoke('lantern:transferGroupOwnership', groupId, deviceId),
+  deleteGroup: (groupId: string) => ipcRenderer.invoke('lantern:deleteGroup', groupId),
+  leaveGroup: (groupId: string) => ipcRenderer.invoke('lantern:leaveGroup', groupId),
+  setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) =>
+    ipcRenderer.invoke('lantern:setGroupMessagePinned', groupId, messageId, pinned),
   getRelaySettings: () => ipcRenderer.invoke('lantern:getRelaySettings'),
   getStartupSettings: () => ipcRenderer.invoke('lantern:getStartupSettings'),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
@@ -19,12 +52,16 @@ const api = {
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendText', peerId, text, replyTo),
+  sendGroupText: (groupId: string, text: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendGroupText', groupId, text, replyTo),
   sendTyping: (peerId: string, isTyping: boolean) =>
     ipcRenderer.invoke('lantern:sendTyping', peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
+  sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendGroupFile', groupId, filePath, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     ipcRenderer.invoke('lantern:forwardMessageToPeer', targetPeerId, sourceMessageId),
   editMessage: (conversationId: string, messageId: string, text: string) =>
@@ -64,6 +101,8 @@ const api = {
     ipcRenderer.invoke('lantern:getAnnouncementReactions', messageIds),
   getAnnouncementReactionDetails: (messageId: string) =>
     ipcRenderer.invoke('lantern:getAnnouncementReactionDetails', messageId),
+  getMessageReactionDetails: (messageId: string) =>
+    ipcRenderer.invoke('lantern:getMessageReactionDetails', messageId),
   getAnnouncementReadSummary: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getAnnouncementReadSummary', messageIds),
   getAnnouncementReadDetails: (messageId: string) =>
@@ -116,6 +155,9 @@ const api = {
     ipcRenderer.invoke('lantern:saveClipboardImage', dataUrl, extension),
   saveClipboardFileData: (dataUrl: string, fileName?: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:saveClipboardFileData', dataUrl, fileName),
+  getRelayStickers: () => ipcRenderer.invoke('lantern:getRelayStickers'),
+  prepareRelayStickerFile: (relativePath: string): Promise<string | null> =>
+    ipcRenderer.invoke('lantern:prepareRelayStickerFile', relativePath),
   onEvent: (callback: EventCallback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: AppEvent) => callback(payload);
     ipcRenderer.on('lantern:event', listener);

@@ -9,10 +9,13 @@ import {
   AnnouncementReadSummary,
   AppEvent,
   DbMessage,
+  GroupInfo,
+  GroupMember,
   MessageReplyPayload,
   MessageReactionDetail,
   Peer,
-  Profile
+  Profile,
+  StickerCatalogItem
 } from './types';
 
 export interface IpcBindings {
@@ -20,6 +23,33 @@ export interface IpcBindings {
   updateProfile: (input: Pick<Profile, 'displayName' | 'avatarEmoji' | 'avatarBg' | 'statusMessage'>) => Profile;
   getKnownPeers: () => Peer[];
   getOnlinePeers: () => Peer[];
+  getGroups: () => GroupInfo[];
+  getGroupMembers: (groupId: string) => GroupMember[];
+  getGroupPinnedMessageIds: (groupId: string) => string[];
+  createGroup: (input: {
+    name: string;
+    emoji: string;
+    avatarBg: string;
+    description: string;
+    memberDeviceIds: string[];
+  }) => Promise<GroupInfo>;
+  updateGroup: (
+    groupId: string,
+    input: {
+      name?: string;
+      emoji?: string;
+      avatarBg?: string;
+      description?: string;
+      settings?: Record<string, boolean>;
+    }
+  ) => Promise<void>;
+  addGroupMembers: (groupId: string, memberDeviceIds: string[]) => Promise<void>;
+  removeGroupMember: (groupId: string, deviceId: string) => Promise<void>;
+  setGroupMemberRole: (groupId: string, deviceId: string, role: 'admin' | 'member') => Promise<void>;
+  transferGroupOwnership: (groupId: string, deviceId: string) => Promise<void>;
+  deleteGroup: (groupId: string) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) => Promise<void>;
   getRelaySettings: () => {
     automatic: boolean;
     host: string;
@@ -62,10 +92,20 @@ export interface IpcBindings {
     text: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
+  sendGroupText: (
+    groupId: string,
+    text: string,
+    replyTo?: MessageReplyPayload | null
+  ) => Promise<DbMessage>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) => Promise<DbMessage>;
   sendFile: (
     peerId: string,
+    filePath: string,
+    replyTo?: MessageReplyPayload | null
+  ) => Promise<DbMessage>;
+  sendGroupFile: (
+    groupId: string,
     filePath: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
@@ -98,8 +138,11 @@ export interface IpcBindings {
   getMessageReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
   getAnnouncementReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
   getAnnouncementReactionDetails: (messageId: string) => MessageReactionDetail[];
+  getMessageReactionDetails: (messageId: string) => MessageReactionDetail[];
   getAnnouncementReadSummary: (messageIds: string[]) => Record<string, AnnouncementReadSummary>;
   getAnnouncementReadDetails: (messageId: string) => AnnouncementReadDetail[];
+  getRelayStickers: () => Promise<StickerCatalogItem[]>;
+  prepareRelayStickerFile: (relativePath: string) => Promise<string | null>;
   exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<{ canceled: boolean; filePath: string | null }>;
   setActiveConversation: (conversationId: string) => void;
   markConversationRead: (conversationId: string) => void;
@@ -360,6 +403,38 @@ export const registerIpc = (
   ipcMain.handle('lantern:updateProfile', (_event, input) => bindings.updateProfile(input));
   ipcMain.handle('lantern:getKnownPeers', () => bindings.getKnownPeers());
   ipcMain.handle('lantern:getOnlinePeers', () => bindings.getOnlinePeers());
+  ipcMain.handle('lantern:getGroups', () => bindings.getGroups());
+  ipcMain.handle('lantern:getGroupMembers', (_event, groupId: string) =>
+    bindings.getGroupMembers(groupId)
+  );
+  ipcMain.handle('lantern:getGroupPinnedMessageIds', (_event, groupId: string) =>
+    bindings.getGroupPinnedMessageIds(groupId)
+  );
+  ipcMain.handle('lantern:createGroup', (_event, input) => bindings.createGroup(input));
+  ipcMain.handle('lantern:updateGroup', (_event, groupId: string, input) =>
+    bindings.updateGroup(groupId, input)
+  );
+  ipcMain.handle('lantern:addGroupMembers', (_event, groupId: string, memberDeviceIds: string[]) =>
+    bindings.addGroupMembers(groupId, memberDeviceIds)
+  );
+  ipcMain.handle('lantern:removeGroupMember', (_event, groupId: string, deviceId: string) =>
+    bindings.removeGroupMember(groupId, deviceId)
+  );
+  ipcMain.handle(
+    'lantern:setGroupMemberRole',
+    (_event, groupId: string, deviceId: string, role: 'admin' | 'member') =>
+      bindings.setGroupMemberRole(groupId, deviceId, role)
+  );
+  ipcMain.handle('lantern:transferGroupOwnership', (_event, groupId: string, deviceId: string) =>
+    bindings.transferGroupOwnership(groupId, deviceId)
+  );
+  ipcMain.handle('lantern:deleteGroup', (_event, groupId: string) => bindings.deleteGroup(groupId));
+  ipcMain.handle('lantern:leaveGroup', (_event, groupId: string) => bindings.leaveGroup(groupId));
+  ipcMain.handle(
+    'lantern:setGroupMessagePinned',
+    (_event, groupId: string, messageId: string, pinned: boolean) =>
+      bindings.setGroupMessagePinned(groupId, messageId, pinned)
+  );
   ipcMain.handle('lantern:getRelaySettings', () => bindings.getRelaySettings());
   ipcMain.handle('lantern:getStartupSettings', () => bindings.getStartupSettings());
   ipcMain.handle('lantern:updateRelaySettings', (_event, input) =>
@@ -373,6 +448,11 @@ export const registerIpc = (
     'lantern:sendText',
     (_event, peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
       bindings.sendText(peerId, text, replyTo)
+  );
+  ipcMain.handle(
+    'lantern:sendGroupText',
+    (_event, groupId: string, text: string, replyTo?: MessageReplyPayload | null) =>
+      bindings.sendGroupText(groupId, text, replyTo)
   );
   ipcMain.handle('lantern:sendTyping', (_event, peerId: string, isTyping: boolean) =>
     bindings.sendTyping(peerId, isTyping)
@@ -390,6 +470,15 @@ export const registerIpc = (
       filePath: string,
       replyTo?: MessageReplyPayload | null
     ) => bindings.sendFile(peerId, filePath, replyTo)
+  );
+  ipcMain.handle(
+    'lantern:sendGroupFile',
+    (
+      _event,
+      groupId: string,
+      filePath: string,
+      replyTo?: MessageReplyPayload | null
+    ) => bindings.sendGroupFile(groupId, filePath, replyTo)
   );
   ipcMain.handle(
     'lantern:forwardMessageToPeer',
@@ -455,11 +544,18 @@ export const registerIpc = (
   ipcMain.handle('lantern:getAnnouncementReactionDetails', (_event, messageId: string) =>
     bindings.getAnnouncementReactionDetails(messageId)
   );
+  ipcMain.handle('lantern:getMessageReactionDetails', (_event, messageId: string) =>
+    bindings.getMessageReactionDetails(messageId)
+  );
   ipcMain.handle('lantern:getAnnouncementReadSummary', (_event, messageIds: string[]) =>
     bindings.getAnnouncementReadSummary(messageIds)
   );
   ipcMain.handle('lantern:getAnnouncementReadDetails', (_event, messageId: string) =>
     bindings.getAnnouncementReadDetails(messageId)
+  );
+  ipcMain.handle('lantern:getRelayStickers', () => bindings.getRelayStickers());
+  ipcMain.handle('lantern:prepareRelayStickerFile', (_event, relativePath: string) =>
+    bindings.prepareRelayStickerFile(relativePath)
   );
   ipcMain.handle(
     'lantern:exportConversation',
@@ -595,6 +691,13 @@ export const registerIpc = (
         '.tif': 'image/tiff',
         '.tiff': 'image/tiff'
       };
+
+      if (ext === '.gif' && stat.size <= 20 * 1024 * 1024) {
+        const file = await fs.promises.readFile(resolved);
+        if (file.length > 0) {
+          return `data:image/gif;base64,${file.toString('base64')}`;
+        }
+      }
 
       const image = nativeImage.createFromPath(resolved);
       if (!image.isEmpty()) {

@@ -7,7 +7,20 @@ import {
   useRef,
   useState
 } from 'react';
-import { Button, Caption1, Input, ProgressBar, Spinner, Text } from '@fluentui/react-components';
+import {
+  Button,
+  Caption1,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  Input,
+  ProgressBar,
+  Spinner,
+  Text
+} from '@fluentui/react-components';
 import {
   ArrowReply20Regular,
   ArrowForward20Regular,
@@ -26,12 +39,16 @@ import {
   MoreHorizontal20Regular,
   Search20Regular,
   Star20Filled,
-  Star20Regular
+  Star20Regular,
+  PeopleTeam20Regular,
+  Pin20Regular,
+  PeopleEye20Regular
 } from '@fluentui/react-icons';
 import {
   AnnouncementReactionSummary,
   ipcClient,
   MessageReplyReference,
+  MessageReactionDetail,
   MessageRow,
   Peer,
   Profile
@@ -44,6 +61,12 @@ import { MessageComposer } from './MessageComposer';
 interface ChatViewProps {
   conversationId: string;
   peer: Peer | null;
+  isGroup?: boolean;
+  groupMemberCount?: number;
+  groupDescription?: string;
+  groupUnavailable?: boolean;
+  groupPinnedMessageIds?: string[];
+  senderProfilesById?: Record<string, Pick<Peer, 'displayName' | 'avatarEmoji' | 'avatarBg'>>;
   forwardTargets: Peer[];
   onlinePeerIds: string[];
   peerOnline: boolean;
@@ -66,6 +89,8 @@ interface ChatViewProps {
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
   onToggleFavoriteMessage: (messageId: string, favorite: boolean) => Promise<void>;
+  onSetGroupMessagePinned?: (messageId: string, pinned: boolean) => Promise<void>;
+  onOpenGroupDetails?: () => void;
   onGetFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onDeleteMessageForMe: (messageId: string) => Promise<void>;
@@ -145,6 +170,16 @@ const isImageName = (name: string | null): boolean => {
   return /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(name);
 };
 
+const isStickerName = (name: string | null): boolean => {
+  if (!name) return false;
+  // O envio preserva o nome da figurinha, mas adiciona UUIDs para evitar colisões locais.
+  // Portanto, o marcador pode não estar no começo nem imediatamente antes de `.gif`.
+  return (
+    /\.gif$/i.test(name) &&
+    (name.toLowerCase().includes('lantern-cat-sticker-') || name.toLowerCase().includes('lantern-sticker-'))
+  );
+};
+
 interface ImagePreviewState {
   dataUrl: string;
 }
@@ -173,7 +208,35 @@ const transferStageLabel = (
   return { label: 'Processando', tone: 'neutral' };
 };
 
-const REACTIONS: Array<'👍' | '👎' | '❤️' | '😢' | '😊' | '😂'> = ['👍', '👎', '❤️', '😂', '😊', '😢'];
+const REACTIONS = ['👍', '👎', '❤️', '😂', '😊', '😢'] as const;
+type ReactionValue = (typeof REACTIONS)[number];
+
+const isReactionValue = (value: unknown): value is ReactionValue =>
+  REACTIONS.includes(value as ReactionValue);
+
+const normalizeReactionSummary = (
+  summary: AnnouncementReactionSummary | undefined
+): AnnouncementReactionSummary => {
+  const counts: Partial<Record<ReactionValue, number>> = {};
+  const rawCounts =
+    summary && typeof summary.counts === 'object' && summary.counts
+      ? (summary.counts as Record<string, unknown>)
+      : {};
+
+  for (const reaction of REACTIONS) {
+    const count = Number(rawCounts[reaction] || 0);
+    if (Number.isFinite(count) && count > 0) {
+      counts[reaction] = count;
+    }
+  }
+
+  return {
+    counts,
+    myReaction: isReactionValue(summary?.myReaction) ? summary.myReaction : null
+  };
+};
+
+const safeString = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -263,6 +326,12 @@ const toReplyReferenceFromMessage = (message: MessageRow): MessageReplyReference
 export const ChatView = ({
   conversationId,
   peer,
+  isGroup = false,
+  groupMemberCount = 0,
+  groupDescription = '',
+  groupUnavailable = false,
+  groupPinnedMessageIds = [],
+  senderProfilesById = {},
   forwardTargets,
   onlinePeerIds,
   peerOnline,
@@ -285,6 +354,8 @@ export const ChatView = ({
   onReactToMessage,
   onEditMessage,
   onToggleFavoriteMessage,
+  onSetGroupMessagePinned,
+  onOpenGroupDetails,
   onGetFavoriteMessages,
   onDeleteMessage,
   onDeleteMessageForMe,
@@ -325,6 +396,13 @@ export const ChatView = ({
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [favoriteMessages, setFavoriteMessages] = useState<MessageRow[]>([]);
   const [favoriteMessagesLoading, setFavoriteMessagesLoading] = useState(false);
+  const [pinnedOnly, setPinnedOnly] = useState(false);
+  const [pinnedMessages, setPinnedMessages] = useState<MessageRow[]>([]);
+  const [pinnedMessagesLoading, setPinnedMessagesLoading] = useState(false);
+  const [reactionDetailsDialog, setReactionDetailsDialog] = useState<{
+    loading: boolean;
+    items: MessageReactionDetail[];
+  } | null>(null);
   const [activeMatchIndex, setActiveMatchIndex] = useState(-1);
   const [matchedMessageIds, setMatchedMessageIds] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -345,6 +423,8 @@ export const ChatView = ({
     canForward: boolean;
     canFavorite: boolean;
     isFavorite: boolean;
+    canPin: boolean;
+    isPinned: boolean;
     selectedText: string;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
@@ -421,13 +501,17 @@ export const ChatView = ({
       const isLocalOnly = Boolean(message.localOnly);
       const canReply = !isDeleted && !isLocalOnly;
       const canEdit = canEditMessage(message);
+      const hasForwardableAttachment = message.type !== 'file' || Boolean(message.filePath);
       const canForward =
         !isDeleted &&
         !isLocalOnly &&
+        hasForwardableAttachment &&
         (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
         forwardTargets.length > 0;
       const canFavorite = !isDeleted && !isLocalOnly;
       const isFavorite = canFavorite ? Boolean(favoriteByMessageId[message.messageId]) : false;
+      const canPin = isGroup && !isDeleted && !isLocalOnly && Boolean(onSetGroupMessagePinned);
+      const isPinned = canPin ? groupPinnedMessageIds.includes(message.messageId) : false;
       const canDelete = !isDeleted && !isLocalOnly;
       const canDeleteForEveryone =
         canDelete &&
@@ -438,6 +522,7 @@ export const ChatView = ({
         (canEdit ? 1 : 0) +
         (canForward ? 1 : 0) +
         (canFavorite ? 1 : 0) +
+        (canPin ? 1 : 0) +
         (selectedText ? 1 : 0) +
         (canDelete ? 1 : 0) +
         (canDeleteForEveryone ? 1 : 0);
@@ -466,10 +551,20 @@ export const ChatView = ({
         canForward,
         canFavorite,
         isFavorite,
+        canPin,
+        isPinned,
         selectedText
       });
     },
-    [canEditMessage, forwardTargets.length, localProfile.deviceId, favoriteByMessageId]
+    [
+      canEditMessage,
+      forwardTargets.length,
+      localProfile.deviceId,
+      favoriteByMessageId,
+      groupPinnedMessageIds,
+      isGroup,
+      onSetGroupMessagePinned
+    ]
   );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
@@ -484,7 +579,14 @@ export const ChatView = ({
 
   const displayedMessages = useMemo(
     () =>
-      favoritesOnly
+      pinnedOnly
+        ? [...pinnedMessages].sort((a, b) => {
+            const at = Number(a.createdAt) || 0;
+            const bt = Number(b.createdAt) || 0;
+            if (at !== bt) return at - bt;
+            return a.messageId.localeCompare(b.messageId);
+          })
+        : favoritesOnly
         ? [...favoriteMessages].sort((a, b) => {
             const at = Number(a.createdAt) || 0;
             const bt = Number(b.createdAt) || 0;
@@ -492,7 +594,7 @@ export const ChatView = ({
             return a.messageId.localeCompare(b.messageId);
           })
         : messages,
-    [favoriteMessages, favoritesOnly, messages]
+    [favoriteMessages, favoritesOnly, messages, pinnedMessages, pinnedOnly]
   );
   const searchUiVisible = searchOpen || searchClosing;
   const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -516,12 +618,18 @@ export const ChatView = ({
 
   const senderLabelForMessage = useCallback(
     (senderDeviceId: string): string => {
-      if (senderDeviceId === localProfile.deviceId) {
+      const normalizedSenderId = safeString(senderDeviceId);
+      const shortSenderId = normalizedSenderId ? normalizedSenderId.slice(0, 6) : 'desconhecido';
+      if (normalizedSenderId === localProfile.deviceId) {
         return 'Você';
       }
-      return peer?.displayName || `Contato ${senderDeviceId.slice(0, 6)}`;
+      return (
+        senderProfilesById[normalizedSenderId]?.displayName ||
+        (isGroup ? `Participante ${shortSenderId}` : peer?.displayName) ||
+        `Contato ${shortSenderId}`
+      );
     },
-    [localProfile.deviceId, peer?.displayName]
+    [isGroup, localProfile.deviceId, peer?.displayName, senderProfilesById]
   );
 
   const focusComposerInput = useCallback(() => {
@@ -568,6 +676,16 @@ export const ChatView = ({
     },
     [canEditMessage, closeMessageContextMenu, focusComposerInput]
   );
+
+  const openGroupReactionDetails = useCallback(async (messageId: string) => {
+    setReactionDetailsDialog({ loading: true, items: [] });
+    try {
+      const items = await ipcClient.getMessageReactionDetails(messageId);
+      setReactionDetailsDialog({ loading: false, items });
+    } catch {
+      setReactionDetailsDialog({ loading: false, items: [] });
+    }
+  }, []);
 
   const closeSearchAnimated = useCallback(() => {
     if (!searchOpen && !searchClosing) {
@@ -642,6 +760,9 @@ export const ChatView = ({
     setFavoritesOnly(false);
     setFavoriteMessages([]);
     setFavoriteMessagesLoading(false);
+    setPinnedOnly(false);
+    setPinnedMessages([]);
+    setPinnedMessagesLoading(false);
     setSearchOpen(false);
     setSearchClosing(false);
     setSearchQuery('');
@@ -656,11 +777,55 @@ export const ChatView = ({
   }, [conversationId]);
 
   useEffect(() => {
+    if (!pinnedOnly) {
+      return;
+    }
+    if (searchOpen) {
+      closeSearchAnimated();
+    }
+    if (favoritesOnly) {
+      setFavoritesOnly(false);
+    }
+    let cancelled = false;
+    setPinnedMessagesLoading(true);
+    const loaded = new Map(messages.map((row) => [row.messageId, row]));
+    const missingIds = groupPinnedMessageIds.filter((messageId) => !loaded.has(messageId));
+    void (missingIds.length > 0 ? ipcClient.getMessagesByIds(missingIds) : Promise.resolve([]))
+      .then((rows) => {
+        if (cancelled) return;
+        for (const row of rows) {
+          loaded.set(row.messageId, row);
+        }
+        setPinnedMessages(
+          groupPinnedMessageIds
+            .map((messageId) => loaded.get(messageId))
+            .filter((row): row is MessageRow => Boolean(row && !row.deletedAt))
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPinnedMessages([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPinnedMessagesLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pinnedOnly, groupPinnedMessageIds, messages, searchOpen, closeSearchAnimated, favoritesOnly]);
+
+  useEffect(() => {
     if (!favoritesOnly) {
       return;
     }
     if (searchOpen) {
       closeSearchAnimated();
+    }
+    if (pinnedOnly) {
+      setPinnedOnly(false);
     }
     let cancelled = false;
     setFavoriteMessagesLoading(true);
@@ -682,7 +847,7 @@ export const ChatView = ({
     return () => {
       cancelled = true;
     };
-  }, [favoritesOnly, conversationId, onGetFavoriteMessages, searchOpen, closeSearchAnimated]);
+  }, [favoritesOnly, conversationId, onGetFavoriteMessages, searchOpen, closeSearchAnimated, pinnedOnly]);
 
   useEffect(() => {
     if (!favoritesOnly) {
@@ -881,7 +1046,7 @@ export const ChatView = ({
   }, []);
 
   const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
-    if (favoritesOnly) return 0;
+    if (favoritesOnly || pinnedOnly) return 0;
     const node = messagesScrollRef.current;
     if (!node) return 0;
     if (loadingOlderRef.current) return 0;
@@ -905,7 +1070,7 @@ export const ChatView = ({
       nextNode.scrollTop = previousTop + delta;
     }
     return loadedCount;
-  }, [favoritesOnly, onLoadOlderMessages]);
+  }, [favoritesOnly, pinnedOnly, onLoadOlderMessages]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -1325,10 +1490,14 @@ export const ChatView = ({
           <div className="pane-header-identity">
             <Text weight="semibold">{peer.displayName}</Text>
             <Caption1>
-              {peerTyping
+              {isGroup
+                ? `${Math.max(1, groupMemberCount)} participante${Math.max(1, groupMemberCount) === 1 ? '' : 's'}${
+                    safeString(groupDescription).trim() ? ` · ${safeString(groupDescription).trim()}` : ''
+                  }`
+                : peerTyping
                 ? 'digitando...'
                 : peerOnline
-                ? peer.statusMessage?.trim() || 'Online'
+                ? safeString(peer.statusMessage).trim() || 'Online'
                 : 'Offline · sem conexão no momento'}
             </Caption1>
           </div>
@@ -1382,7 +1551,7 @@ export const ChatView = ({
             <Button
               appearance="subtle"
               icon={searchOpen ? <Dismiss20Regular /> : <Search20Regular />}
-              disabled={favoritesOnly}
+              disabled={favoritesOnly || pinnedOnly}
               onClick={toggleSearchPanel}
             />
           </div>
@@ -1394,6 +1563,25 @@ export const ChatView = ({
             aria-label={favoritesOnly ? 'Mostrar todas as mensagens' : 'Mostrar favoritas'}
             onClick={() => setFavoritesOnly((current) => !current)}
           />
+          {isGroup && (
+            <Button
+              appearance="subtle"
+              className={`chat-favorites-toggle ${pinnedOnly ? 'active' : ''}`}
+              icon={<Pin20Regular />}
+              title={pinnedOnly ? 'Mostrar todas as mensagens' : 'Mostrar fixadas'}
+              aria-label={pinnedOnly ? 'Mostrar todas as mensagens' : 'Mostrar fixadas'}
+              onClick={() => setPinnedOnly((current) => !current)}
+            />
+          )}
+          {isGroup && onOpenGroupDetails && (
+            <Button
+              appearance="subtle"
+              icon={<PeopleTeam20Regular />}
+              title="Detalhes do grupo"
+              aria-label="Detalhes do grupo"
+              onClick={() => onOpenGroupDetails()}
+            />
+          )}
           <div className="header-menu-wrap" ref={headerMenuRef}>
             <Button
               appearance="subtle"
@@ -1454,19 +1642,21 @@ export const ChatView = ({
                   </span>
                   <span>Limpar conversa</span>
                 </button>
-                <button
-                  type="button"
-                  className="header-menu-item danger"
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setConfirmForgetOpen(true);
-                  }}
-                >
-                  <span className="menu-item-icon">
-                    <Dismiss20Regular />
-                  </span>
-                  <span>Excluir contato e conversa</span>
-                </button>
+                {!isGroup && (
+                  <button
+                    type="button"
+                    className="header-menu-item danger"
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      setConfirmForgetOpen(true);
+                    }}
+                  >
+                    <span className="menu-item-icon">
+                      <Dismiss20Regular />
+                    </span>
+                    <span>Excluir contato e conversa</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1474,7 +1664,7 @@ export const ChatView = ({
       </header>
 
       <div className="messages-scroll" ref={messagesScrollRef}>
-        {loading && displayedMessages.length === 0 && !favoritesOnly && (
+        {loading && displayedMessages.length === 0 && !favoritesOnly && !pinnedOnly && (
           <div className="messages-skeleton-list" aria-hidden>
             <div className="message-skeleton-row in" />
             <div className="message-skeleton-row in" />
@@ -1488,8 +1678,17 @@ export const ChatView = ({
             <div className="message-skeleton-row out" />
           </div>
         )}
+        {pinnedMessagesLoading && (
+          <div className="messages-skeleton-list" aria-hidden>
+            <div className="message-skeleton-row in" />
+            <div className="message-skeleton-row out" />
+          </div>
+        )}
         {!favoriteMessagesLoading && favoritesOnly && displayedMessages.length === 0 && (
           <div className="chat-favorites-empty">Nenhuma mensagem favorita nesta conversa.</div>
+        )}
+        {!pinnedMessagesLoading && pinnedOnly && displayedMessages.length === 0 && (
+          <div className="chat-favorites-empty">Nenhuma mensagem fixada neste grupo.</div>
         )}
         {displayedMessages.map((message, index) => {
           const previousMessage = index > 0 ? displayedMessages[index - 1] : null;
@@ -1507,24 +1706,33 @@ export const ChatView = ({
           const isLocalOnly = Boolean(message.localOnly);
           const canShowActions = !isDeleted && !isLocalOnly;
           const isFavorite = Boolean(favoriteByMessageId[message.messageId]);
+          const isGroupPinned = groupPinnedMessageIds.includes(message.messageId);
+          const senderProfile = senderProfilesById[message.senderDeviceId];
           const canEditCurrentMessage = canEditMessage(message);
-          const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
+          const summary = normalizeReactionSummary(reactionsByMessageId[message.messageId]);
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
           const reactionPickerOpen = reactionPickerMessageId === message.messageId;
           const isImageFile = isFile && isImageName(message.fileName);
+          const isStickerFile = isFile && isStickerName(message.fileName);
           const previewState = previewStateByMessageId[message.messageId];
           const previewDataUrl = previewState?.dataUrl;
           const previewVisible = Boolean(previewDataUrl && visiblePreviewByMessageId[message.messageId]);
-          const previewUnavailable =
-            isImageFile &&
-            !previewDataUrl &&
-            (message.status === 'delivered' || message.status === 'read');
-          const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
           const progress = message.fileId ? transferByFileId[message.fileId] : undefined;
           const progressPercent =
             progress && progress.total > 0
               ? Math.min(100, Math.floor((progress.transferred / progress.total) * 100))
               : null;
+          const transferInProgress = Boolean(
+            progress &&
+              progress.total > 0 &&
+              (progress.transferred < progress.total || message.status === 'sent' || message.status === null)
+          );
+          const previewUnavailable =
+            isImageFile &&
+            !previewDataUrl &&
+            !transferInProgress &&
+            (message.status === 'delivered' || message.status === 'read');
+          const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
           const transferStage = isFile ? transferStageLabel(message, progressPercent) : null;
           const hasReplyReference = Boolean(message.replyToMessageId);
           const replySenderLabel = message.replyToSenderDeviceId
@@ -1545,6 +1753,7 @@ export const ChatView = ({
               {unreadSeparatorState !== 'hidden' &&
                 !normalizedQuery &&
                 !favoritesOnly &&
+                !pinnedOnly &&
                 unreadAnchorMessageId === message.messageId && (
                   <div
                     className={`messages-new-separator ${
@@ -1564,7 +1773,11 @@ export const ChatView = ({
                 }}
               >
                 {!outgoing && !groupedWithPrevious && (
-                  <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} size={30} />
+                  <Avatar
+                    emoji={senderProfile?.avatarEmoji || peer.avatarEmoji}
+                    bg={senderProfile?.avatarBg || peer.avatarBg}
+                    size={30}
+                  />
                 )}
                 {!outgoing && groupedWithPrevious && <div className="avatar-spacer" />}
               <div className={`bubble-block ${outgoing ? 'out' : 'in'}`}>
@@ -1575,9 +1788,14 @@ export const ChatView = ({
                     message.status === null ? 'pending' : ''
                   } ${previewLoading ? 'media-loading' : ''} ${
                     isImageFile && previewDataUrl ? 'media-loaded' : ''
-                  }`}
+                  } ${isStickerFile ? 'sticker-bubble' : ''}`}
                   onContextMenu={(event) => handleBubbleContextMenu(event, message)}
                 >
+                  {isGroup && !outgoing && !groupedWithPrevious && !isDeleted && (
+                    <div className="group-message-author">
+                      {senderLabelForMessage(message.senderDeviceId)}
+                    </div>
+                  )}
                   {!isDeleted && Boolean(message.forwardedFromMessageId) && (
                     <div className="message-forwarded-label">
                       <ArrowForward20Regular />
@@ -1602,11 +1820,11 @@ export const ChatView = ({
                     <div className="message-deleted">Esta mensagem foi apagada.</div>
                   ) : isFile ? (
                     <>
-                      <div className="message-file-title">📎 {message.fileName}</div>
+                      {!isStickerFile && <div className="message-file-title">📎 {message.fileName}</div>}
                       {isImageFile && (
                         <button
                           type="button"
-                          className={`message-image-preview-btn ${previewDataUrl ? 'is-ready' : ''} ${
+                          className={`message-image-preview-btn ${isStickerFile ? 'sticker-preview' : ''} ${previewDataUrl ? 'is-ready' : ''} ${
                             previewVisible ? 'is-media-visible' : ''
                           }`}
                           onClick={() => void onOpenFile(message.filePath!)}
@@ -1627,10 +1845,12 @@ export const ChatView = ({
                           </div>
                         </button>
                       )}
-                      <div className="message-file-meta">
-                        {((message.fileSize || 0) / 1024).toFixed(1)} KB · SHA-256 {message.fileSha256?.slice(0, 10)}...
-                      </div>
-                      {progressPercent !== null && (
+                      {!isStickerFile && (
+                        <div className="message-file-meta">
+                          {((message.fileSize || 0) / 1024).toFixed(1)} KB · SHA-256 {message.fileSha256?.slice(0, 10)}...
+                        </div>
+                      )}
+                      {progressPercent !== null && !isStickerFile && (
                         <div className="message-file-progress-wrap">
                           <ProgressBar value={progressPercent / 100} thickness="medium" />
                           <div className="message-file-progress">
@@ -1639,12 +1859,13 @@ export const ChatView = ({
                           </div>
                         </div>
                       )}
-                      {transferStage && (
+                      {transferStage && (!isStickerFile || transferStage.tone !== 'done') && (
                         <div className={`transfer-stage-pill ${transferStage.tone}`}>
                           {transferStage.label}
                         </div>
                       )}
                       {message.filePath && message.status !== 'failed' ? (
+                        isStickerFile ? null : (
                         <div className="message-file-actions">
                           <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
                             Abrir
@@ -1657,6 +1878,7 @@ export const ChatView = ({
                             Salvar como
                           </Button>
                         </div>
+                        )
                       ) : message.status === 'failed' ? (
                         <div className="inline-status error">
                           <Caption1>Não foi possível enviar este anexo.</Caption1>
@@ -1689,6 +1911,11 @@ export const ChatView = ({
                     {isFavorite && (
                       <span className="bubble-favorite-indicator" title="Mensagem favoritada">
                         <Star20Filled />
+                      </span>
+                    )}
+                    {isGroupPinned && (
+                      <span className="bubble-favorite-indicator pinned" title="Mensagem fixada no grupo">
+                        <Pin20Regular />
                       </span>
                     )}
                     {message.editedAt && <span className="message-edited-label">editada</span>}
@@ -1733,6 +1960,18 @@ export const ChatView = ({
                       <ArrowReply20Regular />
                     </button>
 
+                    {isGroup && hasCounters && (
+                      <button
+                        type="button"
+                        className="reaction-trigger reaction-details-trigger"
+                        onClick={() => void openGroupReactionDetails(message.messageId)}
+                        title="Ver quem reagiu"
+                        aria-label="Ver quem reagiu"
+                      >
+                        <PeopleEye20Regular />
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       className={`reaction-trigger favorite-trigger ${isFavorite ? 'active' : ''}`}
@@ -1745,6 +1984,21 @@ export const ChatView = ({
                     >
                       {isFavorite ? <Star20Filled /> : <Star20Regular />}
                     </button>
+
+                    {isGroup && onSetGroupMessagePinned && (
+                      <button
+                        type="button"
+                        className={`reaction-trigger pin-trigger ${isGroupPinned ? 'active' : ''}`}
+                        onClick={() => {
+                          void onSetGroupMessagePinned(message.messageId, !isGroupPinned);
+                          closeMessageContextMenu();
+                        }}
+                        title={isGroupPinned ? 'Desfixar no grupo' : 'Fixar no grupo'}
+                        aria-label={isGroupPinned ? 'Desfixar no grupo' : 'Fixar no grupo'}
+                      >
+                        <Pin20Regular />
+                      </button>
+                    )}
 
                     {canEditCurrentMessage && (
                       <button
@@ -1799,12 +2053,16 @@ export const ChatView = ({
                             key={`${message.messageId}-${reaction}`}
                             type="button"
                             className={`announcement-reaction-pill ${summary.myReaction === reaction ? 'active' : ''}`}
-                            onClick={() =>
+                            onClick={() => {
+                              if (isGroup) {
+                                void openGroupReactionDetails(message.messageId);
+                                return;
+                              }
                               void onReactToMessage(
                                 message.messageId,
                                 summary.myReaction === reaction ? null : reaction
-                              )
-                            }
+                              );
+                            }}
                           >
                             <span>{reaction}</span>
                             <span>{summary.counts[reaction]}</span>
@@ -1825,9 +2083,13 @@ export const ChatView = ({
         })}
       </div>
 
-      {!peerOnline && (
+      {(groupUnavailable || !peerOnline) && (
         <div className="chat-offline-hint">
-          Este contato está offline. Suas mensagens e anexos ficarão pendentes e serão enviados quando ele voltar.
+          {groupUnavailable
+            ? 'Este grupo não existe mais no Relay. O envio está bloqueado, mas você pode excluir a conversa localmente.'
+            : isGroup
+            ? 'Sem conexão com o Relay. Não é possível enviar mensagens ou anexos neste grupo agora.'
+            : 'Este contato está offline. Suas mensagens e anexos ficarão pendentes e serão enviados quando ele voltar.'}
         </div>
       )}
       {peerOnline && peerTyping && (
@@ -1843,7 +2105,7 @@ export const ChatView = ({
 
       <MessageComposer
         placeholder="Digite sua mensagem"
-        disabled={false}
+        disabled={isGroup ? !peerOnline || groupUnavailable : false}
         autoFocusKey={peer.deviceId}
         onSend={async (text, replyTo) => {
           await onSend(text, replyTo);
@@ -1918,6 +2180,41 @@ export const ChatView = ({
           setPendingForwardMessageId(null);
         }}
       />
+
+      <Dialog
+        open={Boolean(reactionDetailsDialog)}
+        onOpenChange={(_, data) => {
+          if (!data.open) setReactionDetailsDialog(null);
+        }}
+      >
+        <DialogSurface className="confirm-modal announcement-details-modal">
+          <DialogBody>
+            <DialogTitle>Reações da mensagem</DialogTitle>
+            <DialogContent>
+              {reactionDetailsDialog?.loading ? (
+                <div className="announcement-details-empty">Carregando...</div>
+              ) : reactionDetailsDialog?.items.length ? (
+                <div className="announcement-details-list">
+                  {reactionDetailsDialog.items.map((item) => (
+                    <div key={`${item.deviceId}-${item.reaction}`} className="announcement-details-row">
+                      <Avatar emoji={item.avatarEmoji} bg={item.avatarBg} size={28} />
+                      <span>{item.displayName}</span>
+                      <strong>{item.reaction}</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="announcement-details-empty">Nenhuma reação nesta mensagem.</div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setReactionDetailsDialog(null)}>
+                Fechar
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
 
       <ConfirmDialog
         open={confirmForgetOpen}
@@ -1997,6 +2294,24 @@ export const ChatView = ({
                 {messageContextMenu.isFavorite ? <Star20Filled /> : <Star20Regular />}
               </span>
               <span>{messageContextMenu.isFavorite ? 'Desfavoritar' : 'Favoritar'}</span>
+            </button>
+          )}
+          {messageContextMenu.canPin && contextMenuMessage && onSetGroupMessagePinned && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                void onSetGroupMessagePinned(
+                  messageContextMenu.messageId,
+                  !messageContextMenu.isPinned
+                );
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <Pin20Regular />
+              </span>
+              <span>{messageContextMenu.isPinned ? 'Desfixar no grupo' : 'Fixar no grupo'}</span>
             </button>
           )}
           {Boolean(messageContextMenu.selectedText.trim()) && (

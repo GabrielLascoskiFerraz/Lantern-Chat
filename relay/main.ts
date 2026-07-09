@@ -5,6 +5,8 @@ import { createServer, IncomingMessage, Server as HttpServer, ServerResponse } f
 import path from 'node:path';
 import BonjourService, { Service } from 'bonjour-service';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
+import { GroupStore } from './groupStore';
+import { RelayGroupEvent, RelayGroupFileChunk } from './groupTypes';
 
 const RELAY_VERSION = '1.0.0';
 const RELAY_MDNS_TYPE = 'lanternrelay';
@@ -12,6 +14,7 @@ const RELAY_MDNS_PROTOCOL = 'tcp';
 const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
 const RELAY_DISCOVERY_UDP_RESPONSE = 'lantern:relay:announce';
 const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
+const ANNOUNCEMENT_EDIT_WINDOW_MS = 10 * 60 * 1000;
 const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
 const SEND_CALLBACK_TIMEOUT_MS = 10_000;
@@ -27,8 +30,23 @@ const resolveRelayDataDir = (): string => {
 const ANNOUNCEMENT_STORE_FILE = process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE
   ? path.resolve(process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE)
   : path.join(resolveRelayDataDir(), 'announcements.json');
+const GROUP_STORE_FILE = process.env.LANTERN_RELAY_GROUPS_FILE
+  ? path.resolve(process.env.LANTERN_RELAY_GROUPS_FILE)
+  : path.join(resolveRelayDataDir(), 'groups.json');
+const GROUP_ATTACHMENTS_DIR = process.env.LANTERN_RELAY_GROUP_ATTACHMENTS_DIR
+  ? path.resolve(process.env.LANTERN_RELAY_GROUP_ATTACHMENTS_DIR)
+  : path.join(resolveRelayDataDir(), 'group-attachments');
+const RELAY_STICKERS_DIR = process.env.LANTERN_RELAY_STICKERS_DIR
+  ? path.resolve(process.env.LANTERN_RELAY_STICKERS_DIR)
+  : path.join(resolveRelayDataDir(), 'stickers');
+// Optional protection for the browser dashboard when the Relay is exposed outside a trusted LAN.
+const RELAY_DASHBOARD_TOKEN = String(process.env.LANTERN_RELAY_DASHBOARD_TOKEN || '').trim();
+const RELAY_STICKER_CATEGORY_RE = /^[a-z0-9][a-z0-9_-]*$/i;
+const RELAY_STICKER_FILE_NAME_RE = /^[a-z0-9][a-z0-9._ -]*\.gif$/i;
+const RELAY_STICKER_MAX_BYTES = 20 * 1024 * 1024;
 
 const OPEN_READY_STATE = 1;
+const GROUP_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -82,12 +100,21 @@ interface RelayReactPayload {
   reaction: AnnouncementReactionValue | null;
 }
 
+interface RelayAnnouncementEditPayload {
+  targetMessageId: string;
+  text: string;
+}
+
 interface RelaySession {
   sessionId: string;
   socket: WebSocket;
   peer: RelayPeerInfo | null;
   lastSeenAt: number;
   isAlive: boolean;
+  messageQueue: Promise<void>;
+  // Downloads stay ordered, but must not block this peer's commands while a
+  // potentially large group attachment is being streamed.
+  groupFileDownloadQueue: Promise<void>;
 }
 
 interface RelayAnnouncementState {
@@ -148,8 +175,19 @@ interface RelayDashboardSnapshot {
   presenceRevision: number;
   announcementStoreFile: string;
   announcementsActive: number;
+  stickersAvailable: number;
   peers: RelayDashboardPeer[];
   announcements: RelayDashboardAnnouncement[];
+}
+
+interface RelayStickerItem {
+  id: string;
+  label: string;
+  fileName: string;
+  relativePath: string;
+  size: number;
+  category: string;
+  updatedAt: number;
 }
 
 const DEFAULT_CONFIG: RelayConfig = {
@@ -243,6 +281,31 @@ const extractDeleteTargetMessageId = (frame: RelayTransportFrame): string | null
   if (frame.type !== 'chat:delete') return null;
   const payload = asRecord(frame.payload);
   return asString(payload?.targetMessageId);
+};
+
+const extractAnnouncementEditPayload = (frame: RelayTransportFrame): RelayAnnouncementEditPayload | null => {
+  if (frame.type !== 'chat:edit' || frame.to !== null) return null;
+  const payload = asRecord(frame.payload);
+  const targetMessageId = asString(payload?.targetMessageId);
+  const text = asString(payload?.text);
+  if (!targetMessageId || !text) return null;
+  return { targetMessageId, text: text.slice(0, 12_000) };
+};
+
+const normalizeStickerRelativePath = (value: string): string | null => {
+  const normalized = value.trim().replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  if (segments.length === 1 && RELAY_STICKER_FILE_NAME_RE.test(segments[0])) {
+    return segments[0];
+  }
+  if (
+    segments.length === 2 &&
+    RELAY_STICKER_CATEGORY_RE.test(segments[0]) &&
+    RELAY_STICKER_FILE_NAME_RE.test(segments[1])
+  ) {
+    return `${segments[0]}/${segments[1]}`;
+  }
+  return null;
 };
 
 const ALLOWED_ANNOUNCEMENT_REACTIONS = new Set<AnnouncementReactionValue>([
@@ -920,9 +983,14 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       renderAnnouncements(data.announcements || []);
     };
 
+    const dashboardToken = new URLSearchParams(window.location.search).get('token');
+    const dashboardApiUrl = dashboardToken
+      ? '/api/status?token=' + encodeURIComponent(dashboardToken)
+      : '/api/status';
+
     const load = async () => {
       try {
-        const response = await fetch('/api/status', { cache: 'no-store' });
+        const response = await fetch(dashboardApiUrl, { cache: 'no-store' });
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const data = await response.json();
         applySnapshot(data);
@@ -944,6 +1012,7 @@ class LanternRelay {
   private readonly httpServer: HttpServer;
   private readonly wsServer: WebSocketServer;
   private readonly startedAt = Date.now();
+  private readonly groupStore: GroupStore;
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
   private readonly sessionsByDeviceId = new Map<string, RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
@@ -951,6 +1020,7 @@ class LanternRelay {
   private pingTimer: NodeJS.Timeout | null = null;
   private presenceBroadcastTimer: NodeJS.Timeout | null = null;
   private announcementSweepTimer: NodeJS.Timeout | null = null;
+  private groupSweepTimer: NodeJS.Timeout | null = null;
   private bonjour: BonjourService | null = null;
   private published: Service | null = null;
   private udpSocket: UdpSocket | null = null;
@@ -963,7 +1033,9 @@ class LanternRelay {
       server: this.httpServer,
       maxPayload: this.config.maxPayloadBytes
     });
+    this.groupStore = new GroupStore(GROUP_STORE_FILE, GROUP_ATTACHMENTS_DIR, logRelay);
     this.wsServer.on('connection', (socket) => this.handleConnection(socket));
+    this.ensureStickerDirectory();
     this.loadAnnouncementStore();
   }
 
@@ -981,11 +1053,16 @@ class LanternRelay {
     this.startHeartbeatLoop();
     this.startPresenceBroadcastLoop();
     this.startAnnouncementSweepLoop();
+    this.startGroupSweepLoop();
 
     logRelay('started', {
       endpoint: `ws://${this.config.host}:${this.config.port}`,
       version: RELAY_VERSION,
-      announcementStoreFile: ANNOUNCEMENT_STORE_FILE
+      announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
+      groupStoreFile: this.groupStore.getStoreFile(),
+      groupAttachmentsDir: this.groupStore.getAttachmentsDir(),
+      stickersDir: RELAY_STICKERS_DIR,
+      stickersAvailable: this.listStickerCatalog().length
     });
   }
 
@@ -1008,6 +1085,11 @@ class LanternRelay {
       clearInterval(this.announcementSweepTimer);
       this.announcementSweepTimer = null;
     }
+    if (this.groupSweepTimer) {
+      clearInterval(this.groupSweepTimer);
+      this.groupSweepTimer = null;
+    }
+    this.groupStore.close();
     if (this.udpSocket) {
       try {
         this.udpSocket.close();
@@ -1188,6 +1270,17 @@ class LanternRelay {
     this.announcementSweepTimer.unref?.();
   }
 
+  private startGroupSweepLoop(): void {
+    if (this.groupSweepTimer) return;
+    this.groupSweepTimer = setInterval(() => {
+      const result = this.groupStore.sweepAttachments();
+      if (result.expired || result.completed || result.staleUploads) {
+        logRelay('group_attachment_sweep', result, { level: 'info' });
+      }
+    }, GROUP_SWEEP_INTERVAL_MS);
+    this.groupSweepTimer.unref?.();
+  }
+
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     const method = req.method || 'GET';
     if (method !== 'GET' && method !== 'HEAD') {
@@ -1223,7 +1316,28 @@ class LanternRelay {
     }
 
     if (requestUrl.pathname === '/api/status') {
+      if (!this.isDashboardAuthorized(requestUrl)) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'UNAUTHORIZED',
+          message: 'Informe o token do painel do Relay.'
+        }, 401);
+        return;
+      }
       this.writeJson(res, method, this.getDashboardSnapshot());
+      return;
+    }
+
+    if (requestUrl.pathname === '/stickers') {
+      this.writeJson(res, method, {
+        ok: true,
+        stickers: this.listStickerCatalog()
+      });
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith('/stickers/')) {
+      this.serveStickerFile(requestUrl.pathname, method, res);
       return;
     }
 
@@ -1232,6 +1346,14 @@ class LanternRelay {
       requestUrl.pathname === '/dashboard' ||
       requestUrl.pathname === '/dashboard/'
     ) {
+      if (!this.isDashboardAuthorized(requestUrl)) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'UNAUTHORIZED',
+          message: 'Informe o token do painel do Relay.'
+        }, 401);
+        return;
+      }
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store'
@@ -1251,6 +1373,184 @@ class LanternRelay {
       error: 'NOT_FOUND',
       message: 'Rota não encontrada.'
     }, 404);
+  }
+
+  private isDashboardAuthorized(requestUrl: URL): boolean {
+    // Sem token configurado, o comportamento continua apropriado ao uso local atual.
+    return !RELAY_DASHBOARD_TOKEN || requestUrl.searchParams.get('token') === RELAY_DASHBOARD_TOKEN;
+  }
+
+  private ensureStickerDirectory(): void {
+    const targetDir = path.join(RELAY_STICKERS_DIR, 'cats');
+    fs.mkdirSync(targetDir, { recursive: true });
+    const existing = fs
+      .readdirSync(targetDir)
+      .filter((name) => RELAY_STICKER_FILE_NAME_RE.test(name));
+    if (existing.length > 0) {
+      return;
+    }
+
+    const seedDirs = [
+      path.join(process.cwd(), 'assets', 'stickers', 'cats'),
+      path.join(__dirname, '..', 'assets', 'stickers', 'cats'),
+      path.join(resolveRelayDataDir(), 'assets', 'stickers', 'cats'),
+      path.join(path.dirname(process.execPath), 'assets', 'stickers', 'cats')
+    ];
+
+    let copied = 0;
+    for (const seedDir of seedDirs) {
+      if (!fs.existsSync(seedDir)) continue;
+      const names = fs
+        .readdirSync(seedDir)
+        .filter((name) => RELAY_STICKER_FILE_NAME_RE.test(name));
+      for (const name of names) {
+        try {
+          fs.copyFileSync(path.join(seedDir, name), path.join(targetDir, name));
+          copied += 1;
+        } catch {
+          // continua copiando os demais arquivos
+        }
+      }
+      if (copied > 0) break;
+    }
+
+    logRelay('stickers_ready', {
+      directory: targetDir,
+      copied,
+      available: this.listStickerCatalog().length
+    });
+  }
+
+  private listStickerCatalog(): RelayStickerItem[] {
+    try {
+      fs.mkdirSync(RELAY_STICKERS_DIR, { recursive: true });
+      const catalog: RelayStickerItem[] = [];
+      const addSticker = (category: string, relativePath: string, filePath: string, fileName: string): void => {
+        const stat = fs.statSync(filePath);
+        if (!this.isValidStickerFile(filePath, stat.size)) return;
+
+        const label = fileName
+          .replace(/\.gif$/i, '')
+          .replace(/^lantern-cat-sticker-/i, '')
+          .replace(/^lantern-sticker-/i, '')
+          .replace(/[-_]+/g, ' ')
+          .replace(/\b\w/g, (letter) => letter.toUpperCase());
+        catalog.push({
+          id: relativePath,
+          label,
+          fileName,
+          relativePath,
+          size: stat.size,
+          category,
+          updatedAt: Math.max(0, Math.trunc(stat.mtimeMs))
+        });
+      };
+
+      // GIFs diretamente em stickers/ são válidos e entram na categoria Geral.
+      // As subpastas continuam sendo categorias opcionais para organização.
+      const rootFiles = fs
+        .readdirSync(RELAY_STICKERS_DIR, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && RELAY_STICKER_FILE_NAME_RE.test(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR', { sensitivity: 'base' }));
+      for (const entry of rootFiles) {
+        addSticker('geral', entry.name, path.join(RELAY_STICKERS_DIR, entry.name), entry.name);
+      }
+
+      const categoryEntries = fs
+        .readdirSync(RELAY_STICKERS_DIR, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && RELAY_STICKER_CATEGORY_RE.test(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR', { sensitivity: 'base' }));
+
+      for (const categoryEntry of categoryEntries) {
+        const category = categoryEntry.name;
+        const categoryDir = path.join(RELAY_STICKERS_DIR, category);
+        const fileEntries = fs
+          .readdirSync(categoryDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && RELAY_STICKER_FILE_NAME_RE.test(entry.name))
+          .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR', { sensitivity: 'base' }));
+
+        for (const entry of fileEntries) {
+          const filePath = path.join(categoryDir, entry.name);
+          const relativePath = `${category}/${entry.name}`;
+          addSticker(category, relativePath, filePath, entry.name);
+        }
+      }
+
+      return catalog;
+    } catch {
+      return [];
+    }
+  }
+
+  private isValidStickerFile(filePath: string, size: number): boolean {
+    if (!Number.isFinite(size) || size <= 0 || size > RELAY_STICKER_MAX_BYTES) {
+      return false;
+    }
+    let descriptor: number | null = null;
+    try {
+      descriptor = fs.openSync(filePath, 'r');
+      const header = Buffer.alloc(6);
+      const read = fs.readSync(descriptor, header, 0, header.length, 0);
+      const signature = header.subarray(0, read).toString('ascii');
+      return signature === 'GIF87a' || signature === 'GIF89a';
+    } catch {
+      return false;
+    } finally {
+      if (descriptor !== null) {
+        try {
+          fs.closeSync(descriptor);
+        } catch {
+          // ignore close failure
+        }
+      }
+    }
+  }
+
+  private serveStickerFile(pathname: string, method: string, res: ServerResponse): void {
+    const rawRelativePath = pathname.slice('/stickers/'.length);
+    let relativePath = '';
+    try {
+      relativePath = normalizeStickerRelativePath(decodeURIComponent(rawRelativePath)) || '';
+    } catch {
+      relativePath = '';
+    }
+    if (!relativePath) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'BAD_STICKER',
+        message: 'GIF inválida.'
+      }, 400);
+      return;
+    }
+    const filePath = path.join(RELAY_STICKERS_DIR, ...relativePath.split('/'));
+    if (!fs.existsSync(filePath)) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'STICKER_NOT_FOUND',
+        message: 'GIF não encontrada no Relay.'
+      }, 404);
+      return;
+    }
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || !this.isValidStickerFile(filePath, stat.size)) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'BAD_STICKER',
+        message: 'GIF inválida.'
+      }, 400);
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'image/gif',
+      'content-length': String(stat.size),
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff'
+    });
+    if (method === 'HEAD') {
+      res.end();
+      return;
+    }
+    fs.createReadStream(filePath).pipe(res);
   }
 
   private writeJson(
@@ -1286,6 +1586,7 @@ class LanternRelay {
       presenceRevision: this.presenceRevision,
       announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
       announcementsActive: announcements.length,
+      stickersAvailable: this.listStickerCatalog().length,
       peers,
       announcements
     };
@@ -1359,7 +1660,9 @@ class LanternRelay {
       socket,
       peer: null,
       lastSeenAt: Date.now(),
-      isAlive: true
+      isAlive: true,
+      messageQueue: Promise.resolve(),
+      groupFileDownloadQueue: Promise.resolve()
     };
 
     this.sessionsBySocket.set(socket, session);
@@ -1382,7 +1685,10 @@ class LanternRelay {
     });
 
     socket.on('message', (raw) => {
-      void this.handleMessage(session, raw).catch((error) => {
+      session.messageQueue = session.messageQueue
+        .catch(() => undefined)
+        .then(() => this.handleMessage(session, raw))
+        .catch((error) => {
         logRelay(
           'message_handler_failed',
           {
@@ -1473,6 +1779,37 @@ class LanternRelay {
       case 'relay:announcement:read':
         this.handleAnnouncementRead(session, envelope.payload);
         return;
+      case 'relay:groups:sync':
+        this.handleGroupSyncRequest(session, envelope.payload);
+        return;
+      case 'relay:group:request':
+        await this.handleGroupRequest(session, envelope.payload);
+        return;
+      case 'relay:group:file:chunk':
+        await this.handleGroupFileChunk(session, envelope.payload);
+        return;
+      case 'relay:group:file:complete':
+        await this.handleGroupFileComplete(session, envelope.payload);
+        return;
+      case 'relay:group:file:request':
+        session.groupFileDownloadQueue = session.groupFileDownloadQueue
+          .catch(() => undefined)
+          .then(() => this.handleGroupFileRequest(session, envelope.payload))
+          .catch((error) => {
+            logRelay(
+              'group_file_download_queue_failed',
+              {
+                sessionId: session.sessionId,
+                deviceId: session.peer?.deviceId || null,
+                message: error instanceof Error ? error.message : String(error)
+              },
+              { level: 'warn', rateKey: `group_file_download_queue_failed:${session.sessionId}`, rateLimitMs: 1_000 }
+            );
+          });
+        return;
+      case 'relay:group:file:received':
+        this.handleGroupFileReceived(session, envelope.payload);
+        return;
       case 'relay:send':
         await this.handleRelaySend(session, envelope.payload);
         return;
@@ -1520,6 +1857,7 @@ class LanternRelay {
     this.bumpPresenceRevision('peer_online');
     this.sendPresenceSnapshot(session);
     this.sendAnnouncementSnapshot(session, 'peer_online');
+    this.sendGroupSnapshot(session, 'peer_online');
     this.sendKnownExpiredAnnouncements(session);
     this.broadcastPresenceDelta({
       op: 'upsert',
@@ -1565,6 +1903,502 @@ class LanternRelay {
     }, 'peer_profile_updated');
   }
 
+  private sendGroupSnapshot(session: RelaySession, reason: string, knownSeqByGroup?: Record<string, number>): void {
+    if (!session.peer) return;
+    const snapshots = this.groupStore.snapshotForDevice(session.peer.deviceId, knownSeqByGroup);
+    this.sendEnvelope(session.socket, {
+      type: 'relay:groups:snapshot',
+      payload: {
+        serverTime: Date.now(),
+        reason,
+        snapshots
+      }
+    });
+    logRelay(
+      'group_snapshot_sent',
+      {
+        deviceId: session.peer.deviceId,
+        reason,
+        groups: snapshots.length
+      },
+      { level: 'debug' }
+    );
+  }
+
+  private handleGroupSyncRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de sincronizar grupos.');
+      return;
+    }
+    const record = asRecord(payload);
+    const rawSeqMap = asRecord(record?.knownSeqByGroup);
+    const knownSeqByGroup: Record<string, number> = {};
+    for (const [groupId, seq] of Object.entries(rawSeqMap || {})) {
+      if (typeof seq !== 'number' || !Number.isFinite(seq) || seq < 0) continue;
+      knownSeqByGroup[groupId] = Math.trunc(seq);
+    }
+    this.sendGroupSnapshot(session, 'request', knownSeqByGroup);
+  }
+
+  private sendGroupAck(session: RelaySession, requestId: string | null, payload?: Record<string, unknown>): void {
+    this.sendEnvelope(session.socket, {
+      type: 'relay:group:ack',
+      payload: {
+        requestId,
+        ok: true,
+        ...(payload || {})
+      }
+    });
+  }
+
+  private sendGroupRequestError(
+    session: RelaySession,
+    requestId: string | null,
+    code: string,
+    message: string
+  ): void {
+    this.sendEnvelope(session.socket, {
+      type: 'relay:group:ack',
+      payload: {
+        requestId,
+        ok: false,
+        code,
+        message
+      }
+    });
+  }
+
+  private normalizeStringList(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  private broadcastGroupEvents(events: RelayGroupEvent[]): void {
+    for (const event of events) {
+      const recipientSet = new Set(this.groupStore.getActiveRecipientIds(event.groupId, true));
+      recipientSet.add(event.actorDeviceId);
+      const payload =
+        event.payload && typeof event.payload === 'object'
+          ? (event.payload as Record<string, unknown>)
+          : {};
+      if (
+        (event.type === 'group.member.removed' || event.type === 'group.member.left') &&
+        typeof payload.deviceId === 'string'
+      ) {
+        recipientSet.add(payload.deviceId);
+      }
+      const recipients = Array.from(recipientSet).filter(Boolean);
+      for (const deviceId of recipients) {
+        const recipient = this.sessionsByDeviceId.get(deviceId);
+        if (!recipient) continue;
+        this.sendEnvelope(recipient.socket, {
+          type: 'relay:group:event',
+          payload: {
+            serverTime: Date.now(),
+            event
+          }
+        });
+      }
+      logRelay('group_event_broadcast', {
+        groupId: event.groupId,
+        seq: event.seq,
+        type: event.type,
+        recipients: recipients.length
+      }, { level: 'debug' });
+    }
+  }
+
+  private async handleGroupRequest(session: RelaySession, payload: unknown): Promise<void> {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de operar grupos.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const action = asString(record?.action);
+    const data = asRecord(record?.data) || {};
+
+    if (!action) {
+      this.sendGroupRequestError(session, requestId, 'INVALID_GROUP_ACTION', 'Ação de grupo inválida.');
+      return;
+    }
+
+    try {
+      let events: RelayGroupEvent[] = [];
+      let response: Record<string, unknown> = {};
+      switch (action) {
+        case 'create': {
+          const result = this.groupStore.createGroup({
+            actor: session.peer,
+            name: asString(data.name) || 'Grupo',
+            emoji: asString(data.emoji) || '👥',
+            avatarBg: asString(data.avatarBg) || '#147ad6',
+            description: asString(data.description) || '',
+            memberDeviceIds: this.normalizeStringList(data.memberDeviceIds)
+          });
+          events = result.events;
+          response = { group: result.group };
+          break;
+        }
+        case 'update': {
+          const event = this.groupStore.updateGroup({
+            actorDeviceId: session.peer.deviceId,
+            groupId: asString(data.groupId) || '',
+            name: typeof data.name === 'string' ? data.name : undefined,
+            emoji: typeof data.emoji === 'string' ? data.emoji : undefined,
+            avatarBg: typeof data.avatarBg === 'string' ? data.avatarBg : undefined,
+            description: typeof data.description === 'string' ? data.description : undefined,
+            settings: (() => {
+              const settings = asRecord(data.settings);
+              if (!settings) return undefined;
+              return {
+                allowMembersToPin:
+                  settings.allowMembersToPin === undefined
+                    ? undefined
+                    : settings.allowMembersToPin !== false,
+                allowMembersToEditInfo:
+                  settings.allowMembersToEditInfo === undefined
+                    ? undefined
+                    : settings.allowMembersToEditInfo === true
+              };
+            })()
+          });
+          events = [event];
+          break;
+        }
+        case 'deleteGroup': {
+          const event = this.groupStore.deleteGroup(
+            asString(data.groupId) || '',
+            session.peer.deviceId
+          );
+          events = [event];
+          break;
+        }
+        case 'addMembers': {
+          const event = this.groupStore.addMembers(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            this.normalizeStringList(data.memberDeviceIds)
+          );
+          events = [event];
+          break;
+        }
+        case 'removeMember': {
+          const event = this.groupStore.removeMember(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.deviceId) || ''
+          );
+          events = [event];
+          break;
+        }
+        case 'changeRole': {
+          const role = data.role === 'admin' ? 'admin' : 'member';
+          const event = this.groupStore.changeMemberRole(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.deviceId) || '',
+            role
+          );
+          events = [event];
+          break;
+        }
+        case 'transferOwnership': {
+          const event = this.groupStore.transferOwnership(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.deviceId) || ''
+          );
+          events = [event];
+          break;
+        }
+        case 'leave': {
+          const event = this.groupStore.leaveGroup(asString(data.groupId) || '', session.peer.deviceId);
+          events = [event];
+          break;
+        }
+        case 'sendText': {
+          const groupId = asString(data.groupId) || '';
+          const messageId = asString(data.messageId) || randomUUID();
+          const createdAt = asFiniteNumber(data.createdAt) || Date.now();
+          const text = asString(data.text) || '';
+          if (!text) throw new Error('Mensagem vazia.');
+          const event = this.groupStore.appendGroupMessage({
+            actorDeviceId: session.peer.deviceId,
+            groupId,
+            messageId,
+            createdAt,
+            payload: {
+              message: {
+                messageId,
+                groupId,
+                type: 'text',
+                senderDeviceId: session.peer.deviceId,
+                bodyText: text,
+                replyTo: data.replyTo || null,
+                forwardedFromMessageId: asString(data.forwardedFromMessageId),
+                createdAt
+              }
+            }
+          });
+          events = [event];
+          break;
+        }
+        case 'editMessage': {
+          const event = this.groupStore.editGroupMessage(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.targetMessageId) || '',
+            asString(data.text) || '',
+            Date.now()
+          );
+          events = [event];
+          break;
+        }
+        case 'deleteMessage': {
+          const event = this.groupStore.deleteGroupMessage(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.targetMessageId) || '',
+            Date.now()
+          );
+          events = [event];
+          break;
+        }
+        case 'react': {
+          const rawReaction = data.reaction;
+          const reaction =
+            rawReaction === null
+              ? null
+              : rawReaction === '👍' ||
+                rawReaction === '👎' ||
+                rawReaction === '❤️' ||
+                rawReaction === '😢' ||
+                rawReaction === '😊' ||
+                rawReaction === '😂'
+              ? rawReaction
+              : null;
+          const event = this.groupStore.reactToGroupMessage(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.targetMessageId) || '',
+            reaction,
+            Date.now()
+          );
+          events = [event];
+          break;
+        }
+        case 'pin':
+        case 'unpin': {
+          const event = this.groupStore.setGroupMessagePinned(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asString(data.messageId) || '',
+            action === 'pin'
+          );
+          events = [event];
+          break;
+        }
+        case 'file:init': {
+          const offerRecord = asRecord(data.offer);
+          const upload = this.groupStore.initGroupFile({
+            actorDeviceId: session.peer.deviceId,
+            createdAt: asFiniteNumber(data.createdAt) || Date.now(),
+            offer: {
+              groupId: asString(offerRecord?.groupId) || '',
+              messageId: asString(offerRecord?.messageId) || '',
+              fileId: asString(offerRecord?.fileId) || '',
+              filename: asString(offerRecord?.filename) || 'arquivo',
+              size: asFiniteNumber(offerRecord?.size) || 0,
+              sha256: asString(offerRecord?.sha256) || '',
+              replyTo: offerRecord?.replyTo || null,
+              forwardedFromMessageId: asString(offerRecord?.forwardedFromMessageId)
+            }
+          });
+          response = { metadata: upload.metadata, nextIndex: upload.nextIndex };
+          break;
+        }
+        default:
+          throw new Error(`Ação de grupo não suportada: ${action}`);
+      }
+
+      this.sendGroupAck(session, requestId, response);
+      if (events.length > 0) {
+        this.broadcastGroupEvents(events);
+      }
+    } catch (error) {
+      this.sendGroupRequestError(
+        session,
+        requestId,
+        'GROUP_REQUEST_FAILED',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async handleGroupFileChunk(session: RelaySession, payload: unknown): Promise<void> {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de enviar chunks.');
+      return;
+    }
+    const record = asRecord(payload);
+    const chunk: RelayGroupFileChunk = {
+      fileId: asString(record?.fileId) || '',
+      index: Math.trunc(asFiniteNumber(record?.index) || 0),
+      total: Math.trunc(asFiniteNumber(record?.total) || 0),
+      dataBase64: typeof record?.dataBase64 === 'string' ? record.dataBase64 : ''
+    };
+    try {
+      await this.groupStore.appendGroupFileChunk(chunk, session.peer.deviceId);
+      this.sendEnvelope(session.socket, {
+        type: 'relay:group:file:chunk:ack',
+        payload: { fileId: chunk.fileId, index: chunk.index }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:group:file:chunk:error',
+        payload: {
+          fileId: chunk.fileId,
+          index: chunk.index,
+          code: 'GROUP_FILE_CHUNK_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+  }
+
+  private async handleGroupFileComplete(session: RelaySession, payload: unknown): Promise<void> {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de finalizar upload.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const fileId = asString(record?.fileId);
+    if (!fileId) {
+      this.sendGroupRequestError(session, requestId, 'INVALID_FILE_ID', 'fileId inválido.');
+      return;
+    }
+    try {
+      const metadata = await this.groupStore.completeGroupFile(fileId, session.peer.deviceId);
+      const messageEvent = this.groupStore.appendGroupMessage({
+        actorDeviceId: session.peer.deviceId,
+        groupId: metadata.groupId,
+        messageId: metadata.messageId,
+        createdAt: metadata.createdAt,
+        payload: {
+          message: {
+            messageId: metadata.messageId,
+            groupId: metadata.groupId,
+            type: 'file',
+            senderDeviceId: session.peer.deviceId,
+            fileId: metadata.fileId,
+            fileName: metadata.fileName,
+            fileSize: metadata.fileSize,
+            fileSha256: metadata.sha256,
+            replyTo: metadata.replyTo || null,
+            forwardedFromMessageId: metadata.forwardedFromMessageId || null,
+            createdAt: metadata.createdAt
+          },
+          attachment: metadata
+        }
+      });
+      const attachmentEvent = this.groupStore.appendAttachmentAvailable(
+        metadata.groupId,
+        session.peer.deviceId,
+        metadata.fileId
+      );
+      this.sendGroupAck(session, requestId, { metadata });
+      this.broadcastGroupEvents([messageEvent, attachmentEvent]);
+    } catch (error) {
+      this.sendGroupRequestError(
+        session,
+        requestId,
+        'GROUP_FILE_COMPLETE_FAILED',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async handleGroupFileRequest(session: RelaySession, payload: unknown): Promise<void> {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de baixar arquivo.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const fileId = asString(record?.fileId);
+    if (!fileId) {
+      this.sendGroupRequestError(session, requestId, 'INVALID_FILE_ID', 'fileId inválido.');
+      return;
+    }
+    try {
+      const metadata = this.groupStore.getAttachmentMetadata(fileId);
+      if (!metadata) {
+        throw new Error('Anexo indisponível no Relay.');
+      }
+      this.sendEnvelope(session.socket, {
+        type: 'relay:group:file:start',
+        payload: {
+          requestId,
+          fileId,
+          metadata
+        }
+      });
+      for await (const chunk of this.groupStore.createAttachmentChunkStream(fileId, session.peer.deviceId)) {
+        const delivered = await this.sendEnvelopeWithStatus(session.socket, {
+          type: 'relay:group:file:chunk',
+          payload: {
+            requestId,
+            ...chunk
+          }
+        });
+        if (!delivered) {
+          throw new Error('Conexão encerrada durante o download do anexo.');
+        }
+      }
+      this.sendEnvelope(session.socket, {
+        type: 'relay:group:file:complete',
+        payload: {
+          requestId,
+          fileId
+        }
+      });
+    } catch (error) {
+      this.sendGroupRequestError(
+        session,
+        requestId,
+        'GROUP_FILE_REQUEST_FAILED',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private handleGroupFileReceived(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de confirmar arquivo.');
+      return;
+    }
+    const record = asRecord(payload);
+    const fileId = asString(record?.fileId);
+    if (!fileId) return;
+    const metadata = this.groupStore.markAttachmentReceived(fileId, session.peer.deviceId);
+    if (metadata) {
+      logRelay('group_attachment_received', {
+        groupId: metadata.groupId,
+        fileId,
+        deviceId: session.peer.deviceId
+      }, { level: 'debug' });
+    }
+  }
+
   private async handleRelaySend(session: RelaySession, payload: unknown): Promise<void> {
     if (!session.peer) {
       this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de encaminhar mensagens.');
@@ -1579,13 +2413,25 @@ class LanternRelay {
     }
 
     if (frame.from !== session.peer.deviceId) {
-      this.sendError(session, 'FORBIDDEN_FROM', 'O campo "from" precisa ser o deviceId da sessão.');
+      this.sendError(
+        session,
+        'FORBIDDEN_FROM',
+        'O campo "from" precisa ser o deviceId da sessão.',
+        frame.messageId
+      );
       return;
     }
 
-    const deliveredTo = await this.routeFrame(frame, session.peer.deviceId);
+    let outboundFrame = frame;
     if (frame.type === 'announce') {
       this.trackAnnouncement(frame);
+    } else if (frame.type === 'chat:edit' && frame.to === null) {
+      const result = this.applyAnnouncementEdit(frame);
+      if (!result.ok) {
+        this.sendError(session, result.code, result.message, frame.messageId);
+        return;
+      }
+      outboundFrame = result.frame;
     } else if (frame.type === 'chat:react' && frame.to === null) {
       this.applyAnnouncementReaction(frame);
     } else if (frame.type === 'chat:delete') {
@@ -1595,11 +2441,13 @@ class LanternRelay {
       }
     }
 
+    const deliveredTo = await this.routeFrame(outboundFrame, session.peer.deviceId);
+
     logRelay('frame_routed', {
-      type: frame.type,
-      from: frame.from,
-      to: frame.to,
-      messageId: frame.messageId,
+      type: outboundFrame.type,
+      from: outboundFrame.from,
+      to: outboundFrame.to,
+      messageId: outboundFrame.messageId,
       deliveredCount: deliveredTo.length,
       deliveredTo
     }, { level: 'debug' });
@@ -1678,6 +2526,71 @@ class LanternRelay {
     });
     this.scheduleAnnouncementPersist();
     this.sweepAnnouncements('announce_received');
+  }
+
+  private applyAnnouncementEdit(
+    frame: RelayTransportFrame
+  ):
+    | { ok: true; frame: RelayTransportFrame }
+    | { ok: false; code: string; message: string } {
+    const payload = extractAnnouncementEditPayload(frame);
+    if (!payload) {
+      return {
+        ok: false,
+        code: 'INVALID_ANNOUNCEMENT_EDIT',
+        message: 'Edição de anúncio inválida.'
+      };
+    }
+
+    const state = this.announcementsById.get(payload.targetMessageId);
+    if (!state || state.deletedAt || state.expiredAt || state.expiresAt <= Date.now()) {
+      return {
+        ok: false,
+        code: 'ANNOUNCEMENT_NOT_FOUND',
+        message: 'Este anúncio não está mais disponível.'
+      };
+    }
+    if (state.frame.from !== frame.from) {
+      return {
+        ok: false,
+        code: 'FORBIDDEN_ANNOUNCEMENT_EDIT',
+        message: 'Somente o autor pode editar este anúncio.'
+      };
+    }
+
+    const now = Date.now();
+    if (now - state.createdAt > ANNOUNCEMENT_EDIT_WINDOW_MS) {
+      return {
+        ok: false,
+        code: 'ANNOUNCEMENT_EDIT_WINDOW_EXPIRED',
+        message: 'O prazo para editar este anúncio terminou.'
+      };
+    }
+
+    const persistedPayload = {
+      ...(asRecord(state.frame.payload) || {}),
+      text: payload.text,
+      editedAt: now
+    };
+    state.frame = {
+      ...state.frame,
+      payload: persistedPayload
+    };
+    this.announcementsById.set(state.messageId, state);
+    this.scheduleAnnouncementPersist();
+
+    return {
+      ok: true,
+      frame: {
+        ...frame,
+        createdAt: now,
+        payload: {
+          targetMessageId: payload.targetMessageId,
+          text: payload.text,
+          editedAt: now
+        }
+      }
+    };
   }
 
   private markAnnouncementDeleted(messageId: string, deletedAtInput: number): void {
@@ -2231,7 +3144,12 @@ class LanternRelay {
     }, { level: 'debug' });
   }
 
-  private sendError(session: RelaySession, code: string, message: string): void {
+  private sendError(
+    session: RelaySession,
+    code: string,
+    message: string,
+    frameMessageId?: string
+  ): void {
     logRelay('protocol_error', {
       sessionId: session.sessionId,
       deviceId: session.peer?.deviceId || null,
@@ -2240,7 +3158,7 @@ class LanternRelay {
     }, { level: 'warn' });
     this.sendEnvelope(session.socket, {
       type: 'relay:error',
-      payload: { code, message }
+      payload: { code, message, ...(frameMessageId ? { frameMessageId } : {}) }
     });
   }
 

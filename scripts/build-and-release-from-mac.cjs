@@ -160,14 +160,24 @@ const copyFile = (source, target) => {
   fs.copyFileSync(source, target);
 };
 
-const makeZipSingleFile = (sourceFile, zipFile, dryRun) => {
+const makeRelayZip = (sourceFile, zipFile, dryRun) => {
   const tempDir = path.join(
     distReleaseTmpDir,
     `${path.basename(sourceFile)}-${Date.now().toString(36)}`
   );
   fs.mkdirSync(tempDir, { recursive: true });
-  const stagedFile = path.join(tempDir, path.basename(sourceFile));
-  fs.copyFileSync(sourceFile, stagedFile);
+  fs.copyFileSync(sourceFile, path.join(tempDir, path.basename(sourceFile)));
+
+  const stickersSource = path.join(projectRoot, 'assets', 'stickers', 'cats');
+  if (fs.existsSync(stickersSource)) {
+    const stickersTarget = path.join(tempDir, 'stickers', 'cats');
+    fs.mkdirSync(stickersTarget, { recursive: true });
+    for (const name of fs.readdirSync(stickersSource)) {
+      if (/^lantern-cat-sticker-[a-z0-9-]+\.gif$/i.test(name)) {
+        fs.copyFileSync(path.join(stickersSource, name), path.join(stickersTarget, name));
+      }
+    }
+  }
 
   if (fs.existsSync(zipFile)) {
     fs.rmSync(zipFile, { force: true });
@@ -176,8 +186,8 @@ const makeZipSingleFile = (sourceFile, zipFile, dryRun) => {
   run(
     `Compactando ${path.basename(zipFile)}`,
     'zip',
-    ['-j', '-X', zipFile, stagedFile],
-    {},
+    ['-X', '-r', zipFile, '.'],
+    { cwd: tempDir },
     dryRun
   );
 };
@@ -267,8 +277,8 @@ const buildReleaseAssets = (dryRun) => {
 
   copyFile(windowsInstaller, targetWindowsInstaller);
   copyFile(macDmg, targetMacDmg);
-  makeZipSingleFile(relayWin, targetRelayWinZip, dryRun);
-  makeZipSingleFile(relayMac, targetRelayMacZip, dryRun);
+  makeRelayZip(relayWin, targetRelayWinZip, dryRun);
+  makeRelayZip(relayMac, targetRelayMacZip, dryRun);
 
   return [targetWindowsInstaller, targetRelayWinZip, targetMacDmg, targetRelayMacZip];
 };

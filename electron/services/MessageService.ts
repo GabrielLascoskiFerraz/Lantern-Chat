@@ -152,6 +152,67 @@ export class MessageService {
     }
   }
 
+  private getReplyPayloadFromMessage(message: DbMessage): MessageReplyPayload | null {
+    if (!message.replyToMessageId || !message.replyToSenderDeviceId || !message.replyToType) {
+      return null;
+    }
+    return {
+      messageId: message.replyToMessageId,
+      senderDeviceId: message.replyToSenderDeviceId,
+      type: message.replyToType,
+      previewText: message.replyToPreviewText,
+      fileName: message.replyToFileName
+    };
+  }
+
+  /**
+   * Reenvia um anexo já persistido localmente. Também é usado quando um
+   * destinatário recupera o histórico depois de perder os chunks originais.
+   */
+  async resendFileMessageToPeer(peer: Peer, fileMessage: DbMessage): Promise<boolean> {
+    if (
+      fileMessage.type !== 'file' ||
+      fileMessage.direction !== 'out' ||
+      fileMessage.receiverDeviceId !== peer.deviceId ||
+      !fileMessage.filePath ||
+      !fileMessage.fileId ||
+      !fs.existsSync(fileMessage.filePath)
+    ) {
+      return false;
+    }
+
+    const transferKey = `${peer.deviceId}:${fileMessage.messageId}`;
+    if (this.inFlightFileTransfers.has(transferKey)) {
+      return true;
+    }
+
+    this.inFlightFileTransfers.add(transferKey);
+    try {
+      const { offer } = await this.fileTransfer.createOffer(
+        peer.deviceId,
+        fileMessage.filePath,
+        fileMessage.messageId,
+        fileMessage.fileId,
+        fileMessage.fileName || undefined
+      );
+      const replyTo = this.getReplyPayloadFromMessage(fileMessage);
+      const offerWithReply: FileOfferPayload = replyTo && !offer.replyTo ? { ...offer, replyTo } : offer;
+      const offerWithMeta: FileOfferPayload =
+        fileMessage.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
+          ? { ...offerWithReply, forwardedFromMessageId: fileMessage.forwardedFromMessageId }
+          : offerWithReply;
+
+      await this.sendToPeer(
+        peer,
+        this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, fileMessage.createdAt)
+      );
+      await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, 0);
+      return true;
+    } finally {
+      this.inFlightFileTransfers.delete(transferKey);
+    }
+  }
+
   async sendText(
     peerId: string,
     text: string,
@@ -292,7 +353,7 @@ export class MessageService {
     const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
     const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
     const { offer } = await this.fileTransfer.createOffer(peerId, managedFilePath, messageId);
-    this.deleteClipboardTempFile(filePath);
+    this.deleteEphemeralOutgoingFile(filePath);
 
     if (offer.size > MAX_FILE_SIZE_BYTES) {
       throw new Error('Arquivo acima do limite de 200MB');
@@ -400,16 +461,17 @@ export class MessageService {
     }
   }
 
-  private isClipboardTempFile(filePath: string): boolean {
+  private isEphemeralOutgoingFile(filePath: string): boolean {
     if (!filePath) return false;
-    const tempDir = path.join(os.tmpdir(), 'lantern-paste');
     const resolvedFile = path.resolve(filePath);
-    const resolvedTemp = path.resolve(tempDir) + path.sep;
-    return resolvedFile.startsWith(resolvedTemp);
+    const temporaryDirectories = ['lantern-paste', 'lantern-stickers'].map(
+      (name) => path.resolve(os.tmpdir(), name) + path.sep
+    );
+    return temporaryDirectories.some((directory) => resolvedFile.startsWith(directory));
   }
 
-  private deleteClipboardTempFile(filePath: string): void {
-    if (!this.isClipboardTempFile(filePath)) return;
+  private deleteEphemeralOutgoingFile(filePath: string): void {
+    if (!this.isEphemeralOutgoingFile(filePath)) return;
     fs.promises.unlink(filePath).catch(() => undefined);
   }
 
@@ -440,50 +502,11 @@ export class MessageService {
   async replayPendingFilesForPeer(peer: Peer): Promise<void> {
     const pendingFiles = this.db.getOutgoingFileMessagesForPeer(peer.deviceId, 20);
     for (const fileMessage of pendingFiles) {
-      if (!fileMessage.filePath || !fileMessage.fileId) continue;
-      if (!fs.existsSync(fileMessage.filePath)) continue;
-      const transferKey = `${peer.deviceId}:${fileMessage.messageId}`;
-      if (this.inFlightFileTransfers.has(transferKey)) {
-        continue;
-      }
-      this.inFlightFileTransfers.add(transferKey);
       try {
-        const { offer } = await this.fileTransfer.createOffer(
-          peer.deviceId,
-          fileMessage.filePath,
-          fileMessage.messageId,
-          fileMessage.fileId,
-          fileMessage.fileName || undefined
-        );
-        const replyTo =
-          fileMessage.replyToMessageId && fileMessage.replyToSenderDeviceId && fileMessage.replyToType
-            ? {
-                messageId: fileMessage.replyToMessageId,
-                senderDeviceId: fileMessage.replyToSenderDeviceId,
-                type: fileMessage.replyToType,
-                previewText: fileMessage.replyToPreviewText,
-                fileName: fileMessage.replyToFileName
-              }
-            : null;
-        const offerWithReply: FileOfferPayload =
-          replyTo && !offer.replyTo
-            ? { ...offer, replyTo }
-            : offer;
-        const offerWithMeta: FileOfferPayload =
-          fileMessage.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
-            ? { ...offerWithReply, forwardedFromMessageId: fileMessage.forwardedFromMessageId }
-            : offerWithReply;
-
-        await this.sendToPeer(
-          peer,
-          this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, fileMessage.createdAt)
-        );
-        await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, 0);
+        await this.resendFileMessageToPeer(peer, fileMessage);
       } catch {
         this.markUnreachable(peer);
         break;
-      } finally {
-        this.inFlightFileTransfers.delete(transferKey);
       }
     }
   }

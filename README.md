@@ -7,9 +7,13 @@ No estado atual do projeto, **todo tráfego passa pelo LanternRelay**:
 
 - presença online/offline
 - mensagens 1:1
+- grupos
 - anúncios
 - reações
 - sincronização de estado
+- entrega de anexos em grupos
+
+Versão atual: **1.2.0**
 
 ## Arquitetura atual
 
@@ -18,6 +22,23 @@ No estado atual do projeto, **todo tráfego passa pelo LanternRelay**:
 - **Banco local do cliente:** SQLite (`better-sqlite3`)
 - **Sem contas/login:** perfil local por dispositivo
 - **Anúncios:** armazenados no relay e expiram automaticamente após 24h
+- **Grupos:** metadados e eventos sincronizados pelo relay
+- **Anexos de grupos:** enviados pelo relay, com cache temporário no servidor por até 7 dias ou até todos receberem
+
+## Recursos principais
+
+- Chat 1:1 em tempo real.
+- Grupos com nome, emoji, cor, descrição e participantes.
+- Administração de grupos: adicionar/remover participantes, promover/remover admins, transferir dono, sair e excluir grupo.
+- Mensagens em grupos com reações, resposta direta e mensagens fixadas.
+- Consulta de mensagens favoritas e mensagens fixadas.
+- Anúncios globais com expiração automática de 24h.
+- Confirmação visual de novas mensagens por conversa.
+- Envio de anexos, imagens e arquivos grandes em grupos.
+- Figurinhas GIF de gatos no chat, servidas pelo Relay e enviadas como stickers.
+- Backup e restore local dos dados do usuário.
+- Notificações nativas, tray e opção de inicializar com o sistema.
+- Descoberta automática do Relay via mDNS e configuração manual por IP/porta.
 
 ## Requisitos
 
@@ -131,7 +152,7 @@ Observação:
 Se quiser compilar e publicar tudo em uma release do GitHub no mesmo fluxo:
 
 ```bash
-npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat
 ```
 
 Pré-requisitos:
@@ -153,16 +174,16 @@ Esse comando:
 
 Opções úteis:
 - simular sem executar:  
-  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --dry-run`
+  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --dry-run`
 - publicar com artefatos já gerados:  
-  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --skip-build`
+  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --skip-build`
 - usar notas customizadas:  
-  `npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat --notes-file ./RELEASE_NOTES.md`
+  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --notes-file ./RELEASE_NOTES.md`
 
 Se o `gh` não estiver no PATH, force o binário manualmente:
 
 ```bash
-GH_BIN=/opt/homebrew/bin/gh npm run release:mac-win:from-mac -- --tag v1.0.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+GH_BIN=/opt/homebrew/bin/gh npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat
 ```
 
 ### Build explícito por plataforma
@@ -223,6 +244,60 @@ Saída esperada no Windows:
 - `LANTERN_RELAY_PRESENCE_BROADCAST_INTERVAL_MS`
 - `LANTERN_RELAY_MAX_PAYLOAD_BYTES`
 - `LANTERN_RELAY_ANNOUNCEMENTS_FILE`
+- `LANTERN_RELAY_STICKERS_DIR` (default: pasta `stickers` ao lado do Relay)
+- `LANTERN_RELAY_DASHBOARD_TOKEN` (opcional; protege o painel web do Relay)
+
+### Painel web do Relay
+
+O Relay expõe um painel com clientes conectados, tempo de atividade e anúncios em:
+
+```text
+http://IP-DO-RELAY:43190/dashboard
+```
+
+Em uma LAN confiável, o painel funciona sem configuração adicional. Se o Relay estiver exposto em VPS ou outra rede não confiável, defina um token antes de iniciá-lo:
+
+```bash
+LANTERN_RELAY_DASHBOARD_TOKEN="um-token-longo-e-aleatorio" npm run relay:start
+```
+
+Então abra:
+
+```text
+http://IP-DO-RELAY:43190/dashboard?token=um-token-longo-e-aleatorio
+```
+
+`/health` e os endpoints usados pelos clientes continuam disponíveis para não interromper descoberta, conexão e figurinhas.
+
+### Figurinhas GIF no Relay
+
+O cliente não embute o catálogo de GIFs nem usa provedores externos. Ao abrir o picker, ele consulta o Relay em `/stickers`; somente GIFs válidos presentes nessa pasta aparecem na interface.
+
+Estrutura esperada no servidor:
+
+```text
+LanternRelay.exe
+stickers/
+  gato-animado.gif
+  cats/
+    lantern-cat-sticker-happy.gif
+    lantern-cat-sticker-love.gif
+  memes/
+    gato-surpreso.gif
+```
+
+GIFs diretamente em `stickers/` também são aceitos e aparecem na categoria **Geral**. Cada subpasta vira uma categoria opcional. O Relay aceita GIFs de até 20 MB, valida o cabeçalho do arquivo e não mantém cache HTTP: adicionar ou remover um arquivo na pasta do Relay passa a valer na próxima abertura do picker.
+
+Para adicionar mais figurinhas:
+
+1. Na máquina do Relay, abra a pasta `stickers` ao lado do executável (`LanternRelay.exe` no Windows ou `LanternRelay-mac-*` no macOS).
+2. Copie GIFs válidos de até 20 MB diretamente em `stickers/`, ou crie uma subpasta opcional, por exemplo `stickers/cats/` ou `stickers/memes/`, para organizá-los por categoria.
+3. Use nomes simples, por exemplo `gato-surpreso.gif`.
+4. Feche e abra novamente o painel de GIFs no cliente Lantern.
+
+Não é necessário reiniciar o Relay. Todo GIF selecionado pelo painel é enviado como figurinha, com visual limpo no chat.
+
+No desenvolvimento, o Relay semeia `stickers/cats` a partir de `assets/stickers/cats` apenas quando a pasta do Relay está vazia. Depois disso, a pasta `stickers` do próprio Relay é a fonte de verdade.
 
 ## Variáveis úteis do cliente
 
@@ -243,6 +318,9 @@ Anexos baixados (default):
 - Fechar no `X` minimiza para tray (não encerra).
 - Notificações nativas para mensagens/anúncios fora de foco.
 - Presença online/offline é controlada pelo relay.
+- `Esc` fecha a conversa aberta e volta para o estado sem chat selecionado.
+- Mensagens de grupo lidas são atualizadas ao abrir ou manter o grupo em foco.
+- Anexos de grupo podem ser reenviados/baixados pelo relay enquanto estiverem no cache temporário.
 
 ## Rede e firewall
 

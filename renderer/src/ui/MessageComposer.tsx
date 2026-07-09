@@ -14,9 +14,10 @@ import {
   Dismiss12Regular,
   Delete16Regular,
   Emoji20Regular,
+  Gif20Regular,
   Send20Filled
 } from '@fluentui/react-icons';
-import { ipcClient, MessageReplyReference } from '../api/ipcClient';
+import { ipcClient, MessageReplyReference, StickerCatalogItem } from '../api/ipcClient';
 
 interface MessageComposerProps {
   disabled?: boolean;
@@ -487,6 +488,12 @@ export const MessageComposer = ({
   const [pasteFeedback, setPasteFeedback] = useState<string | null>(null);
   const [pasteProgressItems, setPasteProgressItems] = useState<PasteProgressItem[]>([]);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [stickerOpen, setStickerOpen] = useState(false);
+  const [stickers, setStickers] = useState<StickerCatalogItem[]>([]);
+  const [stickerLoading, setStickerLoading] = useState(false);
+  const [stickerError, setStickerError] = useState<string | null>(null);
+  const [failedStickerIds, setFailedStickerIds] = useState<string[]>([]);
+  const [stickerSendingId, setStickerSendingId] = useState<string | null>(null);
   const [textContextMenu, setTextContextMenu] = useState<{
     x: number;
     y: number;
@@ -495,6 +502,7 @@ export const MessageComposer = ({
   const [emojiCategory, setEmojiCategory] = useState<EmojiCategory>('rostos');
   const [emojiSearch, setEmojiSearch] = useState('');
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
+  const stickerPickerRef = useRef<HTMLDivElement | null>(null);
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const typingStateRef = useRef(false);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -655,10 +663,12 @@ export const MessageComposer = ({
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
-      if (!emojiPickerRef.current) return;
-      if (!emojiPickerRef.current.contains(event.target as Node)) {
-        setEmojiOpen(false);
+      const target = event.target as Node;
+      if (emojiPickerRef.current?.contains(target) || stickerPickerRef.current?.contains(target)) {
+        return;
       }
+      setEmojiOpen(false);
+      setStickerOpen(false);
     };
 
     window.addEventListener('mousedown', onPointerDown);
@@ -682,6 +692,45 @@ export const MessageComposer = ({
 
     return () => window.cancelAnimationFrame(frame);
   }, [emojiOpen]);
+
+  useEffect(() => {
+    if (stickerOpen) {
+      setEmojiOpen(false);
+    }
+  }, [stickerOpen]);
+
+  useEffect(() => {
+    if (!stickerOpen) {
+      setStickers([]);
+      setFailedStickerIds([]);
+      setStickerError(null);
+      return;
+    }
+    let cancelled = false;
+    setStickerLoading(true);
+    setStickerError(null);
+    void ipcClient
+      .getRelayStickers()
+      .then((items) => {
+        if (cancelled) return;
+        setStickers(items);
+        setFailedStickerIds([]);
+        setStickerError(items.length === 0 ? 'Nenhuma GIF disponível no Relay.' : null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStickers([]);
+        setStickerError('Não foi possível carregar GIFs do Relay.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setStickerLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stickerOpen]);
 
   useEffect(() => {
     if (!emojiOpen) return;
@@ -713,6 +762,37 @@ export const MessageComposer = ({
     window.addEventListener('keydown', onEscape, true);
     return () => window.removeEventListener('keydown', onEscape, true);
   }, [emojiOpen]);
+
+  useEffect(() => {
+    if (!stickerOpen) return;
+
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        !composerRootRef.current?.contains(active) &&
+        !stickerPickerRef.current?.contains(active)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setStickerOpen(false);
+
+      window.requestAnimationFrame(() => {
+        const textarea = composerRootRef.current?.querySelector('textarea');
+        if (!(textarea instanceof HTMLTextAreaElement)) return;
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      });
+    };
+
+    window.addEventListener('keydown', onEscape, true);
+    return () => window.removeEventListener('keydown', onEscape, true);
+  }, [stickerOpen]);
 
   useEffect(() => {
     if (!editDraft) return;
@@ -1147,6 +1227,36 @@ export const MessageComposer = ({
     [processFileBlobsAsPending]
   );
 
+  const sendSticker = async (sticker: StickerCatalogItem): Promise<void> => {
+    if (!onSendFile || disabled || isSubmitting || editing || stickerSendingId) return;
+    setStickerSendingId(sticker.id);
+    try {
+      const savedPath = await ipcClient.prepareRelayStickerFile(sticker.relativePath);
+      if (!savedPath) {
+        throw new Error('Falha ao salvar figurinha.');
+      }
+      const replyTo =
+        replyDraft
+          ? {
+              messageId: replyDraft.messageId,
+              senderDeviceId: replyDraft.senderDeviceId,
+              type: replyDraft.type,
+              previewText: replyDraft.previewText || null,
+              fileName: replyDraft.fileName || null
+            }
+          : null;
+      await onSendFile(savedPath, replyTo);
+      if (replyTo) {
+        onCancelReply?.();
+      }
+      setStickerOpen(false);
+    } catch {
+      setPasteFeedback('Não foi possível enviar a figurinha.');
+    } finally {
+      setStickerSendingId(null);
+    }
+  };
+
   const handlePasteAttachment = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
     onPaste?.();
     if (!onSendFile || disabled || isSubmitting) return;
@@ -1457,53 +1567,114 @@ export const MessageComposer = ({
         </div>
       )}
       <div className="composer-row">
-        <div className="emoji-picker-wrapper" ref={emojiPickerRef}>
+        <div className="composer-picker-stack">
+          <div className="emoji-picker-wrapper" ref={emojiPickerRef}>
             <Button
               appearance="subtle"
               icon={<Emoji20Regular />}
               disabled={disabled}
-            onClick={() => setEmojiOpen((open) => !open)}
-          />
-          <div className={`emoji-picker ${emojiOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!emojiOpen}>
-            <div className="emoji-picker-search">
-              <Input
-                size="small"
-                value={emojiSearch}
-                placeholder="Buscar emoji (ex.: coração, pizza, gato...)"
-                onChange={(_, data) => setEmojiSearch(data.value)}
-                className="emoji-search-input"
-              />
+              onClick={() => {
+                setStickerOpen(false);
+                setEmojiOpen((open) => !open);
+              }}
+              title="Emojis"
+              aria-label="Emojis"
+            />
+            <div className={`emoji-picker ${emojiOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!emojiOpen}>
+              <div className="emoji-picker-search">
+                <Input
+                  size="small"
+                  value={emojiSearch}
+                  placeholder="Buscar emoji (ex.: coração, pizza, gato...)"
+                  onChange={(_, data) => setEmojiSearch(data.value)}
+                  className="emoji-search-input"
+                />
+              </div>
+              <div className="emoji-picker-content">
+                <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
+                  {EMOJI_CATEGORY_ORDER.map((category) => (
+                    <button
+                      key={category}
+                      type="button"
+                      className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
+                      onClick={() => setEmojiCategory(category)}
+                    >
+                      {EMOJI_CATEGORIES[category].label}
+                    </button>
+                  ))}
+                </div>
+                <div className="emoji-picker-grid">
+                  {emojiItems.map((item) => (
+                    <button
+                      type="button"
+                      key={item.emoji}
+                      className="emoji-btn"
+                      onClick={() => {
+                        setText((current) => `${current}${item.emoji}`);
+                      }}
+                    >
+                      {item.emoji}
+                    </button>
+                  ))}
+                </div>
+                {emojiItems.length === 0 && (
+                  <div className="emoji-picker-empty">
+                    Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="emoji-picker-content">
-              <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
-                {EMOJI_CATEGORY_ORDER.map((category) => (
-                  <button
-                    key={category}
-                    type="button"
-                    className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
-                    onClick={() => setEmojiCategory(category)}
-                  >
-                    {EMOJI_CATEGORIES[category].label}
-                  </button>
-                ))}
+          </div>
+          <div className="sticker-picker-wrapper" ref={stickerPickerRef}>
+            <Button
+              appearance="subtle"
+              icon={<Gif20Regular />}
+              disabled={disabled || editing || !onSendFile}
+              onClick={() => setStickerOpen((open) => !open)}
+              title="Figurinhas"
+              aria-label="Figurinhas"
+            />
+            <div className={`sticker-picker ${stickerOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!stickerOpen}>
+              <div className="sticker-picker-title">
+                <span>Figurinhas do Relay</span>
+                <span>{stickerLoading ? 'Carregando...' : `${stickers.length} disponíveis`}</span>
               </div>
-              <div className="emoji-picker-grid">
-                {emojiItems.map((item) => (
-                  <button
-                    type="button"
-                    key={item.emoji}
-                    className="emoji-btn"
-                    onClick={() => {
-                      setText((current) => `${current}${item.emoji}`);
-                    }}
-                  >
-                    {item.emoji}
-                  </button>
-                ))}
-              </div>
-              {emojiItems.length === 0 && (
-                <div className="emoji-picker-empty">
-                  Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+              {stickerError ? (
+                <div className="sticker-picker-empty">{stickerError}</div>
+              ) : stickers.filter((sticker) => !failedStickerIds.includes(sticker.id)).length === 0 ? (
+                <div className="sticker-picker-empty">
+                  {stickerLoading ? 'Carregando figurinhas...' : 'Nenhuma figurinha válida no Relay.'}
+                </div>
+              ) : (
+                <div className="sticker-picker-grid">
+                  {stickers
+                    .filter((sticker) => !failedStickerIds.includes(sticker.id))
+                    .map((sticker) => (
+                    <button
+                      key={sticker.id}
+                      type="button"
+                      className="sticker-btn"
+                      disabled={Boolean(stickerSendingId)}
+                      onClick={() => void sendSticker(sticker)}
+                      title={sticker.label}
+                    >
+                      {sticker.previewDataUrl ? (
+                        <img
+                          src={sticker.previewDataUrl}
+                          alt={sticker.label}
+                          onError={() => {
+                            setFailedStickerIds((current) =>
+                              current.includes(sticker.id) ? current : [...current, sticker.id]
+                            );
+                          }}
+                        />
+                      ) : (
+                        <span className="sticker-preview-unavailable" aria-hidden>
+                          GIF
+                        </span>
+                      )}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
