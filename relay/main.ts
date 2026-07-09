@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createSocket, type RemoteInfo, type Socket as UdpSocket } from 'node:dgram';
 import fs from 'node:fs';
-import { createServer, IncomingMessage, Server as HttpServer } from 'node:http';
+import { createServer, IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import path from 'node:path';
 import BonjourService, { Service } from 'bonjour-service';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
@@ -97,7 +97,59 @@ interface RelayAnnouncementState {
   expiredAt: number | null;
   deletedAt: number | null;
   reactionsByDeviceId: Record<string, AnnouncementReactionValue>;
+  readByDeviceId: Record<string, number>;
   frame: RelayTransportFrame;
+}
+
+interface RelayAnnouncementReadPayload {
+  messageIds: string[];
+  readAt?: number;
+}
+
+interface RelayDashboardPeer {
+  deviceId: string;
+  deviceShort: string;
+  displayName: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  statusMessage: string;
+  appVersion: string;
+  connectedAt: number;
+  lastSeenAt: number;
+  onlineForMs: number;
+  lastSeenAgoMs: number;
+}
+
+interface RelayDashboardAnnouncement {
+  messageId: string;
+  messageShort: string;
+  authorDeviceId: string;
+  authorName: string;
+  authorAvatarEmoji: string;
+  authorAvatarBg: string;
+  text: string;
+  createdAt: number;
+  expiresAt: number;
+  expiresInMs: number;
+  reactionsCount: number;
+  readsCount: number;
+}
+
+interface RelayDashboardSnapshot {
+  ok: true;
+  version: string;
+  now: number;
+  startedAt: number;
+  uptimeMs: number;
+  host: string;
+  port: number;
+  peersOnline: number;
+  sessionsOpen: number;
+  presenceRevision: number;
+  announcementStoreFile: string;
+  announcementsActive: number;
+  peers: RelayDashboardPeer[];
+  announcements: RelayDashboardAnnouncement[];
 }
 
 const DEFAULT_CONFIG: RelayConfig = {
@@ -224,6 +276,27 @@ const extractReactPayload = (frame: RelayTransportFrame): RelayReactPayload | nu
   };
 };
 
+const normalizeAnnouncementReadPayload = (value: unknown): RelayAnnouncementReadPayload | null => {
+  const record = asRecord(value);
+  if (!record) return null;
+  const messageIds = Array.isArray(record.messageIds)
+    ? Array.from(
+        new Set(
+          record.messageIds
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter(Boolean)
+        )
+      )
+    : [];
+  if (messageIds.length === 0) return null;
+  const rawReadAt = asFiniteNumber(record.readAt);
+  return {
+    messageIds,
+    readAt: rawReadAt && rawReadAt > 0 ? Math.trunc(rawReadAt) : Date.now()
+  };
+};
+
 const parseCliArg = (name: '--host' | '--port'): string | undefined => {
   const index = process.argv.indexOf(name);
   if (index < 0) return undefined;
@@ -303,10 +376,574 @@ const logRelay = (
   }
 };
 
+const RELAY_DASHBOARD_HTML = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LanternRelay</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #eef3fb;
+      --bg-strong: #dfe9f7;
+      --surface: rgba(255, 255, 255, 0.82);
+      --surface-strong: rgba(255, 255, 255, 0.94);
+      --text: #142033;
+      --muted: #637188;
+      --line: rgba(88, 112, 146, 0.22);
+      --accent: #147ad6;
+      --accent-soft: rgba(20, 122, 214, 0.12);
+      --good: #18a058;
+      --warn: #d9822b;
+      --shadow: 0 22px 60px rgba(41, 66, 105, 0.16);
+      font-family: ui-rounded, "SF Pro Rounded", "Aptos", "Segoe UI", system-ui, sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1420;
+        --bg-strong: #111d2d;
+        --surface: rgba(22, 34, 52, 0.78);
+        --surface-strong: rgba(27, 41, 62, 0.92);
+        --text: #edf4ff;
+        --muted: #9ba8bd;
+        --line: rgba(180, 202, 235, 0.16);
+        --accent: #6bb6ff;
+        --accent-soft: rgba(107, 182, 255, 0.13);
+        --shadow: 0 28px 80px rgba(0, 0, 0, 0.34);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% 4%, rgba(20, 122, 214, 0.20), transparent 30%),
+        radial-gradient(circle at 90% 10%, rgba(24, 160, 88, 0.15), transparent 28%),
+        linear-gradient(135deg, var(--bg), var(--bg-strong));
+    }
+
+    .page {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 30px 0 42px;
+    }
+
+    .hero {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .mark {
+      display: grid;
+      width: 54px;
+      height: 54px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(145deg, var(--surface-strong), var(--accent-soft));
+      box-shadow: var(--shadow);
+      font-size: 26px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 5vw, 44px);
+      letter-spacing: -0.055em;
+      line-height: 1;
+    }
+
+    .subtitle {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      box-shadow: 0 12px 30px rgba(20, 122, 214, 0.10);
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--good);
+      box-shadow: 0 0 0 5px rgba(24, 160, 88, 0.12);
+    }
+
+    .dot.offline {
+      background: #c43f3f;
+      box-shadow: 0 0 0 5px rgba(196, 63, 63, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .metric {
+      padding: 18px;
+      min-height: 126px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      margin-top: 12px;
+      font-size: 31px;
+      font-weight: 850;
+      letter-spacing: -0.05em;
+    }
+
+    .metric-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .content {
+      display: grid;
+      grid-template-columns: minmax(0, 1.06fr) minmax(340px, 0.94fr);
+      gap: 16px;
+    }
+
+    .section {
+      overflow: hidden;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 18px 10px;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.025em;
+    }
+
+    .section-meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .list {
+      display: grid;
+      gap: 10px;
+      padding: 8px 12px 14px;
+    }
+
+    .peer,
+    .announcement {
+      display: grid;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.34);
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .peer,
+      .announcement {
+        background: rgba(255, 255, 255, 0.035);
+      }
+    }
+
+    .peer:hover,
+    .announcement:hover {
+      transform: translateY(-1px);
+      border-color: rgba(20, 122, 214, 0.34);
+      background: var(--surface-strong);
+    }
+
+    .peer-main {
+      display: grid;
+      grid-template-columns: 46px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .avatar {
+      display: grid;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      border-radius: 16px;
+      color: #fff;
+      font-size: 22px;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 10px 22px rgba(0, 0, 0, 0.10);
+    }
+
+    .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .status {
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 13px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(24, 160, 88, 0.12);
+      color: var(--good);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .details {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .chip {
+      max-width: 100%;
+      overflow: hidden;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--accent-soft);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .announcement-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .announcement-author {
+      display: inline-flex;
+      min-width: 0;
+      align-items: center;
+      gap: 8px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .mini-avatar {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 15px;
+    }
+
+    .announcement-text {
+      margin: 0;
+      color: var(--text);
+      line-height: 1.42;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      padding: 26px 18px 30px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    @media (max-width: 880px) {
+      .hero {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .grid,
+      .content {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">✦</div>
+        <div>
+          <h1>LanternRelay</h1>
+          <p class="subtitle">Painel em tempo real do servidor de ponte Lantern</p>
+        </div>
+      </div>
+      <div class="live-pill" aria-live="polite">
+        <span id="status-dot" class="dot"></span>
+        <span id="status-text">Atualizando...</span>
+      </div>
+    </header>
+
+    <section class="grid" aria-label="Resumo do Relay">
+      <article class="card metric">
+        <div class="metric-label">Usuários online</div>
+        <div id="metric-peers" class="metric-value">--</div>
+        <div id="metric-sessions" class="metric-note">sessões abertas</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Tempo ativo</div>
+        <div id="metric-uptime" class="metric-value">--</div>
+        <div id="metric-started" class="metric-note">iniciado em --</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Anúncios ativos</div>
+        <div id="metric-announcements" class="metric-value">--</div>
+        <div class="metric-note">expiram após 24h</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Presença</div>
+        <div id="metric-revision" class="metric-value">--</div>
+        <div id="metric-endpoint" class="metric-note">endpoint --</div>
+      </article>
+    </section>
+
+    <section class="content">
+      <article class="card section">
+        <div class="section-header">
+          <h2 class="section-title">Usuários conectados</h2>
+          <span id="peers-meta" class="section-meta">--</span>
+        </div>
+        <div id="peers-list" class="list"></div>
+      </article>
+
+      <article class="card section">
+        <div class="section-header">
+          <h2 class="section-title">Anúncios</h2>
+          <span id="announcements-meta" class="section-meta">--</span>
+        </div>
+        <div id="announcements-list" class="list"></div>
+      </article>
+    </section>
+
+    <footer id="store-path" class="footer"></footer>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const dateTime = new Intl.DateTimeFormat('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    const formatDuration = (ms) => {
+      const safeMs = Math.max(0, Number(ms) || 0);
+      const totalSeconds = Math.floor(safeMs / 1000);
+      const days = Math.floor(totalSeconds / 86400);
+      const hours = Math.floor((totalSeconds % 86400) / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (days > 0) return days + 'd ' + hours + 'h';
+      if (hours > 0) return hours + 'h ' + minutes + 'm';
+      if (minutes > 0) return minutes + 'm ' + seconds + 's';
+      return seconds + 's';
+    };
+
+    const formatTime = (ts) => {
+      if (!Number.isFinite(ts) || ts <= 0) return '--';
+      return dateTime.format(new Date(ts));
+    };
+
+    const setText = (id, value) => {
+      const node = $(id);
+      if (node) node.textContent = value;
+    };
+
+    const clear = (node) => {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    };
+
+    const make = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+
+    const renderPeers = (peers) => {
+      const list = $('peers-list');
+      if (!list) return;
+      clear(list);
+      if (!peers.length) {
+        list.appendChild(make('div', 'empty', 'Nenhum client conectado agora.'));
+        return;
+      }
+      for (const peer of peers) {
+        const item = make('article', 'peer');
+        const main = make('div', 'peer-main');
+        const avatar = make('div', 'avatar', peer.avatarEmoji || '🙂');
+        avatar.style.background = peer.avatarBg || '#147ad6';
+
+        const text = make('div');
+        text.appendChild(make('div', 'name', peer.displayName || 'Usuário'));
+        text.appendChild(make('div', 'status', peer.statusMessage || 'Disponível'));
+
+        const state = make('div', 'state', 'Online');
+        main.appendChild(avatar);
+        main.appendChild(text);
+        main.appendChild(state);
+
+        const details = make('div', 'details');
+        details.appendChild(make('span', 'chip', 'ID ' + peer.deviceShort));
+        details.appendChild(make('span', 'chip', 'ativo há ' + formatDuration(peer.onlineForMs)));
+        details.appendChild(make('span', 'chip', 'v' + (peer.appVersion || 'unknown')));
+        details.appendChild(make('span', 'chip', 'último sinal ' + formatDuration(peer.lastSeenAgoMs)));
+
+        item.appendChild(main);
+        item.appendChild(details);
+        list.appendChild(item);
+      }
+    };
+
+    const renderAnnouncements = (announcements) => {
+      const list = $('announcements-list');
+      if (!list) return;
+      clear(list);
+      if (!announcements.length) {
+        list.appendChild(make('div', 'empty', 'Nenhum anúncio ativo.'));
+        return;
+      }
+      for (const announcement of announcements) {
+        const item = make('article', 'announcement');
+        const head = make('div', 'announcement-head');
+        const author = make('div', 'announcement-author');
+        const avatar = make('span', 'mini-avatar', announcement.authorAvatarEmoji || '✦');
+        avatar.style.background = announcement.authorAvatarBg || '#147ad6';
+        author.appendChild(avatar);
+        author.appendChild(make('span', '', announcement.authorName || 'Usuário'));
+        head.appendChild(author);
+        head.appendChild(make('span', '', formatTime(announcement.createdAt)));
+
+        const text = make('p', 'announcement-text', announcement.text || '(sem texto)');
+        const details = make('div', 'details');
+        details.appendChild(make('span', 'chip', 'expira em ' + formatDuration(announcement.expiresInMs)));
+        details.appendChild(make('span', 'chip', announcement.reactionsCount + ' reações'));
+        details.appendChild(make('span', 'chip', announcement.readsCount + ' leituras'));
+        details.appendChild(make('span', 'chip', 'ID ' + announcement.messageShort));
+
+        item.appendChild(head);
+        item.appendChild(text);
+        item.appendChild(details);
+        list.appendChild(item);
+      }
+    };
+
+    const applySnapshot = (data) => {
+      setText('metric-peers', String(data.peersOnline));
+      setText('metric-sessions', String(data.sessionsOpen) + ' sessões abertas');
+      setText('metric-uptime', formatDuration(data.uptimeMs));
+      setText('metric-started', 'iniciado em ' + formatTime(data.startedAt));
+      setText('metric-announcements', String(data.announcementsActive));
+      setText('metric-revision', '#' + data.presenceRevision);
+      setText('metric-endpoint', 'ws://' + data.host + ':' + data.port);
+      setText('peers-meta', String(data.peers.length) + ' online');
+      setText('announcements-meta', String(data.announcements.length) + ' ativos');
+      setText('store-path', 'Dados de anúncios: ' + data.announcementStoreFile);
+      setText('status-text', 'Online · atualizado ' + new Date().toLocaleTimeString('pt-BR'));
+      const dot = $('status-dot');
+      if (dot) dot.classList.remove('offline');
+      renderPeers(data.peers || []);
+      renderAnnouncements(data.announcements || []);
+    };
+
+    const load = async () => {
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        applySnapshot(data);
+      } catch (error) {
+        setText('status-text', 'Sem conexão com o Relay');
+        const dot = $('status-dot');
+        if (dot) dot.classList.add('offline');
+      }
+    };
+
+    void load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>`;
+
 class LanternRelay {
   private readonly config: RelayConfig;
   private readonly httpServer: HttpServer;
   private readonly wsServer: WebSocketServer;
+  private readonly startedAt = Date.now();
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
   private readonly sessionsByDeviceId = new Map<string, RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
@@ -551,21 +1188,169 @@ class LanternRelay {
     this.announcementSweepTimer.unref?.();
   }
 
-  private handleHttpRequest(req: IncomingMessage, res: import('node:http').ServerResponse): void {
-    if (req.url === '/health') {
-      const body = JSON.stringify({
-        ok: true,
-        version: RELAY_VERSION,
-        uptimeSec: Math.floor(process.uptime()),
-        peersOnline: this.sessionsByDeviceId.size
+  private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+    const method = req.method || 'GET';
+    if (method !== 'GET' && method !== 'HEAD') {
+      res.writeHead(405, {
+        'content-type': 'application/json; charset=utf-8',
+        allow: 'GET, HEAD'
       });
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(body);
+      res.end(JSON.stringify({ ok: false, error: 'METHOD_NOT_ALLOWED' }));
       return;
     }
 
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('LanternRelay online\n');
+    let requestUrl: URL;
+    try {
+      requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    } catch {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'BAD_REQUEST',
+        message: 'URL inválida.'
+      }, 400);
+      return;
+    }
+
+    if (requestUrl.pathname === '/health') {
+      this.writeJson(res, method, {
+        ok: true,
+        version: RELAY_VERSION,
+        startedAt: this.startedAt,
+        uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
+        peersOnline: this.sessionsByDeviceId.size
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/status') {
+      this.writeJson(res, method, this.getDashboardSnapshot());
+      return;
+    }
+
+    if (
+      requestUrl.pathname === '/' ||
+      requestUrl.pathname === '/dashboard' ||
+      requestUrl.pathname === '/dashboard/'
+    ) {
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(method === 'HEAD' ? undefined : RELAY_DASHBOARD_HTML);
+      return;
+    }
+
+    if (requestUrl.pathname === '/favicon.ico') {
+      res.writeHead(204, { 'cache-control': 'no-store' });
+      res.end();
+      return;
+    }
+
+    this.writeJson(res, method, {
+      ok: false,
+      error: 'NOT_FOUND',
+      message: 'Rota não encontrada.'
+    }, 404);
+  }
+
+  private writeJson(
+    res: ServerResponse,
+    method: string,
+    body: unknown,
+    statusCode = 200
+  ): void {
+    const json = JSON.stringify(body);
+    res.writeHead(statusCode, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store'
+    });
+    res.end(method === 'HEAD' ? undefined : json);
+  }
+
+  private getDashboardSnapshot(): RelayDashboardSnapshot {
+    this.sweepAnnouncements('dashboard_snapshot');
+    const now = Date.now();
+    const peers = this.listDashboardPeers(now);
+    const announcements = this.listDashboardAnnouncements(peers, now);
+
+    return {
+      ok: true,
+      version: RELAY_VERSION,
+      now,
+      startedAt: this.startedAt,
+      uptimeMs: Math.max(0, now - this.startedAt),
+      host: this.config.host,
+      port: this.config.port,
+      peersOnline: peers.length,
+      sessionsOpen: this.sessionsBySocket.size,
+      presenceRevision: this.presenceRevision,
+      announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
+      announcementsActive: announcements.length,
+      peers,
+      announcements
+    };
+  }
+
+  private listDashboardPeers(now: number): RelayDashboardPeer[] {
+    const peers: RelayDashboardPeer[] = [];
+    for (const session of this.sessionsByDeviceId.values()) {
+      const peer = session.peer;
+      if (!peer) continue;
+      const lastSeenAt = Math.max(peer.lastSeenAt || 0, session.lastSeenAt || 0);
+      peers.push({
+        deviceId: peer.deviceId,
+        deviceShort: peer.deviceId.slice(0, 8),
+        displayName: peer.displayName,
+        avatarEmoji: peer.avatarEmoji,
+        avatarBg: peer.avatarBg,
+        statusMessage: peer.statusMessage || 'Disponível',
+        appVersion: peer.appVersion || 'unknown',
+        connectedAt: peer.connectedAt,
+        lastSeenAt,
+        onlineForMs: Math.max(0, now - peer.connectedAt),
+        lastSeenAgoMs: Math.max(0, now - lastSeenAt)
+      });
+    }
+    return peers.sort((a, b) => a.displayName.localeCompare(b.displayName, 'pt-BR'));
+  }
+
+  private listDashboardAnnouncements(
+    peers: RelayDashboardPeer[],
+    now: number
+  ): RelayDashboardAnnouncement[] {
+    const peersById = new Map(peers.map((peer) => [peer.deviceId, peer]));
+    return Array.from(this.announcementsById.values())
+      .filter((state) => !state.deletedAt && !state.expiredAt && state.expiresAt > now)
+      .map((state) => {
+        const payload = asRecord(state.frame.payload);
+        const text = asString(payload?.text) || asString(payload?.bodyText) || '(sem texto)';
+        const author = peersById.get(state.frame.from);
+        const reactionsCount = Object.entries(state.reactionsByDeviceId || {}).filter((entry) =>
+          ALLOWED_ANNOUNCEMENT_REACTIONS.has(entry[1])
+        ).length;
+        const readsCount = Object.entries(state.readByDeviceId || {}).filter(
+          ([deviceId, readAt]) => deviceId.trim().length > 0 && Number.isFinite(readAt) && readAt > 0
+        ).length;
+
+        return {
+          messageId: state.messageId,
+          messageShort: state.messageId.slice(0, 8),
+          authorDeviceId: state.frame.from,
+          authorName: author?.displayName || `Usuário ${state.frame.from.slice(0, 8)}`,
+          authorAvatarEmoji: author?.avatarEmoji || '✦',
+          authorAvatarBg: author?.avatarBg || '#147ad6',
+          text,
+          createdAt: state.createdAt,
+          expiresAt: state.expiresAt,
+          expiresInMs: Math.max(0, state.expiresAt - now),
+          reactionsCount,
+          readsCount
+        };
+      })
+      .sort((a, b) => {
+        if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
+        return a.messageId.localeCompare(b.messageId);
+      });
   }
 
   private handleConnection(socket: WebSocket): void {
@@ -684,6 +1469,9 @@ class LanternRelay {
         }
         this.sendPresenceSnapshot(session);
         this.sendAnnouncementSnapshot(session, 'presence_request');
+        return;
+      case 'relay:announcement:read':
+        this.handleAnnouncementRead(session, envelope.payload);
         return;
       case 'relay:send':
         await this.handleRelaySend(session, envelope.payload);
@@ -882,6 +1670,7 @@ class LanternRelay {
       expiredAt: null,
       deletedAt: null,
       reactionsByDeviceId: previous?.reactionsByDeviceId || {},
+      readByDeviceId: previous?.readByDeviceId || {},
       frame: {
         ...frame,
         createdAt
@@ -904,6 +1693,7 @@ class LanternRelay {
     state.deletedAt = deletedAt;
     state.expiredAt = state.expiredAt || deletedAt;
     state.reactionsByDeviceId = {};
+    state.readByDeviceId = {};
     this.announcementsById.set(messageId, state);
     this.scheduleAnnouncementPersist();
     this.broadcastAnnouncementExpiry([messageId], 'announcement_deleted');
@@ -929,6 +1719,44 @@ class LanternRelay {
     this.announcementsById.set(payload.targetMessageId, state);
     this.scheduleAnnouncementPersist();
     this.broadcastAnnouncementReactions(payload.targetMessageId, state.reactionsByDeviceId, 'reaction_update');
+  }
+
+  private handleAnnouncementRead(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de marcar anúncio como lido.');
+      return;
+    }
+
+    const normalized = normalizeAnnouncementReadPayload(payload);
+    if (!normalized) {
+      this.sendError(session, 'INVALID_ANNOUNCEMENT_READ', 'Payload relay:announcement:read inválido.');
+      return;
+    }
+
+    const now = Date.now();
+    const readAt = normalized.readAt && normalized.readAt > 0 ? Math.min(normalized.readAt, now) : now;
+    const touched: string[] = [];
+    for (const messageId of normalized.messageIds) {
+      const state = this.announcementsById.get(messageId);
+      if (!state || state.deletedAt || state.expiredAt || state.expiresAt <= now) {
+        continue;
+      }
+      state.readByDeviceId = state.readByDeviceId || {};
+      const previous = state.readByDeviceId[session.peer.deviceId] || 0;
+      if (previous >= readAt) {
+        continue;
+      }
+      state.readByDeviceId[session.peer.deviceId] = readAt;
+      this.announcementsById.set(messageId, state);
+      touched.push(messageId);
+    }
+
+    if (touched.length === 0) {
+      return;
+    }
+
+    this.scheduleAnnouncementPersist();
+    this.broadcastAnnouncementReads(touched, 'read_update');
   }
 
   private sweepAnnouncements(reason: string): void {
@@ -978,12 +1806,14 @@ class LanternRelay {
     this.sweepAnnouncements(`snapshot:${reason}`);
     const frames = this.listActiveAnnouncementFrames();
     const reactions = this.listAnnouncementReactionsSnapshot();
+    const reads = this.listAnnouncementReadsSnapshot();
     this.sendEnvelope(session.socket, {
       type: 'relay:announcement:snapshot',
       payload: {
         serverTime: Date.now(),
         frames,
-        reactions
+        reactions,
+        reads
       }
     });
     logRelay(
@@ -992,7 +1822,8 @@ class LanternRelay {
         deviceId: session.peer?.deviceId || null,
         reason,
         count: frames.length,
-        reactions: Object.keys(reactions).length
+        reactions: Object.keys(reactions).length,
+        reads: Object.keys(reads).length
       },
       { level: 'debug' }
     );
@@ -1010,6 +1841,22 @@ class LanternRelay {
       }
       const entries = Object.entries(state.reactionsByDeviceId || {}).filter((entry) =>
         ALLOWED_ANNOUNCEMENT_REACTIONS.has(entry[1])
+      );
+      if (entries.length === 0) continue;
+      snapshot[state.messageId] = Object.fromEntries(entries);
+    }
+    return snapshot;
+  }
+
+  private listAnnouncementReadsSnapshot(): Record<string, Record<string, number>> {
+    const now = Date.now();
+    const snapshot: Record<string, Record<string, number>> = {};
+    for (const state of this.announcementsById.values()) {
+      if (state.deletedAt || state.expiredAt || state.expiresAt <= now) {
+        continue;
+      }
+      const entries = Object.entries(state.readByDeviceId || {}).filter(
+        ([deviceId, readAt]) => deviceId.trim().length > 0 && Number.isFinite(readAt) && readAt > 0
       );
       if (entries.length === 0) continue;
       snapshot[state.messageId] = Object.fromEntries(entries);
@@ -1096,6 +1943,41 @@ class LanternRelay {
     }
   }
 
+  private broadcastAnnouncementReads(messageIds: string[], reason: string): void {
+    const reads = this.listAnnouncementReadsSnapshot();
+    const payloadReads = Object.fromEntries(
+      Array.from(new Set(messageIds))
+        .map((messageId) => [messageId, reads[messageId] || {}] as const)
+        .filter(([, byDevice]) => Object.keys(byDevice).length > 0)
+    );
+
+    if (Object.keys(payloadReads).length === 0) {
+      return;
+    }
+
+    const payload = {
+      serverTime: Date.now(),
+      reads: payloadReads
+    };
+
+    logRelay(
+      'announcement_reads_broadcast',
+      {
+        reason,
+        messageIds,
+        recipients: this.sessionsBySocket.size
+      },
+      { level: 'debug' }
+    );
+
+    for (const session of this.sessionsBySocket.values()) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:announcement:reads',
+        payload
+      });
+    }
+  }
+
   private scheduleAnnouncementPersist(): void {
     if (this.announcementPersistTimer) return;
     this.announcementPersistTimer = setTimeout(() => {
@@ -1119,6 +2001,7 @@ class LanternRelay {
           expiredAt: state.expiredAt,
           deletedAt: state.deletedAt,
           reactionsByDeviceId: state.reactionsByDeviceId,
+          readByDeviceId: state.readByDeviceId,
           frame: state.frame
         }))
       };
@@ -1158,12 +2041,22 @@ class LanternRelay {
         const expiredAt = asFiniteNumber(record.expiredAt);
         const deletedAt = asFiniteNumber(record.deletedAt);
         const rawReactions = asRecord(record.reactionsByDeviceId) || {};
+        const rawReads = asRecord(record.readByDeviceId) || {};
         const reactionsByDeviceId = Object.fromEntries(
           Object.entries(rawReactions).filter((entry) =>
             typeof entry[0] === 'string' &&
             ALLOWED_ANNOUNCEMENT_REACTIONS.has(entry[1] as AnnouncementReactionValue)
           )
         ) as Record<string, AnnouncementReactionValue>;
+        const readByDeviceId = Object.fromEntries(
+          Object.entries(rawReads).filter(
+            (entry) =>
+              typeof entry[0] === 'string' &&
+              typeof entry[1] === 'number' &&
+              Number.isFinite(entry[1]) &&
+              entry[1] > 0
+          )
+        ) as Record<string, number>;
         if (!messageId || !frame || !createdAt || !expiresAt) continue;
         this.announcementsById.set(messageId, {
           messageId,
@@ -1172,7 +2065,8 @@ class LanternRelay {
           expiresAt: Math.trunc(expiresAt),
           expiredAt: expiredAt ? Math.trunc(expiredAt) : null,
           deletedAt: deletedAt ? Math.trunc(deletedAt) : null,
-          reactionsByDeviceId
+          reactionsByDeviceId,
+          readByDeviceId
         });
         loaded += 1;
       }

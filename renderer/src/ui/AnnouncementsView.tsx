@@ -1,5 +1,15 @@
 import { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
-import { Button, Caption1, Text } from '@fluentui/react-components';
+import {
+  Button,
+  Caption1,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  Text
+} from '@fluentui/react-components';
 import { ArrowReply20Regular } from '@fluentui/react-icons';
 import { ArrowForward20Regular } from '@fluentui/react-icons';
 import { Checkmark20Regular } from '@fluentui/react-icons';
@@ -9,10 +19,14 @@ import { Delete20Regular } from '@fluentui/react-icons';
 import { Dismiss20Regular } from '@fluentui/react-icons';
 import { Emoji20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
+import { PeopleEye20Regular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
 import {
+  AnnouncementReadDetail,
+  AnnouncementReadSummary,
   AnnouncementReactionSummary,
   ipcClient,
+  MessageReactionDetail,
   MessageReplyReference,
   MessageRow,
   Peer,
@@ -31,6 +45,7 @@ interface AnnouncementsViewProps {
   forwardTargets: Peer[];
   onlinePeerIds: string[];
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
+  readsByMessageId: Record<string, AnnouncementReadSummary>;
   recentMessageIds: Record<string, number>;
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
@@ -44,6 +59,7 @@ interface ReplyDraftUi extends MessageReplyReference {
 }
 
 const REACTIONS: Array<'👍' | '👎' | '❤️' | '😢' | '😊' | '😂'> = ['👍', '👎', '❤️', '😂', '😊', '😢'];
+const SHOW_ANNOUNCEMENT_READ_BUTTON = false;
 
 const formatTime = (value: number): string =>
   new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -115,6 +131,7 @@ export const AnnouncementsView = ({
   forwardTargets,
   onlinePeerIds,
   reactionsByMessageId,
+  readsByMessageId,
   recentMessageIds,
   relayConnected,
   onSend,
@@ -126,6 +143,12 @@ export const AnnouncementsView = ({
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
+  const [detailsDialog, setDetailsDialog] = useState<{
+    title: string;
+    loading: boolean;
+    reactionDetails: MessageReactionDetail[];
+    readDetails: AnnouncementReadDetail[];
+  } | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<{
     x: number;
     y: number;
@@ -378,6 +401,56 @@ export const AnnouncementsView = ({
     return `expira em ${minutes}m`;
   };
 
+  const openReactionDetails = async (messageId: string): Promise<void> => {
+    setDetailsDialog({
+      title: 'Reações do anúncio',
+      loading: true,
+      reactionDetails: [],
+      readDetails: []
+    });
+    try {
+      const details = await ipcClient.getAnnouncementReactionDetails(messageId);
+      setDetailsDialog({
+        title: 'Reações do anúncio',
+        loading: false,
+        reactionDetails: details,
+        readDetails: []
+      });
+    } catch {
+      setDetailsDialog({
+        title: 'Reações do anúncio',
+        loading: false,
+        reactionDetails: [],
+        readDetails: []
+      });
+    }
+  };
+
+  const openReadDetails = async (messageId: string): Promise<void> => {
+    setDetailsDialog({
+      title: 'Leituras do anúncio',
+      loading: true,
+      reactionDetails: [],
+      readDetails: []
+    });
+    try {
+      const details = await ipcClient.getAnnouncementReadDetails(messageId);
+      setDetailsDialog({
+        title: 'Leituras do anúncio',
+        loading: false,
+        reactionDetails: [],
+        readDetails: details
+      });
+    } catch {
+      setDetailsDialog({
+        title: 'Leituras do anúncio',
+        loading: false,
+        reactionDetails: [],
+        readDetails: []
+      });
+    }
+  };
+
   return (
     <div className="main-pane" ref={paneRootRef}>
       <header className="pane-header">
@@ -411,6 +484,7 @@ export const AnnouncementsView = ({
             const bg = outgoing ? profile.avatarBg : sender?.avatarBg || '#5b5fc7';
             const senderName = outgoing ? 'Você' : sender?.displayName || message.senderDeviceId;
             const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
+            const readSummary = readsByMessageId[message.messageId] || { count: 0, readByMe: false };
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
             const reactionPickerOpen = reactionPickerMessageId === message.messageId;
             const hasReplyReference = Boolean(message.replyToMessageId);
@@ -467,6 +541,16 @@ export const AnnouncementsView = ({
                           <Checkmark20Regular />
                           <span>{formatTime(message.createdAt)}</span>
                         </span>
+                        {message.editedAt && <span className="message-edited-label">editada</span>}
+                        {SHOW_ANNOUNCEMENT_READ_BUTTON && (
+                          <button
+                            type="button"
+                            className="announcement-read-pill"
+                            onClick={() => void openReadDetails(message.messageId)}
+                          >
+                            Lido por {readSummary.count}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -500,6 +584,17 @@ export const AnnouncementsView = ({
                     >
                       <ArrowReply20Regular />
                     </button>
+                    {hasCounters && (
+                      <button
+                        type="button"
+                        className="reaction-trigger reaction-details-trigger"
+                        onClick={() => void openReactionDetails(message.messageId)}
+                        title="Ver quem reagiu"
+                        aria-label="Ver quem reagiu"
+                      >
+                        <PeopleEye20Regular />
+                      </button>
+                    )}
                     <div
                       className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
                       aria-hidden={!reactionPickerOpen}
@@ -541,12 +636,9 @@ export const AnnouncementsView = ({
                           key={`${message.messageId}-${reaction}`}
                           type="button"
                           className={`announcement-reaction-pill ${summary.myReaction === reaction ? 'active' : ''}`}
-                          onClick={() =>
-                            void onReactToMessage(
-                              message.messageId,
-                              summary.myReaction === reaction ? null : reaction
-                            )
-                          }
+                          onClick={() => void openReactionDetails(message.messageId)}
+                          title="Ver quem reagiu"
+                          aria-label={`Ver quem reagiu com ${reaction}`}
                         >
                           <span>{reaction}</span>
                           <span>{summary.counts[reaction]}</span>
@@ -688,6 +780,57 @@ export const AnnouncementsView = ({
           )}
         </div>
       )}
+
+      <Dialog
+        open={Boolean(detailsDialog)}
+        onOpenChange={(_, data) => {
+          if (!data.open) setDetailsDialog(null);
+        }}
+      >
+        <DialogSurface className="confirm-modal announcement-details-modal">
+          <DialogBody>
+            <DialogTitle>{detailsDialog?.title || 'Detalhes'}</DialogTitle>
+            <DialogContent>
+              {detailsDialog?.loading ? (
+                <div className="announcement-details-empty">Carregando...</div>
+              ) : (
+                <div className="announcement-details-list">
+                  {detailsDialog?.reactionDetails.map((item) => (
+                    <div key={`${item.deviceId}-${item.reaction}`} className="announcement-details-row">
+                      <Avatar emoji={item.avatarEmoji} bg={item.avatarBg} size={28} />
+                      <span>{item.displayName}</span>
+                      <strong>{item.reaction}</strong>
+                    </div>
+                  ))}
+                  {detailsDialog?.readDetails.map((item) => (
+                    <div key={`${item.deviceId}-${item.readAt}`} className="announcement-details-row">
+                      <Avatar emoji={item.avatarEmoji} bg={item.avatarBg} size={28} />
+                      <span>{item.displayName}</span>
+                      <small>
+                        {new Date(item.readAt).toLocaleTimeString('pt-BR', {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </small>
+                    </div>
+                  ))}
+                  {detailsDialog &&
+                    !detailsDialog.loading &&
+                    detailsDialog.reactionDetails.length === 0 &&
+                    detailsDialog.readDetails.length === 0 && (
+                      <div className="announcement-details-empty">Nenhum registro ainda.</div>
+                    )}
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setDetailsDialog(null)}>
+                Fechar
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

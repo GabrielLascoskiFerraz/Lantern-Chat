@@ -19,6 +19,9 @@ import {
   Emoji20Regular,
   Copy20Regular,
   Delete20Regular,
+  DocumentEdit20Regular,
+  DocumentSave20Regular,
+  DocumentText20Regular,
   Dismiss20Regular,
   MoreHorizontal20Regular,
   Search20Regular,
@@ -61,9 +64,12 @@ interface ChatViewProps {
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
+  onEditMessage: (messageId: string, text: string) => Promise<void>;
   onToggleFavoriteMessage: (messageId: string, favorite: boolean) => Promise<void>;
   onGetFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   onDeleteMessage: (messageId: string) => Promise<void>;
+  onDeleteMessageForMe: (messageId: string) => Promise<void>;
+  onExportConversation: (format: 'txt' | 'html') => Promise<void>;
   onResyncConversation: () => Promise<void>;
   onClearConversation: () => Promise<void>;
   onForgetContactConversation: () => Promise<void>;
@@ -277,9 +283,12 @@ export const ChatView = ({
   onSendFile,
   onForwardMessage,
   onReactToMessage,
+  onEditMessage,
   onToggleFavoriteMessage,
   onGetFavoriteMessages,
   onDeleteMessage,
+  onDeleteMessageForMe,
+  onExportConversation,
   onResyncConversation,
   onClearConversation,
   onForgetContactConversation,
@@ -322,13 +331,17 @@ export const ChatView = ({
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmForgetOpen, setConfirmForgetOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
+  const [pendingDeleteForMeMessageId, setPendingDeleteForMeMessageId] = useState<string | null>(null);
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
+  const [editingMessage, setEditingMessage] = useState<MessageRow | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<{
     x: number;
     y: number;
     messageId: string;
     canDelete: boolean;
+    canDeleteForEveryone: boolean;
+    canEdit: boolean;
     canForward: boolean;
     canFavorite: boolean;
     isFavorite: boolean;
@@ -379,6 +392,17 @@ export const ChatView = ({
     }
   }, []);
 
+  const canEditMessage = useCallback(
+    (message: MessageRow): boolean =>
+      !message.deletedAt &&
+      !message.localOnly &&
+      message.type === 'text' &&
+      message.direction === 'out' &&
+      message.senderDeviceId === localProfile.deviceId &&
+      Date.now() - message.createdAt <= 10 * 60 * 1000,
+    [localProfile.deviceId]
+  );
+
   const handleBubbleContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>, message: MessageRow) => {
       event.preventDefault();
@@ -396,6 +420,7 @@ export const ChatView = ({
       const isDeleted = Boolean(message.deletedAt);
       const isLocalOnly = Boolean(message.localOnly);
       const canReply = !isDeleted && !isLocalOnly;
+      const canEdit = canEditMessage(message);
       const canForward =
         !isDeleted &&
         !isLocalOnly &&
@@ -403,17 +428,19 @@ export const ChatView = ({
         forwardTargets.length > 0;
       const canFavorite = !isDeleted && !isLocalOnly;
       const isFavorite = canFavorite ? Boolean(favoriteByMessageId[message.messageId]) : false;
-      const canDelete =
-        !isDeleted &&
-        !isLocalOnly &&
+      const canDelete = !isDeleted && !isLocalOnly;
+      const canDeleteForEveryone =
+        canDelete &&
         message.direction === 'out' &&
         message.senderDeviceId === localProfile.deviceId;
       const itemCount =
         (canReply ? 1 : 0) +
+        (canEdit ? 1 : 0) +
         (canForward ? 1 : 0) +
         (canFavorite ? 1 : 0) +
         (selectedText ? 1 : 0) +
-        (canDelete ? 1 : 0);
+        (canDelete ? 1 : 0) +
+        (canDeleteForEveryone ? 1 : 0);
       if (itemCount <= 0) {
         setMessageContextMenu(null);
         return;
@@ -434,13 +461,15 @@ export const ChatView = ({
         y,
         messageId: message.messageId,
         canDelete,
+        canDeleteForEveryone,
+        canEdit,
         canForward,
         canFavorite,
         isFavorite,
         selectedText
       });
     },
-    [forwardTargets.length, localProfile.deviceId, favoriteByMessageId]
+    [canEditMessage, forwardTargets.length, localProfile.deviceId, favoriteByMessageId]
   );
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
@@ -520,11 +549,24 @@ export const ChatView = ({
         ...replyRef,
         senderLabel: senderLabelForMessage(replyRef.senderDeviceId)
       });
+      setEditingMessage(null);
       setReactionPickerMessageId(null);
       closeMessageContextMenu();
       focusComposerInput();
     },
     [senderLabelForMessage, closeMessageContextMenu, focusComposerInput]
+  );
+
+  const startEditMessage = useCallback(
+    (message: MessageRow) => {
+      if (!canEditMessage(message)) return;
+      setEditingMessage(message);
+      setReplyDraft(null);
+      setReactionPickerMessageId(null);
+      closeMessageContextMenu();
+      focusComposerInput();
+    },
+    [canEditMessage, closeMessageContextMenu, focusComposerInput]
   );
 
   const closeSearchAnimated = useCallback(() => {
@@ -596,6 +638,7 @@ export const ChatView = ({
       searchCloseTimerRef.current = null;
     }
     setReplyDraft(null);
+    setEditingMessage(null);
     setFavoritesOnly(false);
     setFavoriteMessages([]);
     setFavoriteMessagesLoading(false);
@@ -1377,6 +1420,32 @@ export const ChatView = ({
                   className="header-menu-item"
                   onClick={() => {
                     setHeaderMenuOpen(false);
+                    void onExportConversation('txt');
+                  }}
+                >
+                  <span className="menu-item-icon">
+                    <DocumentText20Regular />
+                  </span>
+                  <span>Exportar TXT</span>
+                </button>
+                <button
+                  type="button"
+                  className="header-menu-item"
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    void onExportConversation('html');
+                  }}
+                >
+                  <span className="menu-item-icon">
+                    <DocumentSave20Regular />
+                  </span>
+                  <span>Exportar HTML</span>
+                </button>
+                <button
+                  type="button"
+                  className="header-menu-item"
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
                     setConfirmClearOpen(true);
                   }}
                 >
@@ -1438,6 +1507,7 @@ export const ChatView = ({
           const isLocalOnly = Boolean(message.localOnly);
           const canShowActions = !isDeleted && !isLocalOnly;
           const isFavorite = Boolean(favoriteByMessageId[message.messageId]);
+          const canEditCurrentMessage = canEditMessage(message);
           const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
           const reactionPickerOpen = reactionPickerMessageId === message.messageId;
@@ -1621,6 +1691,7 @@ export const ChatView = ({
                         <Star20Filled />
                       </span>
                     )}
+                    {message.editedAt && <span className="message-edited-label">editada</span>}
                     <span className="bubble-time">
                       {outgoing ? renderOutgoingStatusIcon(message.status) : null}
                       <span>{formatTime(message.createdAt)}</span>
@@ -1674,6 +1745,18 @@ export const ChatView = ({
                     >
                       {isFavorite ? <Star20Filled /> : <Star20Regular />}
                     </button>
+
+                    {canEditCurrentMessage && (
+                      <button
+                        type="button"
+                        className="reaction-trigger edit-trigger"
+                        onClick={() => startEditMessage(message)}
+                        title="Editar mensagem"
+                        aria-label="Editar mensagem"
+                      >
+                        <DocumentEdit20Regular />
+                      </button>
+                    )}
 
                       <div
                         className={`reaction-picker ${reactionPickerOpen ? 'is-open' : 'is-closed'}`}
@@ -1766,11 +1849,21 @@ export const ChatView = ({
           await onSend(text, replyTo);
           setReplyDraft(null);
         }}
+        onSubmitEdit={async (text) => {
+          if (!editingMessage) return;
+          await onEditMessage(editingMessage.messageId, text);
+        }}
         onTypingChange={onTyping}
         onSendFile={onSendFile}
         onPaste={handleComposerPaste}
         replyDraft={replyDraft}
         onCancelReply={() => setReplyDraft(null)}
+        editDraft={
+          editingMessage
+            ? { messageId: editingMessage.messageId, text: editingMessage.bodyText || '' }
+            : null
+        }
+        onCancelEdit={() => setEditingMessage(null)}
       />
 
       <ConfirmDialog
@@ -1788,14 +1881,28 @@ export const ChatView = ({
       <ConfirmDialog
         open={Boolean(pendingDeleteMessageId)}
         title="Excluir"
-        description="Esta mensagem será removida para você e para o outro usuário."
-        confirmLabel="Excluir"
+        description="Esta mensagem será apagada para todos os participantes da conversa."
+        confirmLabel="Apagar para todos"
         onCancel={() => setPendingDeleteMessageId(null)}
         onConfirm={() => {
           if (pendingDeleteMessageId) {
             void onDeleteMessage(pendingDeleteMessageId);
           }
           setPendingDeleteMessageId(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingDeleteForMeMessageId)}
+        title="Apagar para mim"
+        description="Esta mensagem será removida apenas deste dispositivo. A outra pessoa continuará vendo a mensagem."
+        confirmLabel="Apagar para mim"
+        onCancel={() => setPendingDeleteForMeMessageId(null)}
+        onConfirm={() => {
+          if (pendingDeleteForMeMessageId) {
+            void onDeleteMessageForMe(pendingDeleteForMeMessageId);
+          }
+          setPendingDeleteForMeMessageId(null);
         }}
       />
 
@@ -1860,6 +1967,20 @@ export const ChatView = ({
               <span>Encaminhar</span>
             </button>
           )}
+          {messageContextMenu.canEdit && contextMenuMessage && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                startEditMessage(contextMenuMessage);
+              }}
+            >
+              <span className="menu-item-icon">
+                <DocumentEdit20Regular />
+              </span>
+              <span>Editar</span>
+            </button>
+          )}
           {messageContextMenu.canFavorite && (
             <button
               type="button"
@@ -1896,6 +2017,21 @@ export const ChatView = ({
           {messageContextMenu.canDelete && (
             <button
               type="button"
+              className="chat-context-item"
+              onClick={() => {
+                setPendingDeleteForMeMessageId(messageContextMenu.messageId);
+                closeMessageContextMenu();
+              }}
+            >
+              <span className="menu-item-icon">
+                <Delete20Regular />
+              </span>
+              <span>Apagar para mim</span>
+            </button>
+          )}
+          {messageContextMenu.canDeleteForEveryone && (
+            <button
+              type="button"
               className="chat-context-item danger"
               onClick={() => {
                 setPendingDeleteMessageId(messageContextMenu.messageId);
@@ -1905,7 +2041,7 @@ export const ChatView = ({
               <span className="menu-item-icon">
                 <Delete20Regular />
               </span>
-              <span>Excluir</span>
+              <span>Apagar para todos</span>
             </button>
           )}
         </div>

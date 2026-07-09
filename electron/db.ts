@@ -4,9 +4,12 @@ import Database from 'better-sqlite3';
 import { ANNOUNCEMENTS_CONVERSATION_ID } from './config';
 import { runMigrations } from './migrations';
 import {
+  AnnouncementReadDetail,
+  AnnouncementReadSummary,
   AnnouncementReactionSummary,
   ConversationRow,
   DbMessage,
+  MessageReactionDetail,
   Peer,
   Profile,
   ReactPayload
@@ -248,6 +251,36 @@ export class DbService {
       .all() as ConversationRow[];
   }
 
+  getArchivedConversationIds(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id
+         FROM conversations
+         WHERE kind = 'dm'
+           AND COALESCE(archivedAt, 0) > 0
+         ORDER BY archivedAt DESC`
+      )
+      .all() as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  setConversationArchived(conversationId: string, archived: boolean): number {
+    if (!conversationId.startsWith('dm:')) {
+      return 0;
+    }
+    const archivedAt = archived ? Date.now() : 0;
+    const peerId = conversationId.slice(3);
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO conversations(id, kind, peerDeviceId, title, createdAt, updatedAt, unreadCount, lastReadAt, archivedAt)
+         VALUES (?, 'dm', ?, NULL, ?, ?, 0, 0, ?)
+         ON CONFLICT(id) DO UPDATE SET archivedAt = excluded.archivedAt`
+      )
+      .run(conversationId, peerId, now, now, archivedAt);
+    return archivedAt;
+  }
+
   getConversationPreviews(conversationIds: string[]): Record<string, string> {
     if (conversationIds.length === 0) {
       return {};
@@ -268,6 +301,9 @@ export class DbService {
            FROM messages m2
            WHERE m2.conversationId = c.id
              AND m2.deletedAt IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM hidden_messages h WHERE h.messageId = m2.messageId
+             )
            ORDER BY m2.createdAt DESC, m2.messageId DESC
            LIMIT 1
          )
@@ -389,6 +425,7 @@ export class DbService {
          replyToPreviewText,
          replyToFileName,
          forwardedFromMessageId,
+         editedAt,
          createdAt
        )
        VALUES
@@ -414,6 +451,7 @@ export class DbService {
          @replyToPreviewText,
          @replyToFileName,
          @forwardedFromMessageId,
+         @editedAt,
          @createdAt
        )`
     );
@@ -441,7 +479,8 @@ export class DbService {
         replyToType: row.replyToType ?? null,
         replyToPreviewText: row.replyToPreviewText ?? null,
         replyToFileName: row.replyToFileName ?? null,
-        forwardedFromMessageId: row.forwardedFromMessageId ?? null
+        forwardedFromMessageId: row.forwardedFromMessageId ?? null,
+        editedAt: row.editedAt ?? null
       };
 
       const result = insert.run(normalizedRow);
@@ -534,11 +573,12 @@ export class DbService {
              AND (
                createdAt > ?
                OR (deletedAt IS NOT NULL AND deletedAt > ?)
+               OR (editedAt IS NOT NULL AND editedAt > ?)
              )
            ORDER BY createdAt ASC, messageId ASC
            LIMIT ?`
         )
-        .all(dmConversationId, since, since, limit) as DbMessage[];
+        .all(dmConversationId, since, since, since, limit) as DbMessage[];
 
       // Tombstones antigos também precisam ser reenviados para evitar divergência
       // quando o delete chegou fora de ordem em algum cliente.
@@ -566,8 +606,12 @@ export class DbService {
 
       return Array.from(byId.values()).sort((left, right) => {
         const leftTime = Math.max(left.createdAt || 0, left.deletedAt || 0);
+        const leftEditedAt = left.editedAt || 0;
         const rightTime = Math.max(right.createdAt || 0, right.deletedAt || 0);
-        if (leftTime !== rightTime) return leftTime - rightTime;
+        const rightEditedAt = right.editedAt || 0;
+        const leftRelevantTime = Math.max(leftTime, leftEditedAt);
+        const rightRelevantTime = Math.max(rightTime, rightEditedAt);
+        if (leftRelevantTime !== rightRelevantTime) return leftRelevantTime - rightRelevantTime;
         return left.messageId.localeCompare(right.messageId);
       });
     }
@@ -590,6 +634,7 @@ export class DbService {
            MAX(
              CASE
                WHEN deletedAt IS NOT NULL AND deletedAt > createdAt THEN deletedAt
+               WHEN editedAt IS NOT NULL AND editedAt > createdAt THEN editedAt
                ELSE createdAt
              END
            ) AS latestDm
@@ -725,6 +770,9 @@ export class DbService {
          INNER JOIN message_favorites f ON f.messageId = m.messageId
          WHERE m.conversationId = ?
            AND m.deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = m.messageId
+           )
          ORDER BY m.createdAt ASC, m.messageId ASC
          LIMIT ?`
       )
@@ -962,6 +1010,8 @@ export class DbService {
     this.db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM pending_message_reactions WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM hidden_messages WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM announcement_reads WHERE messageId = ?').run(messageId);
     this.db
       .prepare(
         `UPDATE conversations
@@ -970,6 +1020,269 @@ export class DbService {
       )
       .run(Date.now(), messageId);
     return this.getMessageById(messageId);
+  }
+
+  updateMessageText(messageId: string, text: string, editedAt = Date.now()): DbMessage | undefined {
+    const cleanText = (text || '').trim();
+    if (!cleanText) {
+      throw new Error('A mensagem editada não pode ficar vazia.');
+    }
+    const normalizedEditedAt =
+      Number.isFinite(editedAt) && editedAt > 0 ? Math.trunc(editedAt) : Date.now();
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET bodyText = ?,
+             editedAt = CASE
+               WHEN editedAt IS NULL OR ? >= editedAt THEN ?
+               ELSE editedAt
+             END
+         WHERE messageId = ?
+           AND deletedAt IS NULL
+           AND type = 'text'`
+      )
+      .run(cleanText, normalizedEditedAt, normalizedEditedAt, messageId);
+    this.db
+      .prepare(
+        `UPDATE conversations
+         SET updatedAt = ?
+         WHERE id = (SELECT conversationId FROM messages WHERE messageId = ? LIMIT 1)`
+      )
+      .run(normalizedEditedAt, messageId);
+    return this.getMessageById(messageId);
+  }
+
+  hideMessageForMe(messageId: string, hiddenAt = Date.now()): DbMessage | undefined {
+    const existing = this.getMessageById(messageId);
+    if (!existing) return undefined;
+    this.db
+      .prepare(
+        `INSERT INTO hidden_messages(messageId, hiddenAt)
+         VALUES (?, ?)
+         ON CONFLICT(messageId) DO UPDATE SET hiddenAt = excluded.hiddenAt`
+      )
+      .run(messageId, hiddenAt);
+    this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
+    this.db
+      .prepare(
+        `UPDATE conversations
+         SET updatedAt = ?
+         WHERE id = ?`
+      )
+      .run(Date.now(), existing.conversationId);
+    return existing;
+  }
+
+  getMessageReactionDetails(messageId: string): MessageReactionDetail[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           r.reactorDeviceId,
+           r.reaction,
+           r.updatedAt,
+           p.displayName AS peerDisplayName,
+           p.avatarEmoji AS peerAvatarEmoji,
+           p.avatarBg AS peerAvatarBg,
+           local.displayName AS localDisplayName,
+           local.avatarEmoji AS localAvatarEmoji,
+           local.avatarBg AS localAvatarBg
+         FROM message_reactions r
+         LEFT JOIN peers_cache p ON p.deviceId = r.reactorDeviceId
+         LEFT JOIN profile local ON local.deviceId = r.reactorDeviceId
+         WHERE r.messageId = ?
+         ORDER BY r.updatedAt ASC, r.reactorDeviceId ASC`
+      )
+      .all(messageId) as Array<{
+      reactorDeviceId: string;
+      reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂';
+      updatedAt: number;
+      peerDisplayName: string | null;
+      peerAvatarEmoji: string | null;
+      peerAvatarBg: string | null;
+      localDisplayName: string | null;
+      localAvatarEmoji: string | null;
+      localAvatarBg: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      deviceId: row.reactorDeviceId,
+      displayName: row.localDisplayName || row.peerDisplayName || `Contato ${row.reactorDeviceId.slice(0, 6)}`,
+      avatarEmoji: row.localAvatarEmoji || row.peerAvatarEmoji || '🙂',
+      avatarBg: row.localAvatarBg || row.peerAvatarBg || '#5b5fc7',
+      reaction: row.reaction,
+      updatedAt: row.updatedAt
+    }));
+  }
+
+  markAnnouncementRead(messageIds: string[], readerDeviceId: string, readAt = Date.now()): string[] {
+    const uniqueIds = Array.from(
+      new Set(
+        messageIds
+          .map((value) => (value || '').trim())
+          .filter((value) => value.length > 0)
+      )
+    );
+    if (uniqueIds.length === 0) return [];
+
+    const normalizedReadAt =
+      Number.isFinite(readAt) && readAt > 0 ? Math.trunc(readAt) : Date.now();
+    const upsert = this.db.prepare(
+      `INSERT INTO announcement_reads(messageId, readerDeviceId, readAt)
+       VALUES (?, ?, ?)
+       ON CONFLICT(messageId, readerDeviceId) DO UPDATE SET
+         readAt = CASE
+           WHEN excluded.readAt >= announcement_reads.readAt THEN excluded.readAt
+           ELSE announcement_reads.readAt
+         END`
+    );
+
+    const tx = this.db.transaction(() => {
+      for (const messageId of uniqueIds) {
+        upsert.run(messageId, readerDeviceId, normalizedReadAt);
+      }
+      return uniqueIds;
+    });
+
+    return tx();
+  }
+
+  replaceAnnouncementReads(
+    snapshot: Record<string, Record<string, number>>,
+    options?: { replaceAll?: boolean }
+  ): string[] {
+    const listAnnouncementIds = this.db.prepare(
+      `SELECT messageId
+       FROM messages
+       WHERE type = 'announcement' AND deletedAt IS NULL`
+    );
+    const deleteAll = this.db.prepare(
+      `DELETE FROM announcement_reads
+       WHERE messageId IN (
+         SELECT messageId FROM messages WHERE type = 'announcement'
+       )`
+    );
+    const deleteForMessage = this.db.prepare(
+      'DELETE FROM announcement_reads WHERE messageId = ?'
+    );
+    const upsert = this.db.prepare(
+      `INSERT INTO announcement_reads(messageId, readerDeviceId, readAt)
+       VALUES (?, ?, ?)
+       ON CONFLICT(messageId, readerDeviceId) DO UPDATE SET
+         readAt = CASE
+           WHEN excluded.readAt >= announcement_reads.readAt THEN excluded.readAt
+           ELSE announcement_reads.readAt
+         END`
+    );
+
+    const tx = this.db.transaction(() => {
+      const replaceAll = options?.replaceAll !== false;
+      const activeIds = new Set(
+        (listAnnouncementIds.all() as Array<{ messageId: string }>).map((row) => row.messageId)
+      );
+      if (replaceAll) {
+        deleteAll.run();
+      }
+
+      const touched = new Set<string>();
+      for (const [messageId, byDevice] of Object.entries(snapshot)) {
+        if (!activeIds.has(messageId)) continue;
+        if (!replaceAll) {
+          deleteForMessage.run(messageId);
+        }
+        for (const [deviceId, rawReadAt] of Object.entries(byDevice || {})) {
+          const cleanDeviceId = (deviceId || '').trim();
+          const readAt =
+            Number.isFinite(rawReadAt) && rawReadAt > 0 ? Math.trunc(rawReadAt) : Date.now();
+          if (!cleanDeviceId) continue;
+          upsert.run(messageId, cleanDeviceId, readAt);
+          touched.add(messageId);
+        }
+      }
+      return Array.from(touched.values());
+    });
+
+    return tx();
+  }
+
+  getAnnouncementReadSummary(
+    messageIds: string[],
+    localDeviceId: string
+  ): Record<string, AnnouncementReadSummary> {
+    if (messageIds.length === 0) return {};
+    const uniqueIds = Array.from(new Set(messageIds));
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT messageId, readerDeviceId
+         FROM announcement_reads
+         WHERE messageId IN (${placeholders})`
+      )
+      .all(...uniqueIds) as Array<{ messageId: string; readerDeviceId: string }>;
+    const result: Record<string, AnnouncementReadSummary> = {};
+    for (const messageId of uniqueIds) {
+      result[messageId] = { count: 0, readByMe: false };
+    }
+    for (const row of rows) {
+      const current = result[row.messageId] || { count: 0, readByMe: false };
+      current.count += 1;
+      if (row.readerDeviceId === localDeviceId) {
+        current.readByMe = true;
+      }
+      result[row.messageId] = current;
+    }
+    return result;
+  }
+
+  getAnnouncementReadDetails(messageId: string): AnnouncementReadDetail[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           r.readerDeviceId,
+           r.readAt,
+           p.displayName AS peerDisplayName,
+           p.avatarEmoji AS peerAvatarEmoji,
+           p.avatarBg AS peerAvatarBg,
+           local.displayName AS localDisplayName,
+           local.avatarEmoji AS localAvatarEmoji,
+           local.avatarBg AS localAvatarBg
+         FROM announcement_reads r
+         LEFT JOIN peers_cache p ON p.deviceId = r.readerDeviceId
+         LEFT JOIN profile local ON local.deviceId = r.readerDeviceId
+         WHERE r.messageId = ?
+         ORDER BY r.readAt ASC, r.readerDeviceId ASC`
+      )
+      .all(messageId) as Array<{
+      readerDeviceId: string;
+      readAt: number;
+      peerDisplayName: string | null;
+      peerAvatarEmoji: string | null;
+      peerAvatarBg: string | null;
+      localDisplayName: string | null;
+      localAvatarEmoji: string | null;
+      localAvatarBg: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      deviceId: row.readerDeviceId,
+      displayName: row.localDisplayName || row.peerDisplayName || `Contato ${row.readerDeviceId.slice(0, 6)}`,
+      avatarEmoji: row.localAvatarEmoji || row.peerAvatarEmoji || '🙂',
+      avatarBg: row.localAvatarBg || row.peerAvatarBg || '#5b5fc7',
+      readAt: row.readAt
+    }));
+  }
+
+  getExportMessages(conversationId: string): DbMessage[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE conversationId = ?
+           AND deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )
+         ORDER BY createdAt ASC, messageId ASC`
+      )
+      .all(conversationId) as DbMessage[];
   }
 
   mergeMessageStateFromSync(input: {
@@ -988,11 +1301,16 @@ export class DbService {
     replyToPreviewText: string | null;
     replyToFileName: string | null;
     forwardedFromMessageId?: string | null;
+    editedAt?: number | null;
   }): DbMessage | undefined {
     this.db
       .prepare(
         `UPDATE messages
-         SET bodyText = ?,
+         SET bodyText = CASE
+               WHEN ? IS NULL AND editedAt IS NOT NULL THEN bodyText
+               WHEN ? IS NOT NULL AND editedAt IS NOT NULL AND ? < editedAt THEN bodyText
+               ELSE ?
+             END,
              fileId = CASE WHEN ? IS NOT NULL THEN ? ELSE fileId END,
              fileName = CASE WHEN ? IS NOT NULL THEN ? ELSE fileName END,
              fileSize = CASE WHEN ? IS NOT NULL THEN ? ELSE fileSize END,
@@ -1011,10 +1329,18 @@ export class DbService {
              replyToType = COALESCE(?, replyToType),
              replyToPreviewText = COALESCE(?, replyToPreviewText),
              replyToFileName = COALESCE(?, replyToFileName),
-             forwardedFromMessageId = COALESCE(?, forwardedFromMessageId)
+             forwardedFromMessageId = COALESCE(?, forwardedFromMessageId),
+             editedAt = CASE
+               WHEN ? IS NULL THEN editedAt
+               WHEN editedAt IS NULL OR ? >= editedAt THEN ?
+               ELSE editedAt
+             END
          WHERE messageId = ?`
       )
       .run(
+        input.editedAt ?? null,
+        input.editedAt ?? null,
+        input.editedAt ?? null,
         input.bodyText,
         input.fileId,
         input.fileId,
@@ -1036,6 +1362,9 @@ export class DbService {
         input.replyToPreviewText,
         input.replyToFileName,
         input.forwardedFromMessageId ?? null,
+        input.editedAt ?? null,
+        input.editedAt ?? null,
+        input.editedAt ?? null,
         input.messageId
       );
     return this.getMessageById(input.messageId);
@@ -1060,6 +1389,9 @@ export class DbService {
           `SELECT * FROM messages
           WHERE conversationId = ?
             AND deletedAt IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+            )
             AND createdAt < ?
           ORDER BY createdAt DESC, messageId DESC
           LIMIT ?`
@@ -1073,6 +1405,9 @@ export class DbService {
         `SELECT * FROM messages
          WHERE conversationId = ?
            AND deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )
          ORDER BY createdAt DESC, messageId DESC
          LIMIT ?`
       )
@@ -1090,7 +1425,10 @@ export class DbService {
       .prepare(
         `SELECT * FROM messages
          WHERE deletedAt IS NULL
-           AND messageId IN (${placeholders})`
+           AND messageId IN (${placeholders})
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )`
       )
       .all(...uniqueIds) as DbMessage[];
 
@@ -1121,6 +1459,9 @@ export class DbService {
          FROM messages
          WHERE conversationId = ?
            AND deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )
            AND (
              COALESCE(bodyText, '') LIKE ? ESCAPE '\\'
              OR COALESCE(fileName, '') LIKE ? ESCAPE '\\'
@@ -1188,6 +1529,22 @@ export class DbService {
          WHERE conversationId = ?
        )`
     );
+    const deleteHiddenMessages = this.db.prepare(
+      `DELETE FROM hidden_messages
+       WHERE messageId IN (
+         SELECT messageId
+         FROM messages
+         WHERE conversationId = ?
+       )`
+    );
+    const deleteAnnouncementReads = this.db.prepare(
+      `DELETE FROM announcement_reads
+       WHERE messageId IN (
+         SELECT messageId
+         FROM messages
+         WHERE conversationId = ?
+       )`
+    );
     const deleteMessages = this.db.prepare('DELETE FROM messages WHERE conversationId = ?');
     const resetConversation = this.db.prepare(
       'UPDATE conversations SET unreadCount = 0, updatedAt = ? WHERE id = ?'
@@ -1198,6 +1555,8 @@ export class DbService {
       deleteReactions.run(id);
       deletePendingReactions.run(id);
       deleteFavorites.run(id);
+      deleteHiddenMessages.run(id);
+      deleteAnnouncementReads.run(id);
       deleteMessages.run(id);
       resetConversation.run(Date.now(), id);
       return rows
@@ -1212,6 +1571,8 @@ export class DbService {
     this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM pending_message_reactions WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM hidden_messages WHERE messageId = ?').run(messageId);
+    this.db.prepare('DELETE FROM announcement_reads WHERE messageId = ?').run(messageId);
     this.db.prepare('DELETE FROM messages WHERE messageId = ?').run(messageId);
   }
 
@@ -1266,6 +1627,20 @@ export class DbService {
          WHERE type = 'announcement' AND createdAt <= ?
        )`
     );
+    const removeHidden = this.db.prepare(
+      `DELETE FROM hidden_messages
+       WHERE messageId IN (
+         SELECT messageId FROM messages
+         WHERE type = 'announcement' AND createdAt <= ?
+       )`
+    );
+    const removeReads = this.db.prepare(
+      `DELETE FROM announcement_reads
+       WHERE messageId IN (
+         SELECT messageId FROM messages
+         WHERE type = 'announcement' AND createdAt <= ?
+       )`
+    );
     const touchConversation = this.db.prepare(
       'UPDATE conversations SET updatedAt = ? WHERE id = ?'
     );
@@ -1275,6 +1650,8 @@ export class DbService {
       if (rows.length === 0) return [] as string[];
       removeReactions.run(cutoff);
       removePendingReactions.run(cutoff);
+      removeHidden.run(cutoff);
+      removeReads.run(cutoff);
       remove.run(cutoff);
       touchConversation.run(Date.now(), ANNOUNCEMENTS_CONVERSATION_ID);
       return rows.map((row) => row.messageId);
@@ -1305,6 +1682,14 @@ export class DbService {
       `DELETE FROM pending_message_reactions
        WHERE messageId IN (${placeholders})`
     );
+    const removeHidden = this.db.prepare(
+      `DELETE FROM hidden_messages
+       WHERE messageId IN (${placeholders})`
+    );
+    const removeReads = this.db.prepare(
+      `DELETE FROM announcement_reads
+       WHERE messageId IN (${placeholders})`
+    );
     const touchConversation = this.db.prepare(
       'UPDATE conversations SET updatedAt = ? WHERE id = ?'
     );
@@ -1314,6 +1699,8 @@ export class DbService {
       if (rows.length === 0) return [] as string[];
       removeReactions.run(...uniqueIds);
       removePendingReactions.run(...uniqueIds);
+      removeHidden.run(...uniqueIds);
+      removeReads.run(...uniqueIds);
       removeMessages.run(...uniqueIds);
       touchConversation.run(Date.now(), ANNOUNCEMENTS_CONVERSATION_ID);
       return rows.map((row) => row.messageId);
@@ -1327,7 +1714,10 @@ export class DbService {
       .prepare(
         `SELECT messageId
          FROM messages
-         WHERE type = 'announcement' AND deletedAt IS NULL`
+         WHERE type = 'announcement' AND deletedAt IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+           )`
       )
       .all() as Array<{ messageId: string }>;
     return rows.map((row) => row.messageId);
@@ -1504,6 +1894,21 @@ export class DbService {
   setAttachmentsDirectory(inputDir: string, defaultDir: string): string {
     const normalized = path.resolve((inputDir || '').trim() || defaultDir);
     this.setAppSetting('attachments.dir', normalized);
+    return normalized;
+  }
+
+  getDoNotDisturbUntil(): number {
+    const raw = Number(this.getAppSetting('notifications.dndUntil') || 0);
+    return Number.isFinite(raw) && raw > Date.now() ? Math.trunc(raw) : 0;
+  }
+
+  setDoNotDisturbUntil(value: number): number {
+    const normalized = Number.isFinite(value) && value > Date.now() ? Math.trunc(value) : 0;
+    if (normalized > 0) {
+      this.setAppSetting('notifications.dndUntil', String(normalized));
+    } else {
+      this.deleteAppSetting('notifications.dndUntil');
+    }
     return normalized;
   }
 

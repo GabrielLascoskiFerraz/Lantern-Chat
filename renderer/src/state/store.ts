@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import {
+  AnnouncementReadSummary,
   AnnouncementReactionSummary,
   ipcClient,
   MessageReplyReference,
@@ -36,7 +37,9 @@ interface LanternState {
   hasMoreHistoryByConversation: Record<string, boolean>;
   loadingOlderByConversation: Record<string, boolean>;
   announcementReactionsByMessage: Record<string, AnnouncementReactionSummary>;
+  announcementReadsByMessage: Record<string, AnnouncementReadSummary>;
   favoriteByMessageId: Record<string, boolean>;
+  archivedConversationIds: string[];
   conversationPreviewById: Record<string, string>;
   unreadByConversation: Record<string, number>;
   openedUnreadCountByConversation: Record<string, number>;
@@ -77,6 +80,7 @@ interface LanternState {
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<void>;
+  editMessage: (conversationId: string, messageId: string, text: string) => Promise<void>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -89,14 +93,22 @@ interface LanternState {
   ) => Promise<void>;
   getFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<void>;
+  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<void>;
+  exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<void>;
   resyncConversation: (conversationId: string) => Promise<void>;
   markConversationUnread: (conversationId: string) => Promise<void>;
+  archiveConversation: (conversationId: string) => Promise<void>;
+  unarchiveConversation: (conversationId: string) => Promise<void>;
   clearConversation: (conversationId: string) => Promise<void>;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<void>;
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) => Promise<void>;
   forceRelayRediscovery: () => Promise<void>;
-  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<void>;
+  updateStartupSettings: (input: {
+    openAtLogin: boolean;
+    downloadsDir?: string;
+    doNotDisturbUntil?: number;
+  }) => Promise<void>;
   addManualPeer: (address: string, port: number) => Promise<void>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
@@ -289,7 +301,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   hasMoreHistoryByConversation: {},
   loadingOlderByConversation: {},
   announcementReactionsByMessage: {},
+  announcementReadsByMessage: {},
   favoriteByMessageId: {},
+  archivedConversationIds: [],
   conversationPreviewById: {},
   unreadByConversation: {},
   openedUnreadCountByConversation: {},
@@ -327,14 +341,23 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   loadInitial: async () => {
     try {
       set({ startupError: null });
-      const [profile, relaySettings, startupSettings, peers, onlinePeers, unreadByConversation] =
+      const [
+        profile,
+        relaySettings,
+        startupSettings,
+        peers,
+        onlinePeers,
+        unreadByConversation,
+        archivedConversationIds
+      ] =
         await Promise.all([
           ipcClient.getProfile(),
           ipcClient.getRelaySettings(),
           ipcClient.getStartupSettings(),
           ipcClient.getKnownPeers(),
           ipcClient.getOnlinePeers(),
-          ipcClient.getConversations()
+          ipcClient.getConversations(),
+          ipcClient.getArchivedConversationIds()
         ]);
 
       const conversationIds = [
@@ -358,6 +381,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       startupSettings,
       peers,
       onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
+      archivedConversationIds,
       unreadByConversation,
       openedUnreadCountByConversation: {
         [selectedAtLoad]: selectedUnreadAtLoad
@@ -377,15 +401,18 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     );
     const hasMoreHistory = initialMessages.length === MESSAGES_PAGE_SIZE;
     const initialMessageIds = initialMessages.map((row) => row.messageId);
-    const [initialMessageReactions, initialFavorites] =
+    const [initialMessageReactions, initialFavorites, initialAnnouncementReads] =
       initialMessageIds.length > 0
         ? await Promise.all([
             current === ANNOUNCEMENTS_ID
               ? ipcClient.getAnnouncementReactions(initialMessageIds)
               : ipcClient.getMessageReactions(initialMessageIds),
-            ipcClient.getMessageFavorites(initialMessageIds)
+            ipcClient.getMessageFavorites(initialMessageIds),
+            current === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReadSummary(initialMessageIds)
+              : Promise.resolve({})
           ])
-        : [{}, {}];
+        : [{}, {}, {}];
     const initialUnreadCount = selectedUnreadAtLoad;
     const initialUnreadAnchorMessageId =
       initialUnreadCount > 0 && initialMessages.length > 0
@@ -409,6 +436,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       announcementReactionsByMessage: {
         ...state.announcementReactionsByMessage,
         ...initialMessageReactions
+      },
+      announcementReadsByMessage: {
+        ...state.announcementReadsByMessage,
+        ...initialAnnouncementReads
       },
       favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, initialFavorites),
       unreadAnchorMessageIdByConversation: {
@@ -746,6 +777,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             const next = { ...state.announcementReactionsByMessage };
             delete next[event.messageId];
             return next;
+          })(),
+          announcementReadsByMessage: (() => {
+            const next = { ...state.announcementReadsByMessage };
+            delete next[event.messageId];
+            return next;
           })()
         }));
         void ipcClient.getConversationPreviews([event.conversationId]).then((previewMap) => {
@@ -773,8 +809,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             state.messagesByConversation[event.conversationId] || []
           ).map((row) => row.messageId);
           const nextFavorites = { ...state.favoriteByMessageId };
+          const nextAnnouncementReactions = { ...state.announcementReactionsByMessage };
+          const nextAnnouncementReads = { ...state.announcementReadsByMessage };
           for (const messageId of conversationMessageIds) {
             delete nextFavorites[messageId];
+            delete nextAnnouncementReactions[messageId];
+            delete nextAnnouncementReads[messageId];
           }
           return {
             messagesByConversation: {
@@ -794,6 +834,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               [event.conversationId]: ''
             },
             favoriteByMessageId: nextFavorites,
+            announcementReactionsByMessage:
+              event.conversationId === ANNOUNCEMENTS_ID
+                ? nextAnnouncementReactions
+                : state.announcementReactionsByMessage,
+            announcementReadsByMessage:
+              event.conversationId === ANNOUNCEMENTS_ID
+                ? nextAnnouncementReads
+                : state.announcementReadsByMessage,
             unreadByConversation: {
               ...state.unreadByConversation,
               [event.conversationId]: 0
@@ -876,6 +924,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         set((state) => ({
           announcementReactionsByMessage: {
             ...state.announcementReactionsByMessage,
+            [event.messageId]: event.summary
+          }
+        }));
+        return;
+      }
+
+      if (event.type === 'announcement:reads') {
+        set((state) => ({
+          announcementReadsByMessage: {
+            ...state.announcementReadsByMessage,
             [event.messageId]: event.summary
           }
         }));
@@ -995,15 +1053,18 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       );
       const hasMoreHistory = rows.length === MESSAGES_PAGE_SIZE;
       const messageIds = rows.map((row) => row.messageId);
-      const [messageReactions, favoritesMap] =
+      const [messageReactions, favoritesMap, announcementReads] =
         messageIds.length > 0
           ? await Promise.all([
               conversationId === ANNOUNCEMENTS_ID
                 ? ipcClient.getAnnouncementReactions(messageIds)
                 : ipcClient.getMessageReactions(messageIds),
-              ipcClient.getMessageFavorites(messageIds)
+              ipcClient.getMessageFavorites(messageIds),
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReadSummary(messageIds)
+                : Promise.resolve({})
             ])
-          : [{}, {}];
+          : [{}, {}, {}];
       await ipcClient.markConversationRead(conversationId);
       await ipcClient.setActiveConversation(conversationId);
 
@@ -1039,6 +1100,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             ...state.announcementReactionsByMessage,
             ...messageReactions
           },
+        announcementReadsByMessage: {
+          ...state.announcementReadsByMessage,
+          ...announcementReads
+        },
         favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap),
         unreadAnchorMessageIdByConversation: {
           ...state.unreadAnchorMessageIdByConversation,
@@ -1066,6 +1131,25 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         ...state.unreadByConversation,
         [conversationId]: Math.max(1, state.unreadByConversation[conversationId] || 0)
       }
+    }));
+  },
+  archiveConversation: async (conversationId) => {
+    if (!conversationId.startsWith('dm:')) return;
+    await ipcClient.archiveConversation(conversationId);
+    set((state) => {
+      if (state.archivedConversationIds.includes(conversationId)) {
+        return state;
+      }
+      return {
+        archivedConversationIds: [conversationId, ...state.archivedConversationIds]
+      };
+    });
+  },
+  unarchiveConversation: async (conversationId) => {
+    if (!conversationId.startsWith('dm:')) return;
+    await ipcClient.unarchiveConversation(conversationId);
+    set((state) => ({
+      archivedConversationIds: state.archivedConversationIds.filter((id) => id !== conversationId)
     }));
   },
   loadOlderMessages: async (conversationId, limit = MESSAGES_PAGE_SIZE) => {
@@ -1113,15 +1197,18 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       const knownIds = new Set(currentRows.map((row) => row.messageId));
       const newlyAddedRows = olderRows.filter((row) => !knownIds.has(row.messageId));
       const messageIds = olderRows.map((row) => row.messageId);
-      const [reactionMap, favoritesMap] =
+      const [reactionMap, favoritesMap, announcementReads] =
         messageIds.length > 0
           ? await Promise.all([
               conversationId === ANNOUNCEMENTS_ID
                 ? ipcClient.getAnnouncementReactions(messageIds)
                 : ipcClient.getMessageReactions(messageIds),
-              ipcClient.getMessageFavorites(messageIds)
+              ipcClient.getMessageFavorites(messageIds),
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReadSummary(messageIds)
+                : Promise.resolve({})
             ])
-          : [{}, {}];
+          : [{}, {}, {}];
 
       set((state) => ({
         messagesByConversation: {
@@ -1142,6 +1229,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         announcementReactionsByMessage: {
           ...state.announcementReactionsByMessage,
           ...reactionMap
+        },
+        announcementReadsByMessage: {
+          ...state.announcementReadsByMessage,
+          ...announcementReads
         },
         favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap)
       }));
@@ -1182,15 +1273,18 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       return;
     }
     const incomingMessageIds = incomingRows.map((row) => row.messageId);
-    const [reactionMap, favoritesMap] =
+    const [reactionMap, favoritesMap, announcementReads] =
       incomingMessageIds.length > 0
         ? await Promise.all([
             conversationId === ANNOUNCEMENTS_ID
               ? ipcClient.getAnnouncementReactions(incomingMessageIds)
               : ipcClient.getMessageReactions(incomingMessageIds),
-            ipcClient.getMessageFavorites(incomingMessageIds)
+            ipcClient.getMessageFavorites(incomingMessageIds),
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReadSummary(incomingMessageIds)
+              : Promise.resolve({})
           ])
-        : [{}, {}];
+        : [{}, {}, {}];
 
     set((current) => {
       const rows = current.messagesByConversation[conversationId] || [];
@@ -1207,6 +1301,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         announcementReactionsByMessage: {
           ...current.announcementReactionsByMessage,
           ...reactionMap
+        },
+        announcementReadsByMessage: {
+          ...current.announcementReadsByMessage,
+          ...announcementReads
         },
         favoriteByMessageId: mergeFavoriteMap(current.favoriteByMessageId, favoritesMap)
       };
@@ -1251,6 +1349,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         replyToType: replyTo?.type || null,
         replyToPreviewText: replyTo?.previewText || null,
         replyToFileName: replyTo?.fileName || null,
+        forwardedFromMessageId: null,
+        editedAt: null,
         createdAt: Date.now(),
         localOnly: true
       };
@@ -1296,11 +1396,16 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
       void ipcClient
         .getAnnouncementReactions([message.messageId])
-        .then((reactionMap) => {
+        .then(async (reactionMap) => {
+          const readMap = await ipcClient.getAnnouncementReadSummary([message.messageId]);
           set((state) => ({
             announcementReactionsByMessage: {
               ...state.announcementReactionsByMessage,
               ...reactionMap
+            },
+            announcementReadsByMessage: {
+              ...state.announcementReadsByMessage,
+              ...readMap
             }
           }));
         })
@@ -1372,6 +1477,39 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
+  editMessage: async (conversationId, messageId, text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    try {
+      const updated = await ipcClient.editMessage(conversationId, messageId, trimmed);
+      if (!updated) return;
+      set((state) => {
+        const rows = state.messagesByConversation[conversationId] || [];
+        const nextRows = updateExistingMessageOnly(rows, updated);
+        if (nextRows === rows) return state;
+        const orderedRows = normalizeMessageOrder(nextRows);
+        const last = orderedRows[orderedRows.length - 1];
+        return {
+          messagesByConversation: {
+            ...state.messagesByConversation,
+            [conversationId]: orderedRows
+          },
+          conversationPreviewById: {
+            ...state.conversationPreviewById,
+            [conversationId]: last ? previewFromMessage(last) : ''
+          }
+        };
+      });
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível editar a mensagem.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
   reactToMessage: async (conversationId, messageId, reaction) => {
     try {
       await ipcClient.reactToMessage(conversationId, messageId, reaction);
@@ -1394,15 +1532,18 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   getFavoriteMessages: async (conversationId) => {
     const rows = normalizeMessageOrder(await ipcClient.getFavoriteMessages(conversationId));
     const messageIds = rows.map((row) => row.messageId);
-    const [reactionMap, favoritesMap] =
+    const [reactionMap, favoritesMap, announcementReads] =
       messageIds.length > 0
         ? await Promise.all([
             conversationId === ANNOUNCEMENTS_ID
               ? ipcClient.getAnnouncementReactions(messageIds)
               : ipcClient.getMessageReactions(messageIds),
-            ipcClient.getMessageFavorites(messageIds)
+            ipcClient.getMessageFavorites(messageIds),
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReadSummary(messageIds)
+              : Promise.resolve({})
           ])
-        : [{}, {}];
+        : [{}, {}, {}];
 
     set((state) => ({
       messagesByConversation: {
@@ -1415,6 +1556,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       announcementReactionsByMessage: {
         ...state.announcementReactionsByMessage,
         ...reactionMap
+      },
+      announcementReadsByMessage: {
+        ...state.announcementReadsByMessage,
+        ...announcementReads
       },
       favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap)
     }));
@@ -1442,6 +1587,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         const next = { ...state.announcementReactionsByMessage };
         delete next[messageId];
         return next;
+      })(),
+      announcementReadsByMessage: (() => {
+        if (conversationId !== ANNOUNCEMENTS_ID) {
+          return state.announcementReadsByMessage;
+        }
+        const next = { ...state.announcementReadsByMessage };
+        delete next[messageId];
+        return next;
       })()
     }));
     void ipcClient.getConversationPreviews([conversationId]).then((previewMap) => {
@@ -1451,6 +1604,59 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return { conversationPreviewById: merged };
       });
     });
+  },
+  deleteMessageForMe: async (conversationId, messageId) => {
+    const hidden = await ipcClient.deleteMessageForMe(conversationId, messageId);
+    if (!hidden) return;
+    set((state) => ({
+      messagesByConversation: {
+        ...state.messagesByConversation,
+        [conversationId]: (state.messagesByConversation[conversationId] || []).filter(
+          (row) => row.messageId !== messageId
+        )
+      },
+      favoriteByMessageId: (() => {
+        const next = { ...state.favoriteByMessageId };
+        delete next[messageId];
+        return next;
+      })(),
+      announcementReactionsByMessage: (() => {
+        const next = { ...state.announcementReactionsByMessage };
+        delete next[messageId];
+        return next;
+      })(),
+      announcementReadsByMessage: (() => {
+        const next = { ...state.announcementReadsByMessage };
+        delete next[messageId];
+        return next;
+      })()
+    }));
+    void ipcClient.getConversationPreviews([conversationId]).then((previewMap) => {
+      set((state) => {
+        const merged = mergePreviewMapIfChanged(state.conversationPreviewById, previewMap);
+        if (!merged) return state;
+        return { conversationPreviewById: merged };
+      });
+    });
+  },
+  exportConversation: async (conversationId, format) => {
+    try {
+      const result = await ipcClient.exportConversation(conversationId, format);
+      if (result.canceled) return;
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'success', message: 'Conversa exportada.' }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    } catch (error) {
+      const toastMessage =
+        error instanceof Error ? error.message : 'Não foi possível exportar a conversa.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
   },
   resyncConversation: async (conversationId) => {
     try {
@@ -1472,8 +1678,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         (row) => row.messageId
       );
       const nextFavorites = { ...state.favoriteByMessageId };
+      const nextAnnouncementReads = { ...state.announcementReadsByMessage };
       for (const messageId of conversationMessageIds) {
         delete nextFavorites[messageId];
+        delete nextAnnouncementReads[messageId];
       }
       return {
         messagesByConversation: {
@@ -1490,6 +1698,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         },
         announcementReactionsByMessage:
           conversationId === ANNOUNCEMENTS_ID ? {} : state.announcementReactionsByMessage,
+        announcementReadsByMessage:
+          conversationId === ANNOUNCEMENTS_ID ? {} : nextAnnouncementReads,
         favoriteByMessageId: nextFavorites,
         conversationPreviewById: {
           ...state.conversationPreviewById,
@@ -1553,7 +1763,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         unreadByConversation: nextUnread,
         unreadAnchorMessageIdByConversation: nextUnreadAnchor,
         typingByConversation: nextTyping,
-        favoriteByMessageId: nextFavorites
+        favoriteByMessageId: nextFavorites,
+        archivedConversationIds: state.archivedConversationIds.filter((id) => id !== conversationId)
       };
     });
 

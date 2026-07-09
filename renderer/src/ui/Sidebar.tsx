@@ -16,7 +16,11 @@ import {
   Text
 } from '@fluentui/react-components';
 import {
+  ArchiveArrowBack20Regular,
   ArrowSync20Regular,
+  Box20Regular,
+  ChevronDown20Regular,
+  ChevronUp20Regular,
   Dismiss20Regular,
   PlugConnected20Regular,
   PlugDisconnected20Regular,
@@ -42,10 +46,13 @@ interface SidebarProps {
   unreadByConversation: Record<string, number>;
   conversationPreviewById: Record<string, string>;
   typingByConversation: Record<string, boolean>;
+  archivedConversationIds: string[];
   onlinePeerIds: string[];
   onSearch: (value: string) => void;
   onSelectConversation: (id: string) => void;
   onMarkConversationUnread: (id: string) => Promise<void>;
+  onArchiveConversation: (id: string) => Promise<void>;
+  onUnarchiveConversation: (id: string) => Promise<void>;
   onClearConversation: (id: string) => Promise<void>;
   onForgetContactConversation: (id: string) => Promise<void>;
   onOpenSettings: () => void;
@@ -65,10 +72,13 @@ export const Sidebar = ({
   unreadByConversation,
   conversationPreviewById,
   typingByConversation,
+  archivedConversationIds,
   onlinePeerIds,
   onSearch,
   onSelectConversation,
   onMarkConversationUnread,
+  onArchiveConversation,
+  onUnarchiveConversation,
   onClearConversation,
   onForgetContactConversation,
   onOpenSettings,
@@ -101,6 +111,7 @@ export const Sidebar = ({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; conversationId: string } | null>(null);
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
   const [pendingForgetConversationId, setPendingForgetConversationId] = useState<string | null>(null);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [quickStatusOpen, setQuickStatusOpen] = useState(false);
   const [quickStatusClosing, setQuickStatusClosing] = useState(false);
   const [customStatusDraft, setCustomStatusDraft] = useState('');
@@ -126,13 +137,17 @@ export const Sidebar = ({
     </span>
   );
 
-  const orderedFiltered = useMemo(() => {
+  const archivedSet = useMemo(
+    () => new Set(archivedConversationIds),
+    [archivedConversationIds]
+  );
+  const orderSidebarPeers = (items: Peer[], includePinned: boolean): Peer[] => {
     const pinnedSet = new Set(pinnedConversationIds);
     const onlineSet = new Set(onlinePeerIds);
-    return [...filtered].sort((a, b) => {
+    return [...items].sort((a, b) => {
       const aPinned = pinnedSet.has(`dm:${a.deviceId}`) ? 1 : 0;
       const bPinned = pinnedSet.has(`dm:${b.deviceId}`) ? 1 : 0;
-      if (aPinned !== bPinned) return bPinned - aPinned;
+      if (includePinned && aPinned !== bPinned) return bPinned - aPinned;
 
       const aUnread = unreadByConversation[`dm:${a.deviceId}`] || 0;
       const bUnread = unreadByConversation[`dm:${b.deviceId}`] || 0;
@@ -148,7 +163,30 @@ export const Sidebar = ({
 
       return a.displayName.localeCompare(b.displayName, 'pt-BR', { sensitivity: 'base' });
     });
-  }, [filtered, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
+  };
+
+  const orderedFiltered = useMemo(() => {
+    const mainPeers = filtered.filter((peer) => !archivedSet.has(`dm:${peer.deviceId}`));
+    return orderSidebarPeers(mainPeers, true);
+  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
+
+  const archivedPeers = useMemo(() => {
+    const archived = filtered.filter((peer) => archivedSet.has(`dm:${peer.deviceId}`));
+    return orderSidebarPeers(archived, false);
+  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
+  const totalArchivedCount = useMemo(
+    () => peers.filter((peer) => archivedSet.has(`dm:${peer.deviceId}`)).length,
+    [peers, archivedSet]
+  );
+  const archivedUnreadCount = useMemo(
+    () =>
+      peers.reduce((sum, peer) => {
+        const conversationId = `dm:${peer.deviceId}`;
+        if (!archivedSet.has(conversationId)) return sum;
+        return sum + Math.max(0, unreadByConversation[conversationId] || 0);
+      }, 0),
+    [peers, archivedSet, unreadByConversation]
+  );
 
   const orderSignature = useMemo(
     () => orderedFiltered.map((peer) => peer.deviceId).join('|'),
@@ -369,7 +407,7 @@ export const Sidebar = ({
     event.preventDefault();
     const menuWidth = Math.max(140, Math.min(228, window.innerWidth - 24));
     const isDm = conversationId.startsWith('dm:');
-    const actionCount = isDm ? 4 : 2;
+    const actionCount = isDm ? 5 : 2;
     const menuHeight = Math.max(112, Math.min(actionCount * 46 + 16, window.innerHeight - 24));
     const x = Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth - 12));
     const y = Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight - 12));
@@ -378,6 +416,9 @@ export const Sidebar = ({
 
   const isConversationPinned = (conversationId: string): boolean =>
     pinnedConversationIds.includes(conversationId);
+
+  const isConversationArchived = (conversationId: string): boolean =>
+    archivedSet.has(conversationId);
 
   const toggleConversationPinned = (conversationId: string): void => {
     if (!conversationId.startsWith('dm:')) return;
@@ -397,6 +438,80 @@ export const Sidebar = ({
       event.preventDefault();
       onSelectConversation(conversationId);
     }
+  };
+
+  const renderConversationItem = (peer: Peer, archived = false) => {
+    const conversationId = `dm:${peer.deviceId}`;
+    const unread = unreadByConversation[conversationId] || 0;
+    const isPinned = isConversationPinned(conversationId);
+    const isOnline = onlinePeerIds.includes(peer.deviceId);
+    const statusText = isOnline
+      ? (peer.statusMessage || '').trim() || 'Online'
+      : 'Offline';
+    const previewText =
+      conversationPreviewById[conversationId] ||
+      (isOnline ? 'Sem mensagens ainda' : 'Offline');
+
+    return (
+      <div
+        key={peer.deviceId}
+        role="button"
+        tabIndex={0}
+        className={`conversation-item ${archived ? 'archived' : ''} ${
+          selectedConversationId === conversationId ? 'active' : ''
+        }`}
+        ref={(element) => {
+          itemRefs.current[peer.deviceId] = element;
+        }}
+        onClick={() => onSelectConversation(conversationId)}
+        onKeyDown={(event) => handleConversationKeyDown(event, conversationId)}
+        onContextMenu={(event) => openContextMenu(event, conversationId)}
+      >
+        <div className="conversation-meta">
+          <div className="avatar-presence-wrap">
+            <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} size={36} />
+            <span className={`presence-dot ${isOnline ? 'online' : 'offline'}`} />
+          </div>
+          <div className="conversation-text">
+            <Text weight="semibold">{peer.displayName}</Text>
+            <div className="conversation-submeta">
+              <Caption1 className="conversation-status-line">
+                <span className={`conversation-status-pill ${isOnline ? 'online' : 'offline'}`}>
+                  {statusText}
+                </span>
+              </Caption1>
+              <Caption1 className="conversation-preview conversation-preview-slot">
+                {typingByConversation[conversationId] ? (
+                  <TypingInline />
+                ) : (
+                  <span className="conversation-preview-text">{previewText}</span>
+                )}
+              </Caption1>
+            </div>
+          </div>
+        </div>
+        <div className="conversation-right">
+          {!archived && (
+            <button
+              type="button"
+              className={`conversation-pin-btn ${isPinned ? 'pinned' : ''}`}
+              title={isPinned ? 'Desfixar conversa' : 'Fixar conversa no topo'}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleConversationPinned(conversationId);
+              }}
+            >
+              <Pin20Regular />
+            </button>
+          )}
+          {unread > 0 && (
+            <Badge appearance="filled" color="danger">
+              {unread}
+            </Badge>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -521,76 +636,44 @@ export const Sidebar = ({
         {contactTopSpacerHeight > 0 && (
           <div style={{ height: contactTopSpacerHeight }} aria-hidden />
         )}
-        {visiblePeers.map((peer) => {
-          const conversationId = `dm:${peer.deviceId}`;
-          const unread = unreadByConversation[conversationId] || 0;
-          const isPinned = isConversationPinned(conversationId);
-          const isOnline = onlinePeerIds.includes(peer.deviceId);
-          const statusText = isOnline
-            ? (peer.statusMessage || '').trim() || 'Online'
-            : 'Offline';
-          const previewText =
-            conversationPreviewById[conversationId] ||
-            (isOnline ? 'Sem mensagens ainda' : 'Offline');
-          return (
-            <div
-              key={peer.deviceId}
-              role="button"
-              tabIndex={0}
-              className={`conversation-item ${selectedConversationId === conversationId ? 'active' : ''}`}
-              ref={(element) => {
-                itemRefs.current[peer.deviceId] = element;
-              }}
-              onClick={() => onSelectConversation(conversationId)}
-              onKeyDown={(event) => handleConversationKeyDown(event, conversationId)}
-              onContextMenu={(event) => openContextMenu(event, conversationId)}
-            >
-              <div className="conversation-meta">
-                <div className="avatar-presence-wrap">
-                  <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} size={36} />
-                  <span className={`presence-dot ${isOnline ? 'online' : 'offline'}`} />
-                </div>
-                <div className="conversation-text">
-                  <Text weight="semibold">{peer.displayName}</Text>
-                  <div className="conversation-submeta">
-                    <Caption1 className="conversation-status-line">
-                      <span className={`conversation-status-pill ${isOnline ? 'online' : 'offline'}`}>
-                        {statusText}
-                      </span>
-                    </Caption1>
-                    <Caption1 className="conversation-preview conversation-preview-slot">
-                      {typingByConversation[conversationId] ? (
-                        <TypingInline />
-                      ) : (
-                        <span className="conversation-preview-text">{previewText}</span>
-                      )}
-                    </Caption1>
-                  </div>
-                </div>
-              </div>
-              <div className="conversation-right">
-                <button
-                  type="button"
-                  className={`conversation-pin-btn ${isPinned ? 'pinned' : ''}`}
-                  title={isPinned ? 'Desfixar conversa' : 'Fixar conversa no topo'}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleConversationPinned(conversationId);
-                  }}
-                >
-                  <Pin20Regular />
-                </button>
-                {unread > 0 && (
-                  <Badge appearance="filled" color="danger">
-                    {unread}
-                  </Badge>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        {visiblePeers.map((peer) => renderConversationItem(peer))}
         {contactBottomSpacerHeight > 0 && (
           <div style={{ height: contactBottomSpacerHeight }} aria-hidden />
+        )}
+        {totalArchivedCount > 0 && (
+          <div className="archived-conversations-block">
+            <button
+              type="button"
+              className={`archived-conversations-toggle ${archivedOpen ? 'open' : ''}`}
+              onClick={() => setArchivedOpen((current) => !current)}
+              aria-expanded={archivedOpen}
+            >
+              <span className="archived-conversations-label">
+                <Box20Regular />
+                <span>Arquivadas</span>
+              </span>
+              <span className="archived-conversations-meta">
+                <span>{totalArchivedCount}</span>
+                {archivedUnreadCount > 0 && (
+                  <Badge appearance="filled" color="danger">
+                    {archivedUnreadCount}
+                  </Badge>
+                )}
+                {archivedOpen ? <ChevronUp20Regular /> : <ChevronDown20Regular />}
+              </span>
+            </button>
+            {archivedOpen && (
+              <div className="archived-conversations-list">
+                {archivedPeers.length > 0 ? (
+                  archivedPeers.map((peer) => renderConversationItem(peer, true))
+                ) : (
+                  <Caption1 className="archived-conversations-empty">
+                    Nenhuma conversa arquivada corresponde à pesquisa.
+                  </Caption1>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -612,7 +695,8 @@ export const Sidebar = ({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          {contextMenu.conversationId.startsWith('dm:') && (
+          {contextMenu.conversationId.startsWith('dm:') &&
+            !isConversationArchived(contextMenu.conversationId) && (
             <button
               type="button"
               className="chat-context-item"
@@ -628,6 +712,34 @@ export const Sidebar = ({
                 {isConversationPinned(contextMenu.conversationId)
                   ? 'Desfixar do topo'
                   : 'Fixar no topo'}
+              </span>
+            </button>
+          )}
+          {contextMenu.conversationId.startsWith('dm:') && (
+            <button
+              type="button"
+              className="chat-context-item"
+              onClick={() => {
+                const conversationId = contextMenu.conversationId;
+                if (isConversationArchived(conversationId)) {
+                  void onUnarchiveConversation(conversationId);
+                } else {
+                  void onArchiveConversation(conversationId);
+                }
+                setContextMenu(null);
+              }}
+            >
+              <span className="menu-item-icon">
+                {isConversationArchived(contextMenu.conversationId) ? (
+                  <ArchiveArrowBack20Regular />
+                ) : (
+                  <Box20Regular />
+                )}
+              </span>
+              <span>
+                {isConversationArchived(contextMenu.conversationId)
+                  ? 'Desarquivar conversa'
+                  : 'Arquivar conversa'}
               </span>
             </button>
           )}

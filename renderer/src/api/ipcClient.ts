@@ -43,6 +43,7 @@ export interface MessageRow {
   replyToPreviewText: string | null;
   replyToFileName: string | null;
   forwardedFromMessageId?: string | null;
+  editedAt?: number | null;
   createdAt: number;
   localOnly?: boolean;
 }
@@ -60,6 +61,28 @@ export interface AnnouncementReactionSummary {
   myReaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
 }
 
+export interface MessageReactionDetail {
+  deviceId: string;
+  displayName: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂';
+  updatedAt: number;
+}
+
+export interface AnnouncementReadSummary {
+  count: number;
+  readByMe: boolean;
+}
+
+export interface AnnouncementReadDetail {
+  deviceId: string;
+  displayName: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  readAt: number;
+}
+
 export interface RelaySettings {
   automatic: boolean;
   host: string;
@@ -72,6 +95,7 @@ export interface StartupSettings {
   supported: boolean;
   openAtLogin: boolean;
   downloadsDir: string;
+  doNotDisturbUntil: number;
 }
 
 export type AppEvent =
@@ -103,7 +127,8 @@ export type AppEvent =
     }
   | { type: 'navigate'; conversationId: string }
   | { type: 'message:reactions'; messageId: string; summary: AnnouncementReactionSummary }
-  | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary };
+  | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary }
+  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary };
 
 interface LanternApi {
   getPlatform: () =>
@@ -130,7 +155,7 @@ interface LanternApi {
     port?: number;
   }) => Promise<RelaySettings>;
   forceRelayRediscovery: () => Promise<RelaySettings>;
-  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => Promise<StartupSettings>;
+  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) => Promise<StartupSettings>;
   sendText: (
     peerId: string,
     text: string,
@@ -144,12 +169,14 @@ interface LanternApi {
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<MessageRow>;
+  editMessage: (conversationId: string, messageId: string, text: string) => Promise<MessageRow | null>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<MessageRow | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
+  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
   toggleMessageFavorite: (
     conversationId: string,
     messageId: string,
@@ -169,12 +196,19 @@ interface LanternApi {
   getConversationPreviews: (conversationIds: string[]) => Promise<Record<string, string>>;
   getMessageReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
   getAnnouncementReactions: (messageIds: string[]) => Promise<Record<string, AnnouncementReactionSummary>>;
+  getAnnouncementReactionDetails: (messageId: string) => Promise<MessageReactionDetail[]>;
+  getAnnouncementReadSummary: (messageIds: string[]) => Promise<Record<string, AnnouncementReadSummary>>;
+  getAnnouncementReadDetails: (messageId: string) => Promise<AnnouncementReadDetail[]>;
+  exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<{ canceled: boolean; filePath: string | null }>;
   setActiveConversation: (conversationId: string) => Promise<void>;
   markConversationRead: (conversationId: string) => Promise<void>;
   markConversationUnread: (conversationId: string) => Promise<void>;
+  archiveConversation: (conversationId: string) => Promise<number>;
+  unarchiveConversation: (conversationId: string) => Promise<number>;
   clearConversation: (conversationId: string) => Promise<void>;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Promise<Record<string, number>>;
+  getArchivedConversationIds: () => Promise<string[]>;
   addManualPeer: (address: string, port: number) => Promise<void>;
   pickFile: () => Promise<string | null>;
   pickFiles: () => Promise<string[]>;
@@ -217,7 +251,7 @@ export const ipcClient = {
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     window.lantern.updateRelaySettings(input),
   forceRelayRediscovery: () => window.lantern.forceRelayRediscovery(),
-  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
+  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     window.lantern.updateStartupSettings(input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendText(peerId, text, replyTo),
@@ -228,6 +262,8 @@ export const ipcClient = {
     window.lantern.sendFile(peerId, filePath, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     window.lantern.forwardMessageToPeer(targetPeerId, sourceMessageId),
+  editMessage: (conversationId: string, messageId: string, text: string) =>
+    window.lantern.editMessage(conversationId, messageId, text),
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -235,6 +271,8 @@ export const ipcClient = {
   ) => window.lantern.reactToMessage(conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     window.lantern.deleteMessageForEveryone(conversationId, messageId),
+  deleteMessageForMe: (conversationId: string, messageId: string) =>
+    window.lantern.deleteMessageForMe(conversationId, messageId),
   toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
     window.lantern.toggleMessageFavorite(conversationId, messageId, favorite),
   getMessageFavorites: (messageIds: string[]) => window.lantern.getMessageFavorites(messageIds),
@@ -257,13 +295,24 @@ export const ipcClient = {
     window.lantern.getMessageReactions(messageIds),
   getAnnouncementReactions: (messageIds: string[]) =>
     window.lantern.getAnnouncementReactions(messageIds),
+  getAnnouncementReactionDetails: (messageId: string) =>
+    window.lantern.getAnnouncementReactionDetails(messageId),
+  getAnnouncementReadSummary: (messageIds: string[]) =>
+    window.lantern.getAnnouncementReadSummary(messageIds),
+  getAnnouncementReadDetails: (messageId: string) =>
+    window.lantern.getAnnouncementReadDetails(messageId),
+  exportConversation: (conversationId: string, format: 'txt' | 'html') =>
+    window.lantern.exportConversation(conversationId, format),
   setActiveConversation: (conversationId: string) => window.lantern.setActiveConversation(conversationId),
   markConversationRead: (conversationId: string) => window.lantern.markConversationRead(conversationId),
   markConversationUnread: (conversationId: string) => window.lantern.markConversationUnread(conversationId),
+  archiveConversation: (conversationId: string) => window.lantern.archiveConversation(conversationId),
+  unarchiveConversation: (conversationId: string) => window.lantern.unarchiveConversation(conversationId),
   clearConversation: (conversationId: string) => window.lantern.clearConversation(conversationId),
   forgetContactConversation: (conversationId: string) =>
     window.lantern.forgetContactConversation(conversationId),
   getConversations: () => window.lantern.getConversations(),
+  getArchivedConversationIds: () => window.lantern.getArchivedConversationIds(),
   addManualPeer: (address: string, port: number) => window.lantern.addManualPeer(address, port),
   pickFile: () => window.lantern.pickFile(),
   pickFiles: () => window.lantern.pickFiles(),

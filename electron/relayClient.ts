@@ -52,16 +52,24 @@ type RelayAnnouncementReactionsByMessage = Record<
   Record<string, RelayAnnouncementReactionValue>
 >;
 
+type RelayAnnouncementReadsByMessage = Record<string, Record<string, number>>;
+
 interface RelayAnnouncementSnapshotPayload {
   serverTime: number;
   frames: ProtocolFrame[];
   reactions?: RelayAnnouncementReactionsByMessage;
+  reads?: RelayAnnouncementReadsByMessage;
 }
 
 interface RelayAnnouncementReactionsPayload {
   serverTime: number;
   messageId: string;
   reactions: Record<string, RelayAnnouncementReactionValue>;
+}
+
+interface RelayAnnouncementReadsPayload {
+  serverTime: number;
+  reads: RelayAnnouncementReadsByMessage;
 }
 
 interface RelayEnvelope {
@@ -90,12 +98,14 @@ interface RelayClientCallbacks {
   onAnnouncementExpired?: (messageIds: string[]) => void;
   onAnnouncementSnapshot?: (
     frames: ProtocolFrame[],
-    reactions: RelayAnnouncementReactionsByMessage
+    reactions: RelayAnnouncementReactionsByMessage,
+    reads: RelayAnnouncementReadsByMessage
   ) => void;
   onAnnouncementReactions?: (
     messageId: string,
     reactions: Record<string, RelayAnnouncementReactionValue>
   ) => void;
+  onAnnouncementReads?: (reads: RelayAnnouncementReadsByMessage) => void;
   onConnectionState?: (state: RelayConnectionState) => void;
   onWarning?: (message: string) => void;
 }
@@ -361,6 +371,28 @@ const normalizeAnnouncementReactionsMap = (
       ) {
         normalizedByDevice[deviceId] = reactionText;
       }
+    }
+
+    result[messageId] = normalizedByDevice;
+  }
+  return result;
+};
+
+const normalizeAnnouncementReadsMap = (value: unknown): RelayAnnouncementReadsByMessage => {
+  const record = asRecord(value);
+  if (!record) return {};
+
+  const result: RelayAnnouncementReadsByMessage = {};
+  for (const [messageId, rawByDevice] of Object.entries(record)) {
+    if (typeof messageId !== 'string' || messageId.trim().length === 0) continue;
+    const byDevice = asRecord(rawByDevice);
+    if (!byDevice) continue;
+
+    const normalizedByDevice: Record<string, number> = {};
+    for (const [deviceId, readAt] of Object.entries(byDevice)) {
+      if (typeof deviceId !== 'string' || deviceId.trim().length === 0) continue;
+      if (typeof readAt !== 'number' || !Number.isFinite(readAt) || readAt <= 0) continue;
+      normalizedByDevice[deviceId] = Math.trunc(readAt);
     }
 
     result[messageId] = normalizedByDevice;
@@ -658,6 +690,30 @@ export class RelayClient {
     });
 
     return promise;
+  }
+
+  async markAnnouncementsRead(messageIds: string[], readAt = Date.now()): Promise<void> {
+    const cleanIds = Array.from(
+      new Set(
+        messageIds
+          .map((value) => (value || '').trim())
+          .filter((value) => value.length > 0)
+      )
+    );
+    if (cleanIds.length === 0) return;
+    await this.waitUntilReady(8_000);
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('Relay indisponível.');
+    }
+
+    this.sendEnvelope({
+      type: 'relay:announcement:read',
+      payload: {
+        messageIds: cleanIds,
+        readAt
+      }
+    });
   }
 
   private chooseEndpoint(): string {
@@ -1066,7 +1122,8 @@ export class RelayClient {
               )
           : [];
         const reactions = normalizeAnnouncementReactionsMap(payload?.reactions);
-        this.callbacks.onAnnouncementSnapshot?.(frames, reactions);
+        const reads = normalizeAnnouncementReadsMap(payload?.reads);
+        this.callbacks.onAnnouncementSnapshot?.(frames, reactions, reads);
         return;
       }
       case 'relay:announcement:reactions': {
@@ -1077,6 +1134,14 @@ export class RelayClient {
           [messageId]: payload?.reactions
         });
         this.callbacks.onAnnouncementReactions?.(messageId, reactions[messageId] || {});
+        return;
+      }
+      case 'relay:announcement:reads': {
+        const payload = asRecord(envelope.payload) as RelayAnnouncementReadsPayload | null;
+        const reads = normalizeAnnouncementReadsMap(payload?.reads);
+        if (Object.keys(reads).length > 0) {
+          this.callbacks.onAnnouncementReads?.(reads);
+        }
         return;
       }
       case 'relay:send:ack': {

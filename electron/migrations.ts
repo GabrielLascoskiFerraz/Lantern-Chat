@@ -29,11 +29,12 @@ export const runMigrations = (db: Database.Database): void => {
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
       peerDeviceId TEXT,
-	      title TEXT,
-	      createdAt INTEGER,
-	      updatedAt INTEGER,
-	      unreadCount INTEGER DEFAULT 0,
-	      lastReadAt INTEGER DEFAULT 0
+      title TEXT,
+      createdAt INTEGER,
+      updatedAt INTEGER,
+      unreadCount INTEGER DEFAULT 0,
+      lastReadAt INTEGER DEFAULT 0,
+      archivedAt INTEGER DEFAULT 0
 	    );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -58,6 +59,7 @@ export const runMigrations = (db: Database.Database): void => {
       replyToPreviewText TEXT,
       replyToFileName TEXT,
       forwardedFromMessageId TEXT,
+      editedAt INTEGER,
       createdAt INTEGER NOT NULL
     );
 
@@ -100,6 +102,21 @@ export const runMigrations = (db: Database.Database): void => {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS hidden_messages (
+      messageId TEXT PRIMARY KEY,
+      hiddenAt INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS announcement_reads (
+      messageId TEXT NOT NULL,
+      readerDeviceId TEXT NOT NULL,
+      readAt INTEGER NOT NULL,
+      PRIMARY KEY (messageId, readerDeviceId)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_announcement_reads_message
+      ON announcement_reads(messageId);
   `);
 
   const profileColumns = db.prepare('PRAGMA table_info(profile)').all() as Array<{ name: string }>;
@@ -115,6 +132,9 @@ export const runMigrations = (db: Database.Database): void => {
 	  const conversationColumns = db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>;
 	  if (!conversationColumns.some((column) => column.name === 'lastReadAt')) {
 	    db.exec('ALTER TABLE conversations ADD COLUMN lastReadAt INTEGER DEFAULT 0;');
+	  }
+	  if (!conversationColumns.some((column) => column.name === 'archivedAt')) {
+	    db.exec('ALTER TABLE conversations ADD COLUMN archivedAt INTEGER DEFAULT 0;');
 	  }
 	  db.exec(`
 	    UPDATE conversations
@@ -153,6 +173,9 @@ export const runMigrations = (db: Database.Database): void => {
   if (!messageColumns.some((column) => column.name === 'forwardedFromMessageId')) {
     db.exec('ALTER TABLE messages ADD COLUMN forwardedFromMessageId TEXT;');
   }
+  if (!messageColumns.some((column) => column.name === 'editedAt')) {
+    db.exec('ALTER TABLE messages ADD COLUMN editedAt INTEGER;');
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS message_favorites (
@@ -170,5 +193,17 @@ export const runMigrations = (db: Database.Database): void => {
     );
     CREATE INDEX IF NOT EXISTS idx_pending_message_reactions_message
       ON pending_message_reactions(messageId);
+    CREATE TABLE IF NOT EXISTS hidden_messages (
+      messageId TEXT PRIMARY KEY,
+      hiddenAt INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS announcement_reads (
+      messageId TEXT NOT NULL,
+      readerDeviceId TEXT NOT NULL,
+      readAt INTEGER NOT NULL,
+      PRIMARY KEY (messageId, readerDeviceId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_announcement_reads_message
+      ON announcement_reads(messageId);
   `);
 };

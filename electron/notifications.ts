@@ -8,12 +8,19 @@ interface NotificationAvatar {
 
 export class NotificationService {
   private muted = false;
+  private doNotDisturbUntil = 0;
   private readonly getWindow: () => BrowserWindow | null;
   private onNavigate: ((conversationId: string) => void) | null = null;
   private unreadAttentionCount = 0;
   private notificationIcon: Electron.NativeImage | null = null;
   private readonly overlayBadgeCache = new Map<string, Electron.NativeImage>();
   private readonly avatarNotificationIconCache = new Map<string, Electron.NativeImage>();
+  private readonly messageNotifications = new Map<
+    string,
+    { notification: Notification; createdAt: number; version: number }
+  >();
+  private readonly trackedNotificationMaxAgeMs = 24 * 60 * 60 * 1000;
+  private readonly trackedNotificationMaxCount = 300;
 
   constructor(getWindow: () => BrowserWindow | null) {
     this.getWindow = getWindow;
@@ -28,7 +35,11 @@ export class NotificationService {
   }
 
   isMuted(): boolean {
-    return this.muted;
+    return this.muted || (this.doNotDisturbUntil > 0 && Date.now() < this.doNotDisturbUntil);
+  }
+
+  setDoNotDisturbUntil(value: number): void {
+    this.doNotDisturbUntil = Number.isFinite(value) && value > Date.now() ? Math.trunc(value) : 0;
   }
 
   setNavigateHandler(handler: (conversationId: string) => void): void {
@@ -50,19 +61,21 @@ export class NotificationService {
     senderName: string,
     preview: string,
     conversationId: string,
-    avatar?: NotificationAvatar
+    avatar?: NotificationAvatar,
+    messageId?: string,
+    version = 0
   ): void {
-    if (this.muted) {
+    if (this.isMuted()) {
       return;
     }
-    this.showNotification(senderName, preview.slice(0, 120), conversationId, avatar);
+    this.showNotification(senderName, preview.slice(0, 120), conversationId, avatar, messageId, version);
   }
 
-  notifyAnnouncement(preview: string, avatar?: NotificationAvatar): void {
-    if (this.muted) {
+  notifyAnnouncement(preview: string, avatar?: NotificationAvatar, messageId?: string, version = 0): void {
+    if (this.isMuted()) {
       return;
     }
-    this.showNotification('📢 Anúncio', preview.slice(0, 120), 'announcements', avatar);
+    this.showNotification('📢 Anúncio', preview.slice(0, 120), 'announcements', avatar, messageId, version);
   }
 
   notifyReaction(
@@ -71,22 +84,67 @@ export class NotificationService {
     conversationId: string,
     avatar?: NotificationAvatar
   ): void {
-    if (this.muted) {
+    if (this.isMuted()) {
       return;
     }
     const safeReaction = (reaction || '').trim() || '👍';
     this.showNotification(senderName, `Reagiu ${safeReaction} à sua mensagem`, conversationId, avatar);
   }
 
+  closeMessageNotification(messageId: string): void {
+    const key = (messageId || '').trim();
+    if (!key) return;
+    const tracked = this.messageNotifications.get(key);
+    if (!tracked) return;
+    try {
+      tracked.notification.close();
+    } catch {
+      // O Windows pode falhar se a notificação já foi removida pelo sistema.
+    }
+    this.messageNotifications.delete(key);
+  }
+
+  replaceMessageNotification(
+    messageId: string,
+    senderName: string,
+    preview: string,
+    conversationId: string,
+    avatar?: NotificationAvatar,
+    version = Date.now()
+  ): boolean {
+    const key = (messageId || '').trim();
+    if (!key) return false;
+    const tracked = this.messageNotifications.get(key);
+    if (!tracked) return false;
+    if (version > 0 && tracked.version >= version) return false;
+    this.closeMessageNotification(key);
+    if (this.isMuted()) return true;
+    this.showNotification(
+      senderName,
+      preview.slice(0, 120),
+      conversationId,
+      avatar,
+      key,
+      version
+    );
+    return true;
+  }
+
   private showNotification(
     title: string,
     body: string,
     conversationId: string,
-    avatar?: NotificationAvatar
+    avatar?: NotificationAvatar,
+    messageId?: string,
+    version = 0
   ): void {
     let shown = false;
+    const notificationKey = (messageId || '').trim();
     try {
       if (Notification.isSupported()) {
+        if (notificationKey) {
+          this.closeMessageNotification(notificationKey);
+        }
         const icon = avatar ? this.createAvatarNotificationIcon(avatar) || this.notificationIcon : this.notificationIcon;
         const notif = new Notification({
           title,
@@ -101,13 +159,27 @@ export class NotificationService {
           shown = true;
         });
         notif.on('failed', () => {
+          if (notificationKey) {
+            this.messageNotifications.delete(notificationKey);
+          }
           this.bumpAttention();
         });
         notif.show();
         shown = true;
+        if (notificationKey) {
+          this.messageNotifications.set(notificationKey, {
+            notification: notif,
+            createdAt: Date.now(),
+            version: Number.isFinite(version) && version > 0 ? Math.trunc(version) : 0
+          });
+          this.pruneTrackedNotifications();
+        }
       }
     } catch {
       shown = false;
+      if (notificationKey) {
+        this.messageNotifications.delete(notificationKey);
+      }
     }
 
     // Reforco visual para casos em que o toast nativo falha/silencia.
@@ -115,6 +187,24 @@ export class NotificationService {
 
     if (!shown) {
       return;
+    }
+  }
+
+  private pruneTrackedNotifications(): void {
+    const now = Date.now();
+    for (const [key, tracked] of this.messageNotifications.entries()) {
+      if (now - tracked.createdAt > this.trackedNotificationMaxAgeMs) {
+        this.messageNotifications.delete(key);
+      }
+    }
+
+    const overflow = this.messageNotifications.size - this.trackedNotificationMaxCount;
+    if (overflow <= 0) return;
+    const oldest = Array.from(this.messageNotifications.entries())
+      .sort((left, right) => left[1].createdAt - right[1].createdAt)
+      .slice(0, overflow);
+    for (const [key] of oldest) {
+      this.messageNotifications.delete(key);
     }
   }
 

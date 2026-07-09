@@ -200,6 +200,7 @@ export class MessageService {
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
       forwardedFromMessageId: options?.forwardedFromMessageId || null,
+      editedAt: null,
       createdAt
     };
 
@@ -259,6 +260,7 @@ export class MessageService {
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
       forwardedFromMessageId: null,
+      editedAt: null,
       createdAt
     };
 
@@ -318,6 +320,7 @@ export class MessageService {
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
       forwardedFromMessageId: options?.forwardedFromMessageId || null,
+      editedAt: null,
       createdAt
     };
 

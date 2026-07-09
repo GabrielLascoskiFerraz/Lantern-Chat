@@ -26,6 +26,7 @@ import {
   ClearConversationPayload,
   DeletePayload,
   DbMessage,
+  EditMessagePayload,
   FileChunkPayload,
   FileCompletePayload,
   ForgetPeerPayload,
@@ -72,6 +73,7 @@ class LanternApp {
   private readonly syncNotificationMaxAgeMs = 2 * 60 * 1000;
   private readonly peerUnreachableFailureThreshold = 2;
   private readonly peerUnreachableFailureWindowMs = 15_000;
+  private readonly editWindowMs = 10 * 60 * 1000;
   private syncActivityCount = 0;
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
@@ -568,8 +570,8 @@ class LanternApp {
       onAnnouncementExpired: (messageIds) => {
         this.handleRelayAnnouncementExpiry(messageIds);
       },
-      onAnnouncementSnapshot: (frames, reactions) => {
-        void this.handleRelayAnnouncementSnapshot(frames, reactions).catch((error) => {
+      onAnnouncementSnapshot: (frames, reactions, reads) => {
+        void this.handleRelayAnnouncementSnapshot(frames, reactions, reads).catch((error) => {
           if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
             console.warn(
               '[Lantern][Relay] falha ao aplicar snapshot de anúncios:',
@@ -580,6 +582,9 @@ class LanternApp {
       },
       onAnnouncementReactions: (messageId, reactions) => {
         this.handleRelayAnnouncementReactionUpdate(messageId, reactions);
+      },
+      onAnnouncementReads: (reads) => {
+        this.handleRelayAnnouncementReadUpdate(reads);
       },
       onConnectionState: ({ connected, endpoint }) => {
         this.emitEvent({
@@ -634,6 +639,7 @@ class LanternApp {
       this.mainWindow?.focus();
       this.emitEvent({ type: 'navigate', conversationId });
     });
+    this.notifications.setDoNotDisturbUntil(this.db.getDoNotDisturbUntil());
 
     const ipc = registerIpc(this.mainWindow, {
       getProfile: () => this.db.getProfile(),
@@ -656,10 +662,14 @@ class LanternApp {
       sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
       forwardMessageToPeer: (targetPeerId, sourceMessageId) =>
         this.forwardMessageToPeer(targetPeerId, sourceMessageId),
+      editMessage: (conversationId, messageId, text) =>
+        this.editMessage(conversationId, messageId, text),
       reactToMessage: (conversationId, messageId, reaction) =>
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
         this.deleteMessageForEveryone(conversationId, messageId),
+      deleteMessageForMe: async (conversationId, messageId) =>
+        this.deleteMessageForMe(conversationId, messageId),
       toggleMessageFavorite: (conversationId, messageId, favorite) =>
         this.toggleMessageFavorite(conversationId, messageId, favorite),
       getMessageFavorites: (messageIds) => this.db.getMessageFavoritesMap(messageIds),
@@ -674,12 +684,22 @@ class LanternApp {
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
       getAnnouncementReactions: (messageIds) =>
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
+      getAnnouncementReactionDetails: (messageId) =>
+        this.db.getMessageReactionDetails(messageId),
+      getAnnouncementReadSummary: (messageIds) =>
+        this.db.getAnnouncementReadSummary(messageIds, this.profile.deviceId),
+      getAnnouncementReadDetails: (messageId) =>
+        this.db.getAnnouncementReadDetails(messageId),
+      exportConversation: (conversationId, format) =>
+        this.exportConversation(conversationId, format),
       setActiveConversation: (conversationId) => {
         this.activeConversationId = conversationId;
         this.markConversationRead(conversationId);
       },
       markConversationRead: (conversationId) => this.markConversationRead(conversationId),
       markConversationUnread: (conversationId) => this.markConversationUnread(conversationId),
+      archiveConversation: (conversationId) => this.db.setConversationArchived(conversationId, true),
+      unarchiveConversation: (conversationId) => this.db.setConversationArchived(conversationId, false),
       clearConversation: (conversationId) => this.clearConversation(conversationId),
       forgetContactConversation: (conversationId) => this.forgetContactConversation(conversationId),
       getConversations: () =>
@@ -688,6 +708,7 @@ class LanternApp {
             .getConversations()
             .map((conversation) => [conversation.id, conversation.unreadCount])
         ),
+      getArchivedConversationIds: () => this.db.getArchivedConversationIds(),
       addManualPeer: (address, port) => {
         try {
           this.updateRelaySettings({
@@ -893,34 +914,44 @@ class LanternApp {
     supported: boolean;
     openAtLogin: boolean;
     downloadsDir: string;
+    doNotDisturbUntil: number;
   } {
     const supported = this.isStartupSettingsSupported();
     const downloadsDir =
       this.fileTransfer?.getAttachmentsDir?.() || this.getConfiguredAttachmentsDir();
+    const doNotDisturbUntil = this.db.getDoNotDisturbUntil();
     if (!supported) {
-      return { supported: false, openAtLogin: false, downloadsDir };
+      return { supported: false, openAtLogin: false, downloadsDir, doNotDisturbUntil };
     }
     const settings = app.getLoginItemSettings();
     return {
       supported: true,
       openAtLogin: Boolean(settings.openAtLogin),
-      downloadsDir
+      downloadsDir,
+      doNotDisturbUntil
     };
   }
 
   private updateStartupSettings(input: {
     openAtLogin: boolean;
     downloadsDir?: string;
+    doNotDisturbUntil?: number;
   }): {
     supported: boolean;
     openAtLogin: boolean;
     downloadsDir: string;
+    doNotDisturbUntil: number;
   } {
     const defaultAttachmentsDir = this.getDefaultAttachmentsDir();
     const requestedDir = (input.downloadsDir || '').trim();
     if (requestedDir.length > 0) {
       const nextDir = this.db.setAttachmentsDirectory(requestedDir, defaultAttachmentsDir);
       this.fileTransfer.setAttachmentsDir(nextDir);
+    }
+
+    if (typeof input.doNotDisturbUntil === 'number') {
+      const nextDndUntil = this.db.setDoNotDisturbUntil(input.doNotDisturbUntil);
+      this.notifications.setDoNotDisturbUntil(nextDndUntil);
     }
 
     const supported = this.isStartupSettingsSupported();
@@ -1365,6 +1396,11 @@ class LanternApp {
     const readMessageIds = this.db.markConversationRead(conversationId);
     this.emitConversationUnread(conversationId);
 
+    if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+      void this.markVisibleAnnouncementsRead().catch(() => undefined);
+      return;
+    }
+
     if (!conversationId.startsWith('dm:')) {
       return;
     }
@@ -1393,6 +1429,22 @@ class LanternApp {
     }
   }
 
+  private async markVisibleAnnouncementsRead(): Promise<void> {
+    const messageIds = this.db.getActiveAnnouncementMessageIds();
+    if (messageIds.length === 0) return;
+    const readAt = Date.now();
+    const touched = this.db.markAnnouncementRead(messageIds, this.profile.deviceId, readAt);
+    const summaryByMessage = this.db.getAnnouncementReadSummary(touched, this.profile.deviceId);
+    for (const messageId of touched) {
+      this.emitEvent({
+        type: 'announcement:reads',
+        messageId,
+        summary: summaryByMessage[messageId] || { count: 0, readByMe: false }
+      });
+    }
+    await this.relay?.markAnnouncementsRead(touched, readAt).catch(() => undefined);
+  }
+
   private markConversationUnread(conversationId: string): void {
     this.db.markConversationUnread(conversationId);
     this.emitConversationUnread(conversationId);
@@ -1419,7 +1471,7 @@ class LanternApp {
   private notifyIncomingIfNeeded(
     message: Pick<
       DbMessage,
-      'type' | 'bodyText' | 'conversationId' | 'senderDeviceId' | 'createdAt' | 'fileName'
+      'messageId' | 'type' | 'bodyText' | 'conversationId' | 'senderDeviceId' | 'createdAt' | 'fileName'
     >,
     source: 'live' | 'sync',
     sender?: Pick<Peer, 'displayName' | 'avatarEmoji' | 'avatarBg'>
@@ -1440,7 +1492,9 @@ class LanternApp {
             emoji: sender.avatarEmoji,
             bg: sender.avatarBg
           }
-        : undefined);
+        : undefined,
+        message.messageId,
+        message.createdAt);
       return;
     }
 
@@ -1454,7 +1508,9 @@ class LanternApp {
               emoji: sender.avatarEmoji,
               bg: sender.avatarBg
             }
-          : undefined
+          : undefined,
+        message.messageId,
+        message.createdAt
       );
       return;
     }
@@ -1470,9 +1526,44 @@ class LanternApp {
               emoji: sender.avatarEmoji,
               bg: sender.avatarBg
             }
-          : undefined
+          : undefined,
+        message.messageId,
+        message.createdAt
       );
     }
+  }
+
+  private replaceIncomingNotificationIfTracked(
+    message: DbMessage,
+    sender?: Pick<Peer, 'displayName' | 'avatarEmoji' | 'avatarBg'>
+  ): void {
+    if (message.direction !== 'in' || message.deletedAt) {
+      return;
+    }
+    if (message.type !== 'text' && message.type !== 'announcement') {
+      return;
+    }
+    const senderName =
+      message.type === 'announcement'
+        ? '📢 Anúncio editado'
+        : sender?.displayName || 'Mensagem editada';
+    const preview =
+      message.type === 'announcement'
+        ? message.bodyText || 'Anúncio editado'
+        : `Editou: ${message.bodyText || 'Mensagem'}`;
+    this.notifications.replaceMessageNotification(
+      message.messageId,
+      senderName,
+      preview,
+      message.conversationId,
+      sender
+        ? {
+            emoji: sender.avatarEmoji,
+            bg: sender.avatarBg
+          }
+        : undefined,
+      message.editedAt || Date.now()
+    );
   }
 
   private beginSyncActivity(): void {
@@ -1799,6 +1890,206 @@ class LanternApp {
     return nextFavorite;
   }
 
+  private async editMessage(
+    conversationId: string,
+    messageId: string,
+    text: string
+  ): Promise<DbMessage | null> {
+    const existing = this.db.getMessageById(messageId);
+    if (!existing) return null;
+    if (existing.conversationId !== conversationId) {
+      throw new Error('Mensagem não pertence a esta conversa.');
+    }
+    if (existing.type !== 'text') {
+      throw new Error('Somente mensagens de texto podem ser editadas.');
+    }
+    if (existing.direction !== 'out' || existing.senderDeviceId !== this.profile.deviceId) {
+      throw new Error('Somente mensagens enviadas por você podem ser editadas.');
+    }
+    if (existing.deletedAt) {
+      throw new Error('Não é possível editar uma mensagem apagada.');
+    }
+    if (Date.now() - existing.createdAt > this.editWindowMs) {
+      throw new Error('O prazo para editar esta mensagem terminou.');
+    }
+
+    const editedAt = Date.now();
+    const updated = this.db.updateMessageText(messageId, text, editedAt);
+    if (!updated) return null;
+
+    this.emitEvent({ type: 'message:updated', message: updated });
+
+    const peer = this.getPeerFromConversationId(conversationId);
+    if (peer) {
+      const frame: ProtocolFrame<EditMessagePayload> = {
+        type: 'chat:edit',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: peer.deviceId,
+        createdAt: editedAt,
+        payload: {
+          targetMessageId: messageId,
+          text: updated.bodyText || '',
+          editedAt
+        }
+      };
+      try {
+        await this.sendToPeer(peer, frame);
+      } catch {
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'info',
+          message: 'Contato offline. A edição será sincronizada quando ele voltar.'
+        });
+      }
+    }
+
+    return updated;
+  }
+
+  private deleteMessageForMe(conversationId: string, messageId: string): DbMessage | null {
+    const existing = this.db.getMessageById(messageId);
+    if (!existing) return null;
+    if (existing.conversationId !== conversationId) {
+      throw new Error('Mensagem não pertence a esta conversa.');
+    }
+    const hidden = this.db.hideMessageForMe(messageId);
+    if (!hidden) return null;
+    this.notifications.closeMessageNotification(messageId);
+    this.emitEvent({
+      type: 'message:removed',
+      conversationId,
+      messageId
+    });
+    return hidden;
+  }
+
+  private async exportConversation(
+    conversationId: string,
+    format: 'txt' | 'html'
+  ): Promise<{ canceled: boolean; filePath: string | null }> {
+    const normalizedFormat = format === 'html' ? 'html' : 'txt';
+    const messages = this.db.getExportMessages(conversationId);
+    const conversationName =
+      conversationId === ANNOUNCEMENTS_CONVERSATION_ID
+        ? 'Anuncios'
+        : this.getPeerFromConversationId(conversationId)?.displayName ||
+          this.db.getCachedPeerById(conversationId.replace(/^dm:/, ''))?.displayName ||
+          'Conversa';
+    const safeName = conversationName.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'conversa';
+    const defaultPath = path.join(
+      app.getPath('documents'),
+      `Lantern-${safeName}-${new Date().toISOString().slice(0, 10)}.${normalizedFormat}`
+    );
+    const saveDialogOptions = {
+      title: normalizedFormat === 'html' ? 'Exportar conversa em HTML' : 'Exportar conversa em TXT',
+      defaultPath,
+      filters:
+        normalizedFormat === 'html'
+          ? [{ name: 'HTML', extensions: ['html'] }]
+          : [{ name: 'Texto', extensions: ['txt'] }]
+    };
+    const result = this.mainWindow
+      ? await dialog.showSaveDialog(this.mainWindow, saveDialogOptions)
+      : await dialog.showSaveDialog(saveDialogOptions);
+    if (result.canceled || !result.filePath) {
+      return { canceled: true, filePath: null };
+    }
+
+    const content =
+      normalizedFormat === 'html'
+        ? this.renderConversationExportHtml(conversationName, messages)
+        : this.renderConversationExportText(conversationName, messages);
+    await fs.promises.writeFile(result.filePath, content, 'utf8');
+    return { canceled: false, filePath: result.filePath };
+  }
+
+  private senderNameForExport(message: DbMessage): string {
+    if (message.senderDeviceId === this.profile.deviceId) {
+      return 'Você';
+    }
+    const peer = this.peersById.get(message.senderDeviceId) || this.db.getCachedPeerById(message.senderDeviceId);
+    return peer?.displayName || `Contato ${message.senderDeviceId.slice(0, 6)}`;
+  }
+
+  private renderConversationExportText(title: string, messages: DbMessage[]): string {
+    const lines = [`Lantern - ${title}`, `Exportado em ${new Date().toLocaleString('pt-BR')}`, ''];
+    for (const message of messages) {
+      const time = new Date(message.createdAt).toLocaleString('pt-BR');
+      const sender = this.senderNameForExport(message);
+      const edited = message.editedAt ? ' (editada)' : '';
+      const body =
+        message.type === 'file'
+          ? `[arquivo] ${message.fileName || 'Arquivo'} (${message.fileSize || 0} bytes)`
+          : message.bodyText || '';
+      const reply = message.replyToPreviewText || message.replyToFileName
+        ? ` | resposta a: ${message.replyToFileName || message.replyToPreviewText}`
+        : '';
+      lines.push(`[${time}] ${sender}${edited}${reply}: ${body}`);
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private renderConversationExportHtml(title: string, messages: DbMessage[]): string {
+    const rows = messages
+      .map((message) => {
+        const time = new Date(message.createdAt).toLocaleString('pt-BR');
+        const sender = this.senderNameForExport(message);
+        const body =
+          message.type === 'file'
+            ? `[arquivo] ${message.fileName || 'Arquivo'} (${message.fileSize || 0} bytes)`
+            : message.bodyText || '';
+        const reply = message.replyToPreviewText || message.replyToFileName
+          ? `<div class="reply">Resposta a: ${this.escapeHtml(message.replyToFileName || message.replyToPreviewText || '')}</div>`
+          : '';
+        const edited = message.editedAt ? '<span class="edited">editada</span>' : '';
+        return `<article class="msg ${message.direction}">
+          <header><strong>${this.escapeHtml(sender)}</strong><time>${this.escapeHtml(time)}</time>${edited}</header>
+          ${reply}
+          <div class="body">${this.escapeHtml(body).replace(/\n/g, '<br>')}</div>
+        </article>`;
+      })
+      .join('\n');
+    return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>${this.escapeHtml(title)} - Lantern</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f7fb;color:#1f2937;margin:0;padding:24px}
+    main{max-width:920px;margin:0 auto}
+    h1{font-size:22px;margin:0 0 4px}
+    .meta{color:#667085;margin:0 0 18px}
+    .msg{background:#fff;border:1px solid #d9e0ea;border-radius:14px;padding:10px 12px;margin:8px 0;box-shadow:0 2px 8px rgba(15,23,42,.04)}
+    .msg.out{margin-left:72px;background:#eef3ff}
+    .msg.in{margin-right:72px}
+    header{display:flex;gap:8px;align-items:center;font-size:13px;color:#344054}
+    time{color:#667085}
+    .edited{font-size:11px;color:#667085}
+    .reply{border-left:3px solid #5b6ee1;padding-left:8px;color:#667085;font-size:12px;margin:6px 0}
+    .body{white-space:pre-wrap;line-height:1.42;margin-top:6px}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${this.escapeHtml(title)}</h1>
+    <p class="meta">Exportado pelo Lantern em ${this.escapeHtml(new Date().toLocaleString('pt-BR'))}</p>
+    ${rows}
+  </main>
+</body>
+</html>`;
+  }
+
   private async deleteMessageForEveryone(
     conversationId: string,
     messageId: string
@@ -1823,6 +2114,7 @@ class LanternApp {
 
     const updated = this.db.deleteMessageForEveryone(messageId);
     if (!updated) return null;
+    this.notifications.closeMessageNotification(messageId);
 
     const peerIdFromConversation = conversationId.startsWith('dm:')
       ? conversationId.slice(3)
@@ -2084,6 +2376,7 @@ class LanternApp {
           replyToPreviewText: replyTo?.previewText || null,
           replyToFileName: replyTo?.fileName || null,
           forwardedFromMessageId,
+          editedAt: null,
           createdAt
         };
 
@@ -2151,6 +2444,7 @@ class LanternApp {
           replyToPreviewText: replyTo?.previewText || null,
           replyToFileName: replyTo?.fileName || null,
           forwardedFromMessageId: null,
+          editedAt: null,
           createdAt
         };
 
@@ -2266,6 +2560,7 @@ class LanternApp {
         }
         const updated = this.db.deleteMessageForEveryone(payload.targetMessageId);
         if (updated) {
+          this.notifications.closeMessageNotification(updated.messageId);
           this.emitEvent({
             type: 'message:removed',
             conversationId: updated.conversationId,
@@ -2279,6 +2574,36 @@ class LanternApp {
             limit: 100_000,
             fullResync: true
           }).catch(() => undefined);
+        }
+        break;
+      }
+      case 'chat:edit': {
+        const payload = frame.payload as EditMessagePayload;
+        const targetMessageId = (payload.targetMessageId || '').trim();
+        const text = (payload.text || '').trim();
+        if (!targetMessageId || !text) {
+          break;
+        }
+        const existing = this.db.getMessageById(targetMessageId);
+        if (!existing) {
+          if (deliverySource === 'live' && activePeer) {
+            void this.requestSync(activePeer, {
+              force: true,
+              since: 0,
+              limit: 100_000,
+              fullResync: true
+            }).catch(() => undefined);
+          }
+          break;
+        }
+        if (existing.senderDeviceId !== frame.from || existing.deletedAt || existing.type !== 'text') {
+          break;
+        }
+        const editedAt = this.normalizeInboundCreatedAt(payload.editedAt || frame.createdAt);
+        const updated = this.db.updateMessageText(targetMessageId, text, editedAt);
+        if (updated) {
+          this.emitEvent({ type: 'message:updated', message: updated });
+          this.replaceIncomingNotificationIfTracked(updated, activePeer);
         }
         break;
       }
@@ -2363,6 +2688,7 @@ class LanternApp {
             }
 
             if (result.row.deletedAt) {
+              this.notifications.closeMessageNotification(result.row.messageId);
               this.emitEvent({
                 type: 'message:removed',
                 conversationId: result.row.conversationId,
@@ -2395,6 +2721,14 @@ class LanternApp {
               this.applyQueuedReactionsForMessage(result.row);
             } else {
               this.emitEvent({ type: 'message:updated', message: result.row });
+              if (result.row.editedAt) {
+                const syncSender =
+                  this.peersById.get(result.row.senderDeviceId) ||
+                  (activePeer && activePeer.deviceId === result.row.senderDeviceId
+                    ? activePeer
+                    : undefined);
+                this.replaceIncomingNotificationIfTracked(result.row, syncSender);
+              }
               this.applyQueuedReactionsForMessage(result.row);
             }
 
@@ -2495,6 +2829,7 @@ class LanternApp {
           replyToFileName: replyTo?.fileName || existingMessage?.replyToFileName || null,
           forwardedFromMessageId:
             forwardedFromMessageId || existingMessage?.forwardedFromMessageId || null,
+          editedAt: existingMessage?.editedAt || null,
           createdAt
         };
 
@@ -2797,7 +3132,8 @@ class LanternApp {
 
   private async handleRelayAnnouncementSnapshot(
     frames: ProtocolFrame[],
-    reactions: Record<string, Record<string, '👍' | '👎' | '❤️' | '😢' | '😊' | '😂'>> = {}
+    reactions: Record<string, Record<string, '👍' | '👎' | '❤️' | '😢' | '😊' | '😂'>> = {},
+    reads: Record<string, Record<string, number>> = {}
   ): Promise<void> {
     const announceFrames = frames
       .filter((frame) => frame.type === 'announce')
@@ -2839,6 +3175,7 @@ class LanternApp {
             replyToPreviewText: replyTo?.previewText || null,
             replyToFileName: replyTo?.fileName || null,
             forwardedFromMessageId: null,
+            editedAt: null,
             createdAt
           });
         }
@@ -2874,6 +3211,21 @@ class LanternApp {
         });
       }
     }
+
+    const readTouched = this.db.replaceAnnouncementReads(reads, { replaceAll: true });
+    if (readTouched.length > 0) {
+      const summaryByMessage = this.db.getAnnouncementReadSummary(
+        readTouched,
+        this.profile.deviceId
+      );
+      for (const messageId of readTouched) {
+        this.emitEvent({
+          type: 'announcement:reads',
+          messageId,
+          summary: summaryByMessage[messageId] || { count: 0, readByMe: false }
+        });
+      }
+    }
   }
 
   private handleRelayAnnouncementReactionUpdate(
@@ -2896,6 +3248,26 @@ class LanternApp {
       messageId,
       summary
     });
+  }
+
+  private handleRelayAnnouncementReadUpdate(
+    reads: Record<string, Record<string, number>>
+  ): void {
+    const touched = this.db.replaceAnnouncementReads(reads, { replaceAll: false });
+    if (touched.length === 0) {
+      return;
+    }
+    const summaryByMessage = this.db.getAnnouncementReadSummary(
+      touched,
+      this.profile.deviceId
+    );
+    for (const messageId of touched) {
+      this.emitEvent({
+        type: 'announcement:reads',
+        messageId,
+        summary: summaryByMessage[messageId] || { count: 0, readByMe: false }
+      });
+    }
   }
 }
 

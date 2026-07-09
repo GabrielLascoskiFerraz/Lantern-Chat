@@ -26,7 +26,9 @@ export const Shell = () => {
     hasMoreHistoryByConversation,
     loadingOlderByConversation,
     announcementReactionsByMessage,
+    announcementReadsByMessage,
     favoriteByMessageId,
+    archivedConversationIds,
     conversationPreviewById,
     recentMessageIds,
     unreadByConversation,
@@ -38,12 +40,17 @@ export const Shell = () => {
     sendAnnouncement,
     sendFile,
     forwardMessageToPeer,
+    editMessage,
     reactToMessage,
     toggleMessageFavorite,
     getFavoriteMessages,
     deleteMessageForEveryone,
+    deleteMessageForMe,
+    exportConversation,
     resyncConversation,
     markConversationUnread,
+    archiveConversation,
+    unarchiveConversation,
     clearConversation,
     forgetContactConversation,
     openFile,
@@ -119,6 +126,7 @@ export const Shell = () => {
           forwardTargets={peers}
           onlinePeerIds={onlinePeerIds}
           reactionsByMessageId={announcementReactionsByMessage}
+          readsByMessageId={announcementReadsByMessage}
           onSend={(text, replyTo) => sendAnnouncement(text, replyTo)}
           relayConnected={Boolean(relaySettings?.connected)}
           onForwardMessage={async (targetPeerIds, sourceMessageId) => {
@@ -179,6 +187,7 @@ export const Shell = () => {
         onReactToMessage={(messageId, reaction) =>
           reactToMessage(conversationId, messageId, reaction)
         }
+        onEditMessage={(messageId, text) => editMessage(conversationId, messageId, text)}
         onToggleFavoriteMessage={(messageId, favorite) =>
           toggleMessageFavorite(conversationId, messageId, favorite)
         }
@@ -186,6 +195,10 @@ export const Shell = () => {
         onDeleteMessage={(messageId) =>
           deleteMessageForEveryone(conversationId, messageId)
         }
+        onDeleteMessageForMe={(messageId) =>
+          deleteMessageForMe(conversationId, messageId)
+        }
+        onExportConversation={(format) => exportConversation(conversationId, format)}
         onResyncConversation={() => resyncConversation(conversationId)}
         onClearConversation={() => clearConversation(conversationId)}
         onForgetContactConversation={() => forgetContactConversation(conversationId)}
@@ -244,10 +257,13 @@ export const Shell = () => {
         unreadByConversation={unreadByConversation}
         conversationPreviewById={conversationPreviewById}
         typingByConversation={typingByConversation}
+        archivedConversationIds={archivedConversationIds}
         onlinePeerIds={onlinePeerIds}
         onSearch={setSearch}
         onSelectConversation={(id) => void selectConversation(id)}
         onMarkConversationUnread={markConversationUnread}
+        onArchiveConversation={archiveConversation}
+        onUnarchiveConversation={unarchiveConversation}
         onClearConversation={clearConversation}
         onForgetContactConversation={forgetContactConversation}
         onOpenSettings={() => setSettingsOpen(true)}

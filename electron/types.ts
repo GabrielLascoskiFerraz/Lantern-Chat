@@ -4,6 +4,7 @@ export type MessageType =
   | 'chat:ack'
   | 'chat:react'
   | 'chat:delete'
+  | 'chat:edit'
   | 'chat:clear'
   | 'chat:forget'
   | 'chat:sync:request'
@@ -66,6 +67,12 @@ export interface DeletePayload {
   targetMessageId: string;
 }
 
+export interface EditMessagePayload {
+  targetMessageId: string;
+  text: string;
+  editedAt: number;
+}
+
 export interface ClearConversationPayload {
   scope: 'dm';
 }
@@ -103,6 +110,7 @@ export interface SyncMessagePayload {
   replyToPreviewText: string | null;
   replyToFileName: string | null;
   forwardedFromMessageId?: string | null;
+  editedAt?: number | null;
   createdAt: number;
 }
 
@@ -166,6 +174,7 @@ export interface DbMessage {
   replyToPreviewText: string | null;
   replyToFileName: string | null;
   forwardedFromMessageId?: string | null;
+  editedAt?: number | null;
   createdAt: number;
 }
 
@@ -178,11 +187,34 @@ export interface ConversationRow {
   updatedAt: number;
   unreadCount: number;
   lastReadAt: number;
+  archivedAt: number;
 }
 
 export interface AnnouncementReactionSummary {
   counts: Partial<Record<'👍' | '👎' | '❤️' | '😢' | '😊' | '😂', number>>;
   myReaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
+}
+
+export interface MessageReactionDetail {
+  deviceId: string;
+  displayName: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂';
+  updatedAt: number;
+}
+
+export interface AnnouncementReadSummary {
+  count: number;
+  readByMe: boolean;
+}
+
+export interface AnnouncementReadDetail {
+  deviceId: string;
+  displayName: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  readAt: number;
 }
 
 export type AppEvent =
@@ -214,4 +246,5 @@ export type AppEvent =
     }
   | { type: 'navigate'; conversationId: string }
   | { type: 'message:reactions'; messageId: string; summary: AnnouncementReactionSummary }
-  | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary };
+  | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary }
+  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary };

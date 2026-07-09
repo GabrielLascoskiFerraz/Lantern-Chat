@@ -7,6 +7,7 @@ import {
 import {
   ArrowReply20Regular,
   Attach20Regular,
+  ClipboardEdit20Regular,
   ClipboardPaste20Regular,
   Copy20Regular,
   Cut20Regular,
@@ -21,16 +22,24 @@ interface MessageComposerProps {
   disabled?: boolean;
   autoFocusKey?: string;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onSubmitEdit?: (text: string) => Promise<void>;
   onTypingChange?: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onPaste?: () => void;
   replyDraft?: ComposerReplyDraft | null;
   onCancelReply?: () => void;
+  editDraft?: ComposerEditDraft | null;
+  onCancelEdit?: () => void;
   placeholder: string;
 }
 
 interface ComposerReplyDraft extends MessageReplyReference {
   senderLabel: string;
+}
+
+interface ComposerEditDraft {
+  messageId: string;
+  text: string;
 }
 
 interface PendingAttachmentInfo {
@@ -453,11 +462,14 @@ export const MessageComposer = ({
   disabled,
   autoFocusKey,
   onSend,
+  onSubmitEdit,
   onTypingChange,
   onSendFile,
   onPaste,
   replyDraft,
   onCancelReply,
+  editDraft,
+  onCancelEdit,
   placeholder
 }: MessageComposerProps) => {
   const [text, setText] = useState('');
@@ -489,6 +501,7 @@ export const MessageComposer = ({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dragDepthRef = useRef(0);
   const dragOverlayVisibleRef = useRef(false);
+  const editing = Boolean(editDraft);
   const appendPendingFiles = useCallback((filePaths: string[]) => {
     if (filePaths.length === 0) return;
     setPendingFilePaths((current) => {
@@ -700,6 +713,23 @@ export const MessageComposer = ({
     window.addEventListener('keydown', onEscape, true);
     return () => window.removeEventListener('keydown', onEscape, true);
   }, [emojiOpen]);
+
+  useEffect(() => {
+    if (!editDraft) return;
+    setText(editDraft.text);
+    setPendingFilePaths([]);
+    setPendingAttachmentByPath({});
+    setPendingAttachmentPreviewByPath({});
+    setRemovingFilePaths([]);
+    const frame = window.requestAnimationFrame(() => {
+      const textarea = getComposerTextarea();
+      if (!textarea) return;
+      textarea.focus();
+      const end = editDraft.text.length;
+      textarea.setSelectionRange(end, end);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editDraft?.messageId]);
 
   useEffect(() => {
     if (disabled) return;
@@ -979,6 +1009,18 @@ export const MessageComposer = ({
 
   const submit = async (): Promise<void> => {
     const trimmed = text.trim();
+    if (editing) {
+      if (!trimmed || disabled || isSubmitting || !onSubmitEdit) return;
+      setIsSubmitting(true);
+      try {
+        await onSubmitEdit(trimmed);
+        setText('');
+        onCancelEdit?.();
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
     if ((!trimmed && pendingFilePaths.length === 0) || disabled || isSubmitting) return;
     if (typingTimeoutRef.current) {
       window.clearTimeout(typingTimeoutRef.current);
@@ -1249,10 +1291,11 @@ export const MessageComposer = ({
   };
 
   const showAttachmentPanel =
-    pendingFilePaths.length > 0 ||
-    pasteProgressItems.length > 0 ||
-    isPastingFiles ||
-    Boolean(pasteFeedback);
+    !editing &&
+    (pendingFilePaths.length > 0 ||
+      pasteProgressItems.length > 0 ||
+      isPastingFiles ||
+      Boolean(pasteFeedback));
   const replyPreviewText = useMemo(() => {
     if (!replyDraft) return '';
     if (replyDraft.type === 'file') {
@@ -1278,6 +1321,29 @@ export const MessageComposer = ({
             onClick={() => onCancelReply?.()}
             aria-label="Cancelar resposta"
             title="Cancelar resposta"
+          >
+            <Dismiss12Regular />
+          </button>
+        </div>
+      )}
+      {editDraft && (
+        <div className="composer-reply-draft composer-edit-draft" role="status">
+          <span className="composer-reply-draft-icon" aria-hidden>
+            <ClipboardEdit20Regular />
+          </span>
+          <div className="composer-reply-draft-content">
+            <span className="composer-reply-draft-title">Editando mensagem</span>
+            <span className="composer-reply-draft-preview">Você pode editar por até 10 minutos.</span>
+          </div>
+          <button
+            type="button"
+            className="composer-reply-draft-cancel"
+            onClick={() => {
+              setText('');
+              onCancelEdit?.();
+            }}
+            aria-label="Cancelar edição"
+            title="Cancelar edição"
           >
             <Dismiss12Regular />
           </button>
@@ -1392,10 +1458,10 @@ export const MessageComposer = ({
       )}
       <div className="composer-row">
         <div className="emoji-picker-wrapper" ref={emojiPickerRef}>
-          <Button
-            appearance="subtle"
-            icon={<Emoji20Regular />}
-            disabled={disabled}
+            <Button
+              appearance="subtle"
+              icon={<Emoji20Regular />}
+              disabled={disabled}
             onClick={() => setEmojiOpen((open) => !open)}
           />
           <div className={`emoji-picker ${emojiOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!emojiOpen}>
@@ -1495,7 +1561,7 @@ export const MessageComposer = ({
               icon={<Attach20Regular />}
               onClick={() => void pickAttachment()}
               appearance="secondary"
-              disabled={disabled || isSubmitting}
+              disabled={disabled || isSubmitting || editing}
             >
               Anexar
             </Button>
@@ -1506,7 +1572,7 @@ export const MessageComposer = ({
             appearance="primary"
             disabled={disabled || isSubmitting || (!text.trim() && pendingFilePaths.length === 0)}
           >
-            Enviar
+            {editing ? 'Salvar' : 'Enviar'}
           </Button>
         </div>
       </div>

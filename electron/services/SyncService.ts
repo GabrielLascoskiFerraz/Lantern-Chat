@@ -27,6 +27,7 @@ export class SyncService {
         replyToPreviewText: row.replyToPreviewText,
         replyToFileName: row.replyToFileName,
         forwardedFromMessageId: row.forwardedFromMessageId || null,
+        editedAt: row.editedAt || null,
         createdAt: row.createdAt
       }));
   }
@@ -86,6 +87,7 @@ export class SyncService {
       replyToPreviewText: message.replyToPreviewText,
       replyToFileName: message.replyToFileName,
       forwardedFromMessageId: message.forwardedFromMessageId || null,
+      editedAt: message.editedAt || null,
       createdAt: normalizedCreatedAt
     };
 
@@ -109,7 +111,8 @@ export class SyncService {
         replyToType: message.replyToType,
         replyToPreviewText: message.replyToPreviewText,
         replyToFileName: message.replyToFileName,
-        forwardedFromMessageId: message.forwardedFromMessageId || null
+        forwardedFromMessageId: message.forwardedFromMessageId || null,
+        editedAt: message.editedAt || null
       });
       return { inserted: false, row: merged };
     }

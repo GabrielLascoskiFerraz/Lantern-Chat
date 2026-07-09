@@ -504,6 +504,70 @@ body {
   background: color-mix(in srgb, var(--teams-accent) 14%, transparent);
 }
 
+.conversation-item.archived {
+  min-height: 60px;
+  background: color-mix(in srgb, var(--teams-surface-2) 38%, transparent);
+}
+
+.archived-conversations-block {
+  border-top: 1px solid color-mix(in srgb, var(--teams-border) 92%, transparent);
+  background: color-mix(in srgb, var(--teams-surface-2) 52%, transparent);
+}
+
+.archived-conversations-toggle {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--teams-border) 88%, transparent);
+  background: transparent;
+  color: var(--teams-text);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease-standard),
+    color var(--motion-fast) var(--motion-ease-standard);
+}
+
+.archived-conversations-toggle:hover,
+.archived-conversations-toggle.open {
+  background: var(--teams-row-hover);
+}
+
+.archived-conversations-label,
+.archived-conversations-meta {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.archived-conversations-label {
+  gap: 8px;
+  font-weight: 650;
+}
+
+.archived-conversations-label svg {
+  color: var(--teams-muted);
+}
+
+.archived-conversations-meta {
+  gap: 7px;
+  color: var(--teams-muted);
+  font-size: 12px;
+}
+
+.archived-conversations-list {
+  animation: fadeUpIn 140ms var(--motion-ease-emphasized);
+}
+
+.archived-conversations-empty {
+  display: block;
+  padding: 12px 14px 14px;
+  color: var(--teams-muted);
+}
+
 .conversation-meta {
   display: flex;
   align-items: center;
@@ -1305,6 +1369,13 @@ body {
   height: 12px;
 }
 
+.message-edited-label {
+  display: inline-flex;
+  align-items: center;
+  color: color-mix(in srgb, var(--teams-muted) 86%, transparent);
+  font-size: 11px;
+}
+
 .bubble-time-icon.pending {
   color: color-mix(in srgb, #6a7081 82%, var(--teams-muted));
 }
@@ -1592,8 +1663,12 @@ body {
   order: 2;
 }
 
-.bubble-actions-row.out .fui-Button {
+.bubble-actions-row.out .reaction-trigger.edit-trigger {
   order: 3;
+}
+
+.bubble-actions-row.out .fui-Button {
+  order: 4;
 }
 
 .bubble-actions-row.in .reaction-trigger {
@@ -1616,8 +1691,12 @@ body {
   order: 5;
 }
 
-.bubble-actions-row.in .fui-Button {
+.bubble-actions-row.in .reaction-trigger.edit-trigger {
   order: 6;
+}
+
+.bubble-actions-row.in .fui-Button {
+  order: 7;
 }
 
 .bubble-block:hover .bubble-actions-row,
@@ -1871,6 +1950,34 @@ body {
   box-shadow: 0 1px 5px color-mix(in srgb, var(--teams-accent) 22%, transparent);
 }
 
+.announcement-reaction-details,
+.announcement-read-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 86%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--teams-surface) 86%, transparent);
+  color: var(--teams-muted);
+  padding: 0 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 120ms var(--motion-ease-emphasized);
+}
+
+.announcement-reaction-details:hover,
+.announcement-read-pill:hover {
+  background: color-mix(in srgb, var(--teams-accent) 10%, var(--teams-surface));
+  border-color: color-mix(in srgb, var(--teams-accent) 36%, var(--teams-border));
+  color: color-mix(in srgb, var(--teams-accent) 72%, var(--teams-text));
+  transform: translateY(-0.5px);
+}
+
 .bubble-actions-row .fui-Button {
   height: 24px;
   min-width: 0;
@@ -1950,6 +2057,44 @@ body {
   height: 14px;
 }
 
+.announcement-details-modal {
+  width: min(420px, 92vw) !important;
+}
+
+.announcement-details-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(360px, 58vh);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.announcement-details-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 84%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--teams-surface-2) 58%, transparent);
+  padding: 7px 9px;
+}
+
+.announcement-details-row strong,
+.announcement-details-row span {
+  min-width: 0;
+}
+
+.announcement-details-empty {
+  border: 1px dashed color-mix(in srgb, var(--teams-border) 82%, transparent);
+  border-radius: 12px;
+  color: var(--teams-muted);
+  padding: 14px;
+  text-align: center;
+}
+
 .announcement-text {
   white-space: pre-wrap;
   word-break: break-word;
@@ -2023,6 +2168,15 @@ body {
   border-radius: var(--teams-radius-sm);
   background: color-mix(in srgb, var(--teams-accent) 8%, var(--teams-surface));
   animation: fadeUpIn 160ms var(--motion-ease-emphasized);
+}
+
+.composer-edit-draft {
+  border-color: color-mix(in srgb, #f5c542 46%, var(--teams-border));
+  background: color-mix(in srgb, #ffe082 18%, var(--teams-surface));
+}
+
+.composer-edit-draft .composer-reply-draft-icon {
+  color: color-mix(in srgb, #ad6a00 72%, var(--teams-text));
 }
 
 .composer-reply-draft-icon {
@@ -2646,6 +2800,17 @@ body {
 
 .settings-field-backup {
   grid-column: 1 / -1;
+}
+
+.settings-field-dnd {
+  grid-column: 1 / -1;
+}
+
+.settings-dnd-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .settings-relay-toggle-row {

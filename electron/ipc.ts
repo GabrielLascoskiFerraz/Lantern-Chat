@@ -5,9 +5,12 @@ import path from 'node:path';
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
 import {
   AnnouncementReactionSummary,
+  AnnouncementReadDetail,
+  AnnouncementReadSummary,
   AppEvent,
   DbMessage,
   MessageReplyPayload,
+  MessageReactionDetail,
   Peer,
   Profile
 } from './types';
@@ -28,6 +31,7 @@ export interface IpcBindings {
     supported: boolean;
     openAtLogin: boolean;
     downloadsDir: string;
+    doNotDisturbUntil: number;
   };
   updateRelaySettings: (input: {
     automatic: boolean;
@@ -47,10 +51,11 @@ export interface IpcBindings {
     connected: boolean;
     endpoint: string | null;
   };
-  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) => {
+  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) => {
     supported: boolean;
     openAtLogin: boolean;
     downloadsDir: string;
+    doNotDisturbUntil: number;
   };
   sendText: (
     peerId: string,
@@ -65,12 +70,14 @@ export interface IpcBindings {
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<DbMessage>;
+  editMessage: (conversationId: string, messageId: string, text: string) => Promise<DbMessage | null>;
   reactToMessage: (
     conversationId: string,
     messageId: string,
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<DbMessage | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
+  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
   toggleMessageFavorite: (
     conversationId: string,
     messageId: string,
@@ -90,12 +97,19 @@ export interface IpcBindings {
   getConversationPreviews: (conversationIds: string[]) => Record<string, string>;
   getMessageReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
   getAnnouncementReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
+  getAnnouncementReactionDetails: (messageId: string) => MessageReactionDetail[];
+  getAnnouncementReadSummary: (messageIds: string[]) => Record<string, AnnouncementReadSummary>;
+  getAnnouncementReadDetails: (messageId: string) => AnnouncementReadDetail[];
+  exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<{ canceled: boolean; filePath: string | null }>;
   setActiveConversation: (conversationId: string) => void;
   markConversationRead: (conversationId: string) => void;
   markConversationUnread: (conversationId: string) => void;
+  archiveConversation: (conversationId: string) => number;
+  unarchiveConversation: (conversationId: string) => number;
   clearConversation: (conversationId: string) => void;
   forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Record<string, number>;
+  getArchivedConversationIds: () => string[];
   addManualPeer: (address: string, port: number) => void;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
   createLocalBackup: () => Promise<{ canceled: boolean; backupPath: string | null }>;
@@ -383,6 +397,11 @@ export const registerIpc = (
       bindings.forwardMessageToPeer(targetPeerId, sourceMessageId)
   );
   ipcMain.handle(
+    'lantern:editMessage',
+    (_event, conversationId: string, messageId: string, text: string) =>
+      bindings.editMessage(conversationId, messageId, text)
+  );
+  ipcMain.handle(
     'lantern:reactToMessage',
     (_event, conversationId: string, messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) =>
       bindings.reactToMessage(conversationId, messageId, reaction)
@@ -391,6 +410,11 @@ export const registerIpc = (
     'lantern:deleteMessageForEveryone',
     (_event, conversationId: string, messageId: string) =>
       bindings.deleteMessageForEveryone(conversationId, messageId)
+  );
+  ipcMain.handle(
+    'lantern:deleteMessageForMe',
+    (_event, conversationId: string, messageId: string) =>
+      bindings.deleteMessageForMe(conversationId, messageId)
   );
   ipcMain.handle(
     'lantern:toggleMessageFavorite',
@@ -428,6 +452,20 @@ export const registerIpc = (
   ipcMain.handle('lantern:getAnnouncementReactions', (_event, messageIds: string[]) =>
     bindings.getAnnouncementReactions(messageIds)
   );
+  ipcMain.handle('lantern:getAnnouncementReactionDetails', (_event, messageId: string) =>
+    bindings.getAnnouncementReactionDetails(messageId)
+  );
+  ipcMain.handle('lantern:getAnnouncementReadSummary', (_event, messageIds: string[]) =>
+    bindings.getAnnouncementReadSummary(messageIds)
+  );
+  ipcMain.handle('lantern:getAnnouncementReadDetails', (_event, messageId: string) =>
+    bindings.getAnnouncementReadDetails(messageId)
+  );
+  ipcMain.handle(
+    'lantern:exportConversation',
+    (_event, conversationId: string, format: 'txt' | 'html') =>
+      bindings.exportConversation(conversationId, format)
+  );
   ipcMain.handle('lantern:setActiveConversation', (_event, conversationId: string) =>
     bindings.setActiveConversation(conversationId)
   );
@@ -437,6 +475,12 @@ export const registerIpc = (
   ipcMain.handle('lantern:markConversationUnread', (_event, conversationId: string) =>
     bindings.markConversationUnread(conversationId)
   );
+  ipcMain.handle('lantern:archiveConversation', (_event, conversationId: string) =>
+    bindings.archiveConversation(conversationId)
+  );
+  ipcMain.handle('lantern:unarchiveConversation', (_event, conversationId: string) =>
+    bindings.unarchiveConversation(conversationId)
+  );
   ipcMain.handle('lantern:clearConversation', (_event, conversationId: string) =>
     bindings.clearConversation(conversationId)
   );
@@ -444,6 +488,9 @@ export const registerIpc = (
     bindings.forgetContactConversation(conversationId)
   );
   ipcMain.handle('lantern:getConversations', () => bindings.getConversations());
+  ipcMain.handle('lantern:getArchivedConversationIds', () =>
+    bindings.getArchivedConversationIds()
+  );
   ipcMain.handle('lantern:addManualPeer', (_event, address: string, port: number) =>
     bindings.addManualPeer(address, port)
   );

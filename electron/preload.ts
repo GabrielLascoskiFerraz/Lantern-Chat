@@ -15,7 +15,7 @@ const api = {
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     ipcRenderer.invoke('lantern:updateRelaySettings', input),
   forceRelayRediscovery: () => ipcRenderer.invoke('lantern:forceRelayRediscovery'),
-  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string }) =>
+  updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendText', peerId, text, replyTo),
@@ -27,6 +27,8 @@ const api = {
     ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     ipcRenderer.invoke('lantern:forwardMessageToPeer', targetPeerId, sourceMessageId),
+  editMessage: (conversationId: string, messageId: string, text: string) =>
+    ipcRenderer.invoke('lantern:editMessage', conversationId, messageId, text),
   reactToMessage: (
     conversationId: string,
     messageId: string,
@@ -34,6 +36,8 @@ const api = {
   ) => ipcRenderer.invoke('lantern:reactToMessage', conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     ipcRenderer.invoke('lantern:deleteMessageForEveryone', conversationId, messageId),
+  deleteMessageForMe: (conversationId: string, messageId: string) =>
+    ipcRenderer.invoke('lantern:deleteMessageForMe', conversationId, messageId),
   toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
     ipcRenderer.invoke('lantern:toggleMessageFavorite', conversationId, messageId, favorite),
   getMessageFavorites: (messageIds: string[]) =>
@@ -58,17 +62,30 @@ const api = {
     ipcRenderer.invoke('lantern:getMessageReactions', messageIds),
   getAnnouncementReactions: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getAnnouncementReactions', messageIds),
+  getAnnouncementReactionDetails: (messageId: string) =>
+    ipcRenderer.invoke('lantern:getAnnouncementReactionDetails', messageId),
+  getAnnouncementReadSummary: (messageIds: string[]) =>
+    ipcRenderer.invoke('lantern:getAnnouncementReadSummary', messageIds),
+  getAnnouncementReadDetails: (messageId: string) =>
+    ipcRenderer.invoke('lantern:getAnnouncementReadDetails', messageId),
+  exportConversation: (conversationId: string, format: 'txt' | 'html') =>
+    ipcRenderer.invoke('lantern:exportConversation', conversationId, format),
   setActiveConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:setActiveConversation', conversationId),
   markConversationRead: (conversationId: string) =>
     ipcRenderer.invoke('lantern:markConversationRead', conversationId),
   markConversationUnread: (conversationId: string) =>
     ipcRenderer.invoke('lantern:markConversationUnread', conversationId),
+  archiveConversation: (conversationId: string) =>
+    ipcRenderer.invoke('lantern:archiveConversation', conversationId),
+  unarchiveConversation: (conversationId: string) =>
+    ipcRenderer.invoke('lantern:unarchiveConversation', conversationId),
   clearConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:clearConversation', conversationId),
   forgetContactConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:forgetContactConversation', conversationId),
   getConversations: () => ipcRenderer.invoke('lantern:getConversations'),
+  getArchivedConversationIds: () => ipcRenderer.invoke('lantern:getArchivedConversationIds'),
   addManualPeer: (address: string, port: number) =>
     ipcRenderer.invoke('lantern:addManualPeer', address, port),
   pickFile: (): Promise<string | null> => ipcRenderer.invoke('lantern:pickFile'),

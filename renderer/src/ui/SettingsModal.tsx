@@ -37,6 +37,7 @@ interface SettingsModalProps {
     startup: {
       openAtLogin: boolean;
       downloadsDir: string;
+      doNotDisturbUntil: number;
     };
   }) => Promise<void>;
 }
@@ -60,6 +61,9 @@ export const SettingsModal = ({
   const [relayPortDraft, setRelayPortDraft] = useState(String(relaySettings?.port || 43190));
   const [openAtLogin, setOpenAtLogin] = useState(Boolean(startupSettings?.openAtLogin));
   const [downloadsDir, setDownloadsDir] = useState(startupSettings?.downloadsDir || '');
+  const [doNotDisturbUntil, setDoNotDisturbUntil] = useState(
+    Number(startupSettings?.doNotDisturbUntil || 0)
+  );
   const [backupBusy, setBackupBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [rediscoverBusy, setRediscoverBusy] = useState(false);
@@ -131,6 +135,7 @@ export const SettingsModal = ({
     setRelayPortDraft(String(relaySettings?.port || 43190));
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
+    setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
     setBackupBusy(false);
     setRestoreBusy(false);
     setRediscoverBusy(false);
@@ -155,6 +160,23 @@ export const SettingsModal = ({
       : 43190;
   const relayHostTrimmed = relayHost.trim();
   const relayConfigValid = relayAutomatic || relayHostTrimmed.length > 0;
+  const activeDoNotDisturbUntil =
+    doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
+  const doNotDisturbLabel = activeDoNotDisturbUntil
+    ? `Ativo até ${new Date(activeDoNotDisturbUntil).toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`
+    : 'Desativado';
+  const setDoNotDisturbFor = (milliseconds: number): void => {
+    setDoNotDisturbUntil(Date.now() + milliseconds);
+  };
+  const setDoNotDisturbUntilTomorrow = (): void => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(8, 0, 0, 0);
+    setDoNotDisturbUntil(tomorrow.getTime());
+  };
 
   const handleCreateBackup = async (): Promise<void> => {
     if (backupBusy || restoreBusy) return;
@@ -386,6 +408,33 @@ export const SettingsModal = ({
                 </div>
               </Field>
 
+              <Field className="settings-field settings-field-dnd" label="Não perturbe">
+                <div className="settings-relay-toggle-row">
+                  <Text size={200} className={`relay-connection-badge ${activeDoNotDisturbUntil ? 'online' : 'offline'}`}>
+                    {doNotDisturbLabel}
+                  </Text>
+                  {activeDoNotDisturbUntil > 0 && (
+                    <Button appearance="secondary" onClick={() => setDoNotDisturbUntil(0)}>
+                      Desativar
+                    </Button>
+                  )}
+                </div>
+                <div className="settings-dnd-actions">
+                  <Button appearance="secondary" onClick={() => setDoNotDisturbFor(15 * 60 * 1000)}>
+                    15 min
+                  </Button>
+                  <Button appearance="secondary" onClick={() => setDoNotDisturbFor(60 * 60 * 1000)}>
+                    1h
+                  </Button>
+                  <Button appearance="secondary" onClick={() => setDoNotDisturbUntilTomorrow()}>
+                    Até amanhã
+                  </Button>
+                </div>
+                <Text size={200} className="settings-relay-help">
+                  Silencia notificações nativas e sons pelo período escolhido.
+                </Text>
+              </Field>
+
               <Field className="settings-field" label="Pasta padrão de recebimento">
                 <div className="settings-relay-manual-grid">
                   <Input
@@ -461,7 +510,8 @@ export const SettingsModal = ({
                   },
                   startup: {
                     openAtLogin,
-                    downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || '')
+                    downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || ''),
+                    doNotDisturbUntil: activeDoNotDisturbUntil
                   }
                 })
               }
