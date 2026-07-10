@@ -169,6 +169,9 @@ export type AppEvent =
       peerId: string;
       transferred: number;
       total: number;
+      stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
+      attempt?: number;
+      detail?: string | null;
     }
   | { type: 'navigate'; conversationId: string }
   | { type: 'message:reactions'; messageId: string; summary: AnnouncementReactionSummary }

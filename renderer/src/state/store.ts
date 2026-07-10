@@ -20,6 +20,9 @@ interface TransferProgress {
   peerId: string;
   transferred: number;
   total: number;
+  stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
+  attempt?: number;
+  detail?: string | null;
 }
 
 interface UiToast {
@@ -982,7 +985,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
 
       if (event.type === 'transfer:progress') {
-        const completed = event.total > 0 && event.transferred >= event.total;
+        const completed =
+          event.stage === 'complete' ||
+          (!event.stage && event.total > 0 && event.transferred >= event.total);
         if (!completed) {
           clearTransferCleanupTimer(event.fileId);
         }

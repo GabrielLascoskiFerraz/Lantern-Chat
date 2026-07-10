@@ -157,7 +157,11 @@ export class FileTransferService {
     }
   }
 
-  startIncoming(fileOffer: FileOfferPayload, peerId: string): string {
+  startIncoming(
+    fileOffer: FileOfferPayload,
+    peerId: string,
+    resume?: { tempPath?: string | null; nextChunkIndex?: number; receivedBytes?: number }
+  ): string {
     const existing = this.incoming.get(fileOffer.fileId);
     if (existing) {
       if (
@@ -181,8 +185,35 @@ export class FileTransferService {
     }
 
     const safeName = sanitizeFileName(fileOffer.filename);
-    const finalPath = path.join(this.attachmentsDir, `${fileOffer.messageId}_${safeName}`);
-    const writeStream = fs.createWriteStream(finalPath, { flags: 'w' });
+    const defaultPath = path.join(this.attachmentsDir, `${fileOffer.messageId}_${safeName}`);
+    const resumePath = resume?.tempPath ? path.resolve(resume.tempPath) : defaultPath;
+    let resumeBytes = 0;
+    let resumeChunkIndex = 0;
+    try {
+      const stat = fs.statSync(resumePath);
+      const requestedBytes = Math.max(0, Math.trunc(resume?.receivedBytes || 0));
+      const safeBytes = Math.min(stat.size, requestedBytes || stat.size, fileOffer.size);
+      const chunkAlignedBytes = Math.floor(safeBytes / FILE_CHUNK_SIZE_BYTES) * FILE_CHUNK_SIZE_BYTES;
+      const requestedIndex = Math.max(0, Math.trunc(resume?.nextChunkIndex || 0));
+      const availableIndex = Math.floor(chunkAlignedBytes / FILE_CHUNK_SIZE_BYTES);
+      resumeChunkIndex = Math.min(
+        requestedIndex > 0 ? Math.min(requestedIndex, availableIndex) : availableIndex,
+        this.getChunkCount(fileOffer.size)
+      );
+      resumeBytes = resumeChunkIndex * FILE_CHUNK_SIZE_BYTES;
+      if (resumeBytes !== stat.size) {
+        fs.truncateSync(resumePath, resumeBytes);
+      }
+    } catch {
+      resumeBytes = 0;
+      resumeChunkIndex = 0;
+    }
+    fs.mkdirSync(path.dirname(resumePath), { recursive: true });
+    const writeStream = fs.createWriteStream(resumePath, { flags: resumeBytes > 0 ? 'a' : 'w' });
+    const receivedIndices = new Set<number>();
+    for (let index = 0; index < resumeChunkIndex; index += 1) {
+      receivedIndices.add(index);
+    }
 
     const transfer: IncomingTransfer = {
       fileId: fileOffer.fileId,
@@ -191,15 +222,15 @@ export class FileTransferService {
       totalBytes: fileOffer.size,
       expectedSha: fileOffer.sha256,
       totalChunks: null,
-      receivedChunks: 0,
-      receivedIndices: new Set<number>(),
-      transferredBytes: 0,
-      nextWriteIndex: 0,
+      receivedChunks: resumeChunkIndex,
+      receivedIndices,
+      transferredBytes: resumeBytes,
+      nextWriteIndex: resumeChunkIndex,
       pendingChunks: new Map<number, Buffer>(),
       pendingChunkBytes: 0,
       hash: createHash('sha256'),
       writeStream,
-      finalPath,
+      finalPath: resumePath,
       waitingDrain: false,
       drainListenerAttached: false,
       streamErrored: false,
@@ -215,7 +246,53 @@ export class FileTransferService {
 
     this.incoming.set(fileOffer.fileId, transfer);
 
-    return finalPath;
+    return resumePath;
+  }
+
+  async pauseIncoming(fileId: string): Promise<{
+    tempPath: string;
+    receivedBytes: number;
+    nextChunkIndex: number;
+    totalChunks: number;
+  } | null> {
+    const transfer = this.incoming.get(fileId);
+    if (!transfer) return null;
+    try {
+      await this.waitForWriteDrain(transfer);
+      await new Promise<void>((resolve) => {
+        transfer.writeStream.end(() => resolve());
+      });
+    } catch {
+      try {
+        transfer.writeStream.destroy();
+      } catch {
+        // O checkpoint abaixo usa apenas os bytes efetivamente presentes no disco.
+      }
+    }
+    this.incoming.delete(fileId);
+    transfer.pendingChunks.clear();
+    transfer.pendingChunkBytes = 0;
+    let receivedBytes = 0;
+    try {
+      receivedBytes = Math.min(fs.statSync(transfer.finalPath).size, transfer.totalBytes);
+    } catch {
+      receivedBytes = 0;
+    }
+    const nextChunkIndex = Math.floor(receivedBytes / FILE_CHUNK_SIZE_BYTES);
+    const alignedBytes = Math.min(receivedBytes, nextChunkIndex * FILE_CHUNK_SIZE_BYTES);
+    if (alignedBytes !== receivedBytes) {
+      try {
+        fs.truncateSync(transfer.finalPath, alignedBytes);
+      } catch {
+        // O próximo início descarta o checkpoint se o arquivo parcial não for válido.
+      }
+    }
+    return {
+      tempPath: transfer.finalPath,
+      receivedBytes: alignedBytes,
+      nextChunkIndex,
+      totalChunks: transfer.totalChunks || this.getChunkCount(transfer.totalBytes)
+    };
   }
 
   private hasWriteBacklog(transfer: IncomingTransfer): boolean {
@@ -436,7 +513,7 @@ export class FileTransferService {
       streamClosed = false;
     }
 
-    const digest = transfer.hash.digest('hex');
+    const digest = streamClosed ? await this.hashFileSha256(transfer.finalPath).catch(() => '') : '';
     const ok =
       streamClosed &&
       digest === transfer.expectedSha &&

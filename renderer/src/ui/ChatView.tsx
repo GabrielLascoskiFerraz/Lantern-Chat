@@ -76,7 +76,16 @@ interface ChatViewProps {
   messages: MessageRow[];
   reactionsByMessageId: Record<string, AnnouncementReactionSummary>;
   favoriteByMessageId: Record<string, boolean>;
-  transferByFileId: Record<string, { transferred: number; total: number }>;
+  transferByFileId: Record<
+    string,
+    {
+      transferred: number;
+      total: number;
+      stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
+      attempt?: number;
+      detail?: string | null;
+    }
+  >;
   hasMoreOlder: boolean;
   loadingOlder: boolean;
   recentMessageIds: Record<string, number>;
@@ -188,8 +197,31 @@ const imagePreviewStateCache = new Map<string, ImagePreviewState>();
 
 const transferStageLabel = (
   message: MessageRow,
-  progressPercent: number | null
+  progressPercent: number | null,
+  progress?: {
+    stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
+    attempt?: number;
+    detail?: string | null;
+  }
 ): { label: string; tone: 'neutral' | 'active' | 'done' | 'error' } => {
+  if (progress?.stage === 'reconnecting') {
+    return { label: 'Aguardando reconexão', tone: 'neutral' };
+  }
+  if (progress?.stage === 'retrying') {
+    return {
+      label: `Baixando novamente${progress.attempt ? ` · tentativa ${progress.attempt}` : ''}`,
+      tone: 'active'
+    };
+  }
+  if (progress?.stage === 'pending') {
+    return { label: progress.detail || 'Aguardando o Relay', tone: 'neutral' };
+  }
+  if (progress?.stage === 'failed') {
+    return { label: progress.detail || 'Falha definitiva', tone: 'error' };
+  }
+  if (progress?.stage === 'complete') {
+    return { label: 'Concluído', tone: 'done' };
+  }
   if (message.status === 'failed') {
     return { label: 'Falha no envio', tone: 'error' };
   }
@@ -1733,7 +1765,7 @@ export const ChatView = ({
             !transferInProgress &&
             (message.status === 'delivered' || message.status === 'read');
           const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
-          const transferStage = isFile ? transferStageLabel(message, progressPercent) : null;
+          const transferStage = isFile ? transferStageLabel(message, progressPercent, progress) : null;
           const hasReplyReference = Boolean(message.replyToMessageId);
           const replySenderLabel = message.replyToSenderDeviceId
             ? senderLabelForMessage(message.replyToSenderDeviceId)

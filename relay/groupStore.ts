@@ -907,7 +907,8 @@ export class GroupStore {
 
   async *createAttachmentChunkStream(
     fileId: string,
-    requesterDeviceId: string
+    requesterDeviceId: string,
+    startIndex = 0
   ): AsyncGenerator<RelayGroupFileChunk, void, void> {
     const metadata = this.attachmentsByFileId.get(fileId);
     if (!metadata || metadata.deletedAt || !metadata.uploadedAt || metadata.expiresAt <= Date.now()) {
@@ -923,8 +924,12 @@ export class GroupStore {
     }
     const filePath = this.attachmentPayloadPath(metadata.groupId, metadata.fileId);
     const total = Math.max(1, Math.ceil(metadata.fileSize / GROUP_FILE_CHUNK_SIZE_BYTES));
-    let index = 0;
-    const stream = fs.createReadStream(filePath, { highWaterMark: GROUP_FILE_CHUNK_SIZE_BYTES });
+    const normalizedStartIndex = Math.max(0, Math.min(Math.trunc(startIndex || 0), total));
+    let index = normalizedStartIndex;
+    const stream = fs.createReadStream(filePath, {
+      start: normalizedStartIndex * GROUP_FILE_CHUNK_SIZE_BYTES,
+      highWaterMark: GROUP_FILE_CHUNK_SIZE_BYTES
+    });
     try {
       for await (const rawChunk of stream) {
         const buffer = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
@@ -936,7 +941,7 @@ export class GroupStore {
         };
         index += 1;
       }
-      if (metadata.fileSize === 0) {
+      if (metadata.fileSize === 0 && normalizedStartIndex === 0) {
         yield {
           fileId,
           index: 0,
@@ -947,6 +952,31 @@ export class GroupStore {
     } finally {
       stream.destroy();
     }
+  }
+
+  getAttachmentStats(): {
+    retainedCount: number;
+    retainedBytes: number;
+    activeUploads: number;
+    pendingRecipients: number;
+  } {
+    let retainedCount = 0;
+    let retainedBytes = 0;
+    let pendingRecipients = 0;
+    for (const metadata of this.attachmentsByFileId.values()) {
+      if (metadata.deletedAt || !metadata.uploadedAt || metadata.expiresAt <= Date.now()) continue;
+      retainedCount += 1;
+      retainedBytes += Math.max(0, metadata.fileSize || 0);
+      pendingRecipients += metadata.recipients.filter(
+        (deviceId) => !metadata.receivedByDeviceId[deviceId]
+      ).length;
+    }
+    return {
+      retainedCount,
+      retainedBytes,
+      activeUploads: this.uploadsByFileId.size,
+      pendingRecipients
+    };
   }
 
   markAttachmentReceived(fileId: string, deviceId: string): RelayGroupAttachmentMetadata | null {

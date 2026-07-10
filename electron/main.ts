@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
   APP_ID,
+  FILE_CHUNK_SIZE_BYTES,
   getAttachmentsDir
 } from './config';
 import { DbService } from './db';
@@ -90,8 +91,15 @@ class LanternApp {
     string,
     { fileId: string; groupId: string; messageId: string; senderDeviceId: string }
   >();
+  private readonly groupFileDownloadRequestIdByFileId = new Map<string, string>();
+  private readonly groupFileDownloadCompletionByFileId = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void }
+  >();
   private readonly groupFileDownloadTimeoutByRequestId = new Map<string, NodeJS.Timeout>();
+  private readonly groupFileDownloadRetryTimerByFileId = new Map<string, NodeJS.Timeout>();
   private readonly groupFileDownloadStartTimeoutMs = 20_000;
+  private readonly groupFileDownloadMaxRetries = 3;
   private readonly groupFileUploadsInFlight = new Set<string>();
   private readonly directFileRequestAtByMessageId = new Map<string, number>();
   private readonly directFileRequestInFlight = new Set<string>();
@@ -282,6 +290,7 @@ class LanternApp {
             ).run(restoredDeviceId, currentDeviceId);
 
             db.prepare(`DELETE FROM app_settings WHERE key = 'pending.peerOps'`).run();
+            db.prepare('DELETE FROM pending_peer_operations').run();
           });
           tx();
         } else {
@@ -634,6 +643,7 @@ class LanternApp {
           endpoint
         });
         if (!connected) {
+          void this.pauseGroupFileDownloadsForDisconnect();
           this.knownOnlinePeerIds.clear();
           if (this.presence.clearOnlinePeers()) {
             this.emitEvent({ type: 'peers:updated', peers: this.getVisibleOnlinePeers() });
@@ -1946,6 +1956,9 @@ class LanternApp {
     if (pending.length === 0) return;
 
     for (const operation of pending) {
+      if (operation.nextAttemptAt > Date.now()) {
+        break;
+      }
       let frame: ProtocolFrame;
       if (operation.type === 'chat:clear' && 'scope' in operation.payload) {
         frame = {
@@ -1984,7 +1997,11 @@ class LanternApp {
       try {
         await this.sendToPeer(peer, frame);
         this.db.removePendingPeerOperation(operation.id);
-      } catch {
+      } catch (error) {
+        this.db.markPendingPeerOperationFailed(
+          operation.id,
+          error instanceof Error ? error.message : String(error)
+        );
         break;
       }
     }
@@ -2120,6 +2137,7 @@ class LanternApp {
   ): Promise<DbMessage | null> {
     const targetMessage = this.db.getMessageById(messageId);
     if (!targetMessage) return null;
+    const reactionUpdatedAt = Date.now();
 
     const groupId = this.groupIdFromConversationId(conversationId);
     if (groupId) {
@@ -2127,7 +2145,8 @@ class LanternApp {
         messageId,
         this.profile.deviceId,
         reaction,
-        this.profile.deviceId
+        this.profile.deviceId,
+        reactionUpdatedAt
       );
       this.emitEvent({ type: 'message:reactions', messageId, summary });
       try {
@@ -2135,7 +2154,7 @@ class LanternApp {
           groupId,
           targetMessageId: messageId,
           reaction,
-          updatedAt: Date.now()
+          updatedAt: reactionUpdatedAt
         });
       } catch {
         this.emitEvent({
@@ -2153,7 +2172,8 @@ class LanternApp {
       messageId,
       this.profile.deviceId,
       reaction,
-      this.profile.deviceId
+      this.profile.deviceId,
+      reactionUpdatedAt
     );
     this.emitEvent({
       type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
@@ -2161,14 +2181,25 @@ class LanternApp {
       summary
     });
 
-    const peer = this.getPeerFromConversationId(conversationId);
-    if (peer) {
+    if (conversationId.startsWith('dm:')) {
+      const peerId = conversationId.slice(3).trim();
+      if (!peerId) return targetMessage;
+      const peer = this.getPeerFromConversationId(conversationId);
+      if (!peer) {
+        this.enqueuePendingReactionOperation(peerId, messageId, reaction);
+        this.emitEvent({
+          type: 'ui:toast',
+          level: 'info',
+          message: 'Contato offline. A reação será sincronizada quando ele voltar.'
+        });
+        return targetMessage;
+      }
       const frame: ProtocolFrame<ReactPayload> = {
         type: 'chat:react',
         messageId: randomUUID(),
         from: this.profile.deviceId,
         to: peer.deviceId,
-        createdAt: Date.now(),
+        createdAt: reactionUpdatedAt,
         payload: {
           targetMessageId: messageId,
           reaction
@@ -2947,7 +2978,8 @@ class LanternApp {
           payload.targetMessageId,
           frame.from,
           payload.reaction,
-          this.profile.deviceId
+          this.profile.deviceId,
+          this.normalizeInboundCreatedAt(frame.createdAt)
         );
         this.emitEvent({
           type: isAnnouncementReaction ? 'announcement:reactions' : 'message:reactions',
@@ -4007,63 +4039,186 @@ class LanternApp {
     const groupId = typeof metadata.groupId === 'string' ? metadata.groupId : '';
     const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
     const senderDeviceId = typeof metadata.senderDeviceId === 'string' ? metadata.senderDeviceId : '';
+    const totalBytes =
+      typeof metadata.fileSize === 'number' && Number.isFinite(metadata.fileSize)
+        ? Math.max(0, Math.trunc(metadata.fileSize))
+        : 0;
     if (!fileId || !groupId || !messageId || senderDeviceId === this.profile.deviceId) {
       return;
     }
     const message = this.db.getMessageById(messageId);
     if (this.hasUsableLocalAttachment(message)) {
+      this.clearGroupFileDownloadRetry(fileId);
       await this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
       return;
     }
-    if (message) {
-      const waiting = this.db.markIncomingFileForRetry(message.messageId);
-      if (waiting) {
-        this.emitEvent({ type: 'message:updated', message: waiting });
-      }
-    }
-    if (Array.from(this.groupFileDownloadByRequestId.values()).some((item) => item.fileId === fileId)) {
+
+    // group.message.created e group.attachment.available chegam em sequência e
+    // podem tentar baixar o mesmo arquivo. O marcador precisa existir antes do
+    // primeiro await para eliminar essa corrida.
+    const existingCompletion = this.groupFileDownloadCompletionByFileId.get(fileId);
+    if (existingCompletion) {
+      await existingCompletion.promise;
       return;
     }
-    this.db.upsertGroupAttachmentDownload({
-      fileId,
-      groupId,
-      messageId,
-      status: 'pending',
-      localPath: null,
-      receivedAt: null,
-      updatedAt: Date.now()
-    });
-    const requestId = await this.relay?.requestGroupFile(fileId).catch(() => null);
-    if (!requestId) {
-      this.db.updateMessageStatus(messageId, 'failed');
+
+    let resolveCompletion!: () => void;
+    const completion = {
+      promise: new Promise<void>((resolve) => {
+        resolveCompletion = resolve;
+      }),
+      resolve: () => resolveCompletion()
+    };
+    this.groupFileDownloadCompletionByFileId.set(fileId, completion);
+
+    try {
+      const previous = this.db.getGroupAttachmentDownload(fileId);
+      let tempPath = previous?.tempPath || null;
+      let receivedBytes = 0;
+      let nextChunkIndex = 0;
+      if (tempPath && fs.existsSync(tempPath)) {
+        try {
+          const stat = fs.statSync(tempPath);
+          const safeSize = totalBytes > 0 ? Math.min(stat.size, totalBytes) : stat.size;
+          receivedBytes = Math.floor(safeSize / FILE_CHUNK_SIZE_BYTES) * FILE_CHUNK_SIZE_BYTES;
+          nextChunkIndex = Math.floor(receivedBytes / FILE_CHUNK_SIZE_BYTES);
+          if (stat.size !== receivedBytes) fs.truncateSync(tempPath, receivedBytes);
+        } catch {
+          tempPath = null;
+          receivedBytes = 0;
+          nextChunkIndex = 0;
+        }
+      }
+      const retryCount = Math.max(0, previous?.retryCount || 0);
+      if (message) {
+        const waiting = this.db.markIncomingFileForRetry(message.messageId);
+        if (waiting) {
+          this.emitEvent({ type: 'message:updated', message: waiting });
+        }
+      }
       this.db.upsertGroupAttachmentDownload({
         fileId,
         groupId,
         messageId,
-        status: 'failed',
+        status: retryCount > 0 ? 'retrying' : 'pending',
         localPath: null,
+        tempPath,
+        totalBytes,
+        receivedBytes,
+        nextChunkIndex,
+        totalChunks: totalBytes > 0 ? Math.max(1, Math.ceil(totalBytes / FILE_CHUNK_SIZE_BYTES)) : 1,
+        retryCount,
+        lastError: previous?.lastError || null,
+        lastAttemptAt: Date.now(),
+        requestId: null,
         receivedAt: null,
         updatedAt: Date.now()
       });
-      const failed = this.db.getMessageById(messageId);
-      if (failed) {
-        this.emitEvent({ type: 'message:updated', message: failed });
-        this.emitEvent({
-          type: 'message:status',
-          messageId,
-          conversationId: failed.conversationId,
-          status: 'failed'
-        });
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'receive',
+        fileId,
+        messageId,
+        peerId: senderDeviceId,
+        transferred: receivedBytes,
+        total: totalBytes,
+        stage: retryCount > 0 ? 'retrying' : 'pending',
+        attempt: retryCount,
+        detail: retryCount > 0 ? 'Baixando novamente' : 'Aguardando o Relay'
+      });
+
+      const requestId = await this.relay?.requestGroupFile(fileId, nextChunkIndex).catch(() => null);
+      if (!requestId) {
+        this.scheduleGroupFileDownloadRetry(
+          { fileId, groupId, messageId, senderDeviceId },
+          'Relay indisponível durante a solicitação.'
+        );
+        completion.resolve();
+        await completion.promise;
+        return;
       }
-      return;
+
+      this.groupFileDownloadRequestIdByFileId.set(fileId, requestId);
+      this.groupFileDownloadByRequestId.set(requestId, {
+        fileId,
+        groupId,
+        messageId,
+        senderDeviceId
+      });
+      this.db.upsertGroupAttachmentDownload({
+        fileId,
+        groupId,
+        messageId,
+        status: 'downloading',
+        localPath: null,
+        tempPath,
+        totalBytes,
+        receivedBytes,
+        nextChunkIndex,
+        totalChunks: totalBytes > 0 ? Math.max(1, Math.ceil(totalBytes / FILE_CHUNK_SIZE_BYTES)) : 1,
+        retryCount,
+        lastError: null,
+        lastAttemptAt: Date.now(),
+        requestId,
+        receivedAt: null,
+        updatedAt: Date.now()
+      });
+      this.scheduleGroupFileDownloadTimeout(requestId);
+      await completion.promise;
+    } finally {
+      if (this.groupFileDownloadCompletionByFileId.get(fileId) === completion) {
+        this.groupFileDownloadCompletionByFileId.delete(fileId);
+      }
     }
-    this.groupFileDownloadByRequestId.set(requestId, {
+  }
+
+  private markGroupFileDownloadFailed(
+    fileId: string,
+    groupId: string,
+    messageId: string,
+    reason = 'Não foi possível baixar o anexo.'
+  ): void {
+    const previous = this.db.getGroupAttachmentDownload(fileId);
+    this.db.updateMessageStatus(messageId, 'failed');
+    this.db.upsertGroupAttachmentDownload({
       fileId,
       groupId,
       messageId,
-      senderDeviceId
+      status: 'failed',
+      localPath: null,
+      tempPath: null,
+      totalBytes: previous?.totalBytes || 0,
+      receivedBytes: 0,
+      nextChunkIndex: 0,
+      totalChunks: previous?.totalChunks || 0,
+      retryCount: Math.max(this.groupFileDownloadMaxRetries, previous?.retryCount || 0),
+      lastError: reason,
+      lastAttemptAt: Date.now(),
+      requestId: null,
+      receivedAt: null,
+      updatedAt: Date.now()
     });
-    this.scheduleGroupFileDownloadTimeout(requestId);
+    const failed = this.db.getMessageById(messageId);
+    if (!failed) return;
+    this.emitEvent({ type: 'message:updated', message: failed });
+    this.emitEvent({
+      type: 'message:status',
+      messageId,
+      conversationId: failed.conversationId,
+      status: 'failed'
+    });
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'receive',
+      fileId,
+      messageId,
+      peerId: failed.senderDeviceId,
+      transferred: 0,
+      total: previous?.totalBytes || failed.fileSize || 0,
+      stage: 'failed',
+      attempt: Math.max(this.groupFileDownloadMaxRetries, previous?.retryCount || 0),
+      detail: reason
+    });
   }
 
   private scheduleGroupFileDownloadTimeout(requestId: string): void {
@@ -4082,25 +4237,213 @@ class LanternApp {
     this.groupFileDownloadTimeoutByRequestId.delete(requestId);
   }
 
-  private failGroupFileDownload(requestId: string, reason: string): void {
+  private finishGroupFileDownloadTracking(requestId: string): void {
     const download = this.groupFileDownloadByRequestId.get(requestId);
-    if (!download) return;
     this.clearGroupFileDownloadTimeout(requestId);
     this.groupFileDownloadByRequestId.delete(requestId);
-    this.fileTransfer.abortIncoming(download.fileId);
-    this.db.updateMessageStatus(download.messageId, 'failed');
+    if (!download) return;
+    if (this.groupFileDownloadRequestIdByFileId.get(download.fileId) === requestId) {
+      this.groupFileDownloadRequestIdByFileId.delete(download.fileId);
+    }
+    this.groupFileDownloadCompletionByFileId.get(download.fileId)?.resolve();
+  }
+
+  private clearGroupFileDownloadRetry(fileId: string): void {
+    const timer = this.groupFileDownloadRetryTimerByFileId.get(fileId);
+    if (timer) clearTimeout(timer);
+    this.groupFileDownloadRetryTimerByFileId.delete(fileId);
+  }
+
+  private isPermanentGroupFileDownloadError(reason: string): boolean {
+    const normalizedReason = reason.toLowerCase();
+    return (
+      normalizedReason.includes('indisponível no relay') ||
+      normalizedReason.includes('não encontrado') ||
+      normalizedReason.includes('não é destinatário') ||
+      normalizedReason.includes('não existe') ||
+      normalizedReason.includes('sha-256') ||
+      normalizedReason.includes('tamanho inválido')
+    );
+  }
+
+  private scheduleGroupFileDownloadRetry(
+    download: { fileId: string; groupId: string; messageId: string; senderDeviceId: string },
+    reason: string
+  ): void {
+    if (this.isPermanentGroupFileDownloadError(reason)) {
+      this.markGroupFileDownloadFailed(
+        download.fileId,
+        download.groupId,
+        download.messageId,
+        reason
+      );
+      return;
+    }
+    const previous = this.db.getGroupAttachmentDownload(download.fileId);
+    const retryCount = Math.max(0, previous?.retryCount || 0) + 1;
+    if (retryCount > this.groupFileDownloadMaxRetries) {
+      this.markGroupFileDownloadFailed(
+        download.fileId,
+        download.groupId,
+        download.messageId,
+        reason
+      );
+      return;
+    }
     this.db.upsertGroupAttachmentDownload({
       fileId: download.fileId,
       groupId: download.groupId,
       messageId: download.messageId,
-      status: 'failed',
+      status: this.relay?.isConnected() ? 'retrying' : 'reconnecting',
       localPath: null,
+      tempPath: previous?.tempPath || null,
+      totalBytes: previous?.totalBytes || 0,
+      receivedBytes: previous?.receivedBytes || 0,
+      nextChunkIndex: previous?.nextChunkIndex || 0,
+      totalChunks: previous?.totalChunks || 0,
+      retryCount,
+      lastError: reason,
+      lastAttemptAt: Date.now(),
+      requestId: null,
       receivedAt: null,
       updatedAt: Date.now()
     });
-    const message = this.db.getMessageById(download.messageId);
-    if (message) this.emitEvent({ type: 'message:updated', message });
+    const waiting = this.db.markIncomingFileForRetry(download.messageId);
+    if (waiting) this.emitEvent({ type: 'message:updated', message: waiting });
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'receive',
+      fileId: download.fileId,
+      messageId: download.messageId,
+      peerId: download.senderDeviceId,
+      transferred: previous?.receivedBytes || 0,
+      total: previous?.totalBytes || waiting?.fileSize || 0,
+      stage: this.relay?.isConnected() ? 'retrying' : 'reconnecting',
+      attempt: retryCount,
+      detail: this.relay?.isConnected() ? 'Baixando novamente' : 'Aguardando reconexão ao Relay'
+    });
+    const previousTimer = this.groupFileDownloadRetryTimerByFileId.get(download.fileId);
+    if (previousTimer) clearTimeout(previousTimer);
+    const timeout = setTimeout(() => {
+      this.groupFileDownloadRetryTimerByFileId.delete(download.fileId);
+      if (!this.relay?.isConnected()) return;
+      const message = this.db.getMessageById(download.messageId);
+      if (this.hasUsableLocalAttachment(message)) {
+        this.clearGroupFileDownloadRetry(download.fileId);
+        return;
+      }
+      void this.requestGroupAttachmentIfNeeded({
+        fileId: download.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        senderDeviceId: download.senderDeviceId
+      }).catch(() => undefined);
+    }, Math.min(5_000, 750 * 2 ** (retryCount - 1)));
+    timeout.unref?.();
+    this.groupFileDownloadRetryTimerByFileId.set(download.fileId, timeout);
+  }
+
+  private failGroupFileDownload(requestId: string, reason: string): void {
+    void this.failGroupFileDownloadAsync(requestId, reason);
+  }
+
+  private async failGroupFileDownloadAsync(requestId: string, reason: string): Promise<void> {
+    const download = this.groupFileDownloadByRequestId.get(requestId);
+    if (!download) return;
+    if (this.groupFileDownloadRequestIdByFileId.get(download.fileId) !== requestId) {
+      this.clearGroupFileDownloadTimeout(requestId);
+      this.groupFileDownloadByRequestId.delete(requestId);
+      return;
+    }
+    this.clearGroupFileDownloadTimeout(requestId);
+    this.groupFileDownloadByRequestId.delete(requestId);
+    if (this.groupFileDownloadRequestIdByFileId.get(download.fileId) === requestId) {
+      this.groupFileDownloadRequestIdByFileId.delete(download.fileId);
+    }
+    const checkpoint = await this.fileTransfer.pauseIncoming(download.fileId);
+    if (checkpoint && this.isPermanentGroupFileDownloadError(reason)) {
+      try {
+        fs.unlinkSync(checkpoint.tempPath);
+      } catch {
+        // O banco será marcado como falha definitiva mesmo se o temporário já tiver sumido.
+      }
+    }
+    if (checkpoint) {
+      const previous = this.db.getGroupAttachmentDownload(download.fileId);
+      this.db.upsertGroupAttachmentDownload({
+        fileId: download.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        status: 'retrying',
+        localPath: null,
+        tempPath: checkpoint.tempPath,
+        totalBytes: previous?.totalBytes || 0,
+        receivedBytes: checkpoint.receivedBytes,
+        nextChunkIndex: checkpoint.nextChunkIndex,
+        totalChunks: checkpoint.totalChunks,
+        retryCount: previous?.retryCount || 0,
+        lastError: reason,
+        lastAttemptAt: Date.now(),
+        requestId: null,
+        receivedAt: null,
+        updatedAt: Date.now()
+      });
+    }
+    this.scheduleGroupFileDownloadRetry(download, reason);
+    this.groupFileDownloadCompletionByFileId.get(download.fileId)?.resolve();
     console.warn(`[Lantern][Relay] download de anexo de grupo interrompido: ${reason}`);
+  }
+
+  private async pauseGroupFileDownloadsForDisconnect(): Promise<void> {
+    for (const timer of this.groupFileDownloadRetryTimerByFileId.values()) {
+      clearTimeout(timer);
+    }
+    this.groupFileDownloadRetryTimerByFileId.clear();
+    for (const [requestId, download] of Array.from(this.groupFileDownloadByRequestId.entries())) {
+      this.clearGroupFileDownloadTimeout(requestId);
+      this.groupFileDownloadByRequestId.delete(requestId);
+      if (this.groupFileDownloadRequestIdByFileId.get(download.fileId) === requestId) {
+        this.groupFileDownloadRequestIdByFileId.delete(download.fileId);
+      }
+      const checkpoint = await this.fileTransfer.pauseIncoming(download.fileId);
+      const previous = this.db.getGroupAttachmentDownload(download.fileId);
+      this.db.upsertGroupAttachmentDownload({
+        fileId: download.fileId,
+        groupId: download.groupId,
+        messageId: download.messageId,
+        status: 'reconnecting',
+        localPath: null,
+        tempPath: checkpoint?.tempPath || previous?.tempPath || null,
+        totalBytes: previous?.totalBytes || 0,
+        receivedBytes: checkpoint?.receivedBytes || previous?.receivedBytes || 0,
+        nextChunkIndex: checkpoint?.nextChunkIndex || previous?.nextChunkIndex || 0,
+        totalChunks: checkpoint?.totalChunks || previous?.totalChunks || 0,
+        retryCount: previous?.retryCount || 0,
+        lastError: 'Conexão com o Relay interrompida.',
+        lastAttemptAt: Date.now(),
+        requestId: null,
+        receivedAt: null,
+        updatedAt: Date.now()
+      });
+      const waiting = this.db.markIncomingFileForRetry(download.messageId);
+      if (waiting) {
+        this.emitEvent({ type: 'message:updated', message: waiting });
+      }
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'receive',
+        fileId: download.fileId,
+        messageId: download.messageId,
+        peerId: download.senderDeviceId,
+        transferred: checkpoint?.receivedBytes || previous?.receivedBytes || 0,
+        total: previous?.totalBytes || waiting?.fileSize || 0,
+        stage: 'reconnecting',
+        attempt: previous?.retryCount || 0,
+        detail: 'Aguardando reconexão ao Relay'
+      });
+      this.groupFileDownloadCompletionByFileId.get(download.fileId)?.resolve();
+    }
+    this.groupFileDownloadRequestIdByFileId.clear();
   }
 
   private handleGroupFileStart(payload: { requestId: string; fileId: string; metadata: unknown }): void {
@@ -4117,40 +4460,69 @@ class LanternApp {
     const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
     if (!fileId || !groupId || !messageId || !senderDeviceId) return;
 
+    const tracked = this.groupFileDownloadByRequestId.get(payload.requestId);
+    if (
+      !tracked ||
+      tracked.fileId !== fileId ||
+      tracked.groupId !== groupId ||
+      tracked.messageId !== messageId ||
+      this.groupFileDownloadRequestIdByFileId.get(fileId) !== payload.requestId
+    ) {
+      return;
+    }
+
     // A replayed request can arrive after a previous download already completed.
     // Do not truncate the verified local copy just because the Relay is replaying it.
     const existingMessage = this.db.getMessageById(messageId);
     if (this.hasUsableLocalAttachment(existingMessage)) {
-      this.clearGroupFileDownloadTimeout(payload.requestId);
-      this.groupFileDownloadByRequestId.delete(payload.requestId);
+      this.clearGroupFileDownloadRetry(fileId);
+      this.finishGroupFileDownloadTracking(payload.requestId);
       void this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
       return;
     }
 
     // O mesmo timeout passa a vigiar inatividade durante a transferência.
     this.scheduleGroupFileDownloadTimeout(payload.requestId);
-    const finalPath = this.fileTransfer.startIncoming(
-      {
-        fileId,
-        messageId,
-        filename,
-        size,
-        sha256
-      },
-      senderDeviceId
-    );
-    this.groupFileDownloadByRequestId.set(payload.requestId, {
-      fileId,
-      groupId,
-      messageId,
-      senderDeviceId
-    });
+    const previousDownload = this.db.getGroupAttachmentDownload(fileId);
+    let finalPath: string;
+    try {
+      finalPath = this.fileTransfer.startIncoming(
+        {
+          fileId,
+          messageId,
+          filename,
+          size,
+          sha256
+        },
+        senderDeviceId,
+        {
+          tempPath: previousDownload?.tempPath,
+          nextChunkIndex: previousDownload?.nextChunkIndex,
+          receivedBytes: previousDownload?.receivedBytes
+        }
+      );
+    } catch (error) {
+      this.failGroupFileDownload(
+        payload.requestId,
+        error instanceof Error ? error.message : 'Não foi possível iniciar o download.'
+      );
+      return;
+    }
     this.db.upsertGroupAttachmentDownload({
       fileId,
       groupId,
       messageId,
       status: 'downloading',
-      localPath: finalPath,
+      localPath: null,
+      tempPath: finalPath,
+      totalBytes: size,
+      receivedBytes: previousDownload?.receivedBytes || 0,
+      nextChunkIndex: previousDownload?.nextChunkIndex || 0,
+      totalChunks: Math.max(1, Math.ceil(size / FILE_CHUNK_SIZE_BYTES)),
+      retryCount: previousDownload?.retryCount || 0,
+      lastError: null,
+      lastAttemptAt: Date.now(),
+      requestId: payload.requestId,
       receivedAt: null,
       updatedAt: Date.now()
     });
@@ -4160,8 +4532,11 @@ class LanternApp {
       fileId,
       messageId,
       peerId: senderDeviceId,
-      transferred: 0,
-      total: size
+      transferred: previousDownload?.receivedBytes || 0,
+      total: size,
+      stage: 'downloading',
+      attempt: previousDownload?.retryCount || 0,
+      detail: (previousDownload?.receivedBytes || 0) > 0 ? 'Retomando download' : 'Recebendo anexo'
     });
   }
 
@@ -4173,7 +4548,13 @@ class LanternApp {
     dataBase64: string;
   }): void {
     const download = this.groupFileDownloadByRequestId.get(payload.requestId);
-    if (!download) return;
+    if (
+      !download ||
+      download.fileId !== payload.fileId ||
+      this.groupFileDownloadRequestIdByFileId.get(payload.fileId) !== payload.requestId
+    ) {
+      return;
+    }
     let progress: { transferred: number; total: number };
     try {
       progress = this.fileTransfer.onChunk({
@@ -4196,17 +4577,46 @@ class LanternApp {
       messageId: download.messageId,
       peerId: download.senderDeviceId,
       transferred: progress.transferred,
-      total: progress.total
+      total: progress.total,
+      stage: 'downloading',
+      attempt: this.db.getGroupAttachmentDownload(payload.fileId)?.retryCount || 0,
+      detail: 'Recebendo anexo'
+    });
+    const current = this.db.getGroupAttachmentDownload(payload.fileId);
+    this.db.upsertGroupAttachmentDownload({
+      fileId: payload.fileId,
+      groupId: download.groupId,
+      messageId: download.messageId,
+      status: 'downloading',
+      localPath: null,
+      tempPath: current?.tempPath || null,
+      totalBytes: progress.total,
+      receivedBytes: progress.transferred,
+      nextChunkIndex: payload.index + 1,
+      totalChunks: payload.total,
+      retryCount: current?.retryCount || 0,
+      lastError: null,
+      lastAttemptAt: current?.lastAttemptAt || Date.now(),
+      requestId: payload.requestId,
+      receivedAt: null,
+      updatedAt: Date.now()
     });
     this.scheduleGroupFileDownloadTimeout(payload.requestId);
   }
 
   private async handleGroupFileComplete(payload: { requestId: string; fileId: string }): Promise<void> {
     const download = this.groupFileDownloadByRequestId.get(payload.requestId);
-    if (!download) return;
+    if (
+      !download ||
+      download.fileId !== payload.fileId ||
+      this.groupFileDownloadRequestIdByFileId.get(payload.fileId) !== payload.requestId
+    ) {
+      return;
+    }
     this.clearGroupFileDownloadTimeout(payload.requestId);
-    this.groupFileDownloadByRequestId.delete(payload.requestId);
     try {
+      const messageBeforeFinalize = this.db.getMessageById(download.messageId);
+      const expectedSize = messageBeforeFinalize?.fileSize || 0;
       const result = await this.fileTransfer.finalize(payload.fileId);
       this.db.updateFilePath(payload.fileId, result.finalPath, result.ok ? 'delivered' : 'failed');
       this.db.upsertGroupAttachmentDownload({
@@ -4215,6 +4625,17 @@ class LanternApp {
         messageId: download.messageId,
         status: result.ok ? 'complete' : 'failed',
         localPath: result.ok ? result.finalPath : null,
+        tempPath: null,
+        totalBytes: expectedSize,
+        receivedBytes: result.ok ? expectedSize : 0,
+        nextChunkIndex: result.ok
+          ? Math.max(1, Math.ceil(expectedSize / FILE_CHUNK_SIZE_BYTES))
+          : 0,
+        totalChunks: Math.max(1, Math.ceil(expectedSize / FILE_CHUNK_SIZE_BYTES)),
+        retryCount: result.ok ? 0 : this.db.getGroupAttachmentDownload(payload.fileId)?.retryCount || 0,
+        lastError: result.ok ? null : 'Falha na validação de integridade do arquivo.',
+        lastAttemptAt: Date.now(),
+        requestId: null,
         receivedAt: result.ok ? Date.now() : null,
         updatedAt: Date.now()
       });
@@ -4229,33 +4650,32 @@ class LanternApp {
         status: result.ok ? 'delivered' : 'failed'
       });
       if (result.ok) {
+        this.clearGroupFileDownloadRetry(payload.fileId);
+        this.emitEvent({
+          type: 'transfer:progress',
+          direction: 'receive',
+          fileId: payload.fileId,
+          messageId: download.messageId,
+          peerId: download.senderDeviceId,
+          transferred: updated?.fileSize || 0,
+          total: updated?.fileSize || 0,
+          stage: 'complete',
+          attempt: 0,
+          detail: 'Concluído'
+        });
         await this.relay?.markGroupFileReceived(payload.fileId).catch(() => undefined);
+      } else {
+        this.scheduleGroupFileDownloadRetry(download, 'Validação do arquivo recebida com erro.');
       }
     } catch (error) {
-      this.db.updateMessageStatus(download.messageId, 'failed');
-      this.db.upsertGroupAttachmentDownload({
-        fileId: payload.fileId,
-        groupId: download.groupId,
-        messageId: download.messageId,
-        status: 'failed',
-        localPath: null,
-        receivedAt: null,
-        updatedAt: Date.now()
-      });
-      const updated = this.db.getMessageById(download.messageId);
-      if (updated) {
-        this.emitEvent({ type: 'message:updated', message: updated });
-      }
-      this.emitEvent({
-        type: 'message:status',
-        messageId: download.messageId,
-        conversationId: updated?.conversationId || null,
-        status: 'failed'
-      });
+      const reason = error instanceof Error ? error.message : String(error);
+      this.scheduleGroupFileDownloadRetry(download, reason);
       console.warn(
         '[Lantern][Relay] falha ao validar anexo de grupo:',
-        error instanceof Error ? error.message : String(error)
+        reason
       );
+    } finally {
+      this.finishGroupFileDownloadTracking(payload.requestId);
     }
   }
 
@@ -4640,7 +5060,10 @@ class LanternApp {
       messageId,
       peerId: group.groupId,
       transferred: 0,
-      total: offer.size
+      total: offer.size,
+      stage: 'pending',
+      attempt: 0,
+      detail: 'Preparando envio'
     });
 
     try {
@@ -4650,13 +5073,24 @@ class LanternApp {
       this.emitEvent({ type: 'message:updated', message: delivered });
       return delivered;
     } catch (error) {
-      this.db.updateMessageStatus(messageId, 'failed');
-      const failed = this.db.getMessageById(messageId) || message;
-      this.emitEvent({ type: 'message:updated', message: failed });
       if (this.isGroupMissingOnRelayError(error)) {
+        this.db.updateMessageStatus(messageId, 'failed');
+        const failed = this.db.getMessageById(messageId) || message;
+        this.emitEvent({ type: 'message:updated', message: failed });
         this.markGroupMissingOnRelay(group.groupId);
+        throw error;
       }
-      throw error;
+      const uploadState = this.db.getGroupAttachmentUpload(offer.fileId);
+      if (uploadState?.status === 'failed') {
+        this.db.updateMessageStatus(messageId, 'failed');
+        const failed = this.db.getMessageById(messageId) || message;
+        this.emitEvent({ type: 'message:updated', message: failed });
+        throw error;
+      }
+      this.db.updateMessageStatus(messageId, 'sent');
+      const pending = this.db.getMessageById(messageId) || message;
+      this.emitEvent({ type: 'message:updated', message: pending });
+      return pending;
     }
   }
 
@@ -4677,6 +5111,23 @@ class LanternApp {
       return;
     }
     this.groupFileUploadsInFlight.add(offer.fileId);
+    const previousUpload = this.db.getGroupAttachmentUpload(offer.fileId);
+    const retryCount = Math.max(0, previousUpload?.retryCount || 0);
+    const totalChunks = this.fileTransfer.getChunkCountForSize(offer.size);
+    this.db.upsertGroupAttachmentUpload({
+      fileId: offer.fileId,
+      groupId: group.groupId,
+      messageId: message.messageId,
+      status: retryCount > 0 ? 'retrying' : 'pending',
+      totalBytes: offer.size,
+      sentBytes: previousUpload?.sentBytes || 0,
+      nextChunkIndex: previousUpload?.nextChunkIndex || 0,
+      totalChunks,
+      retryCount,
+      lastError: previousUpload?.lastError || null,
+      lastAttemptAt: Date.now(),
+      updatedAt: Date.now()
+    });
     try {
       const initAck = await relay.sendGroupAction('file:init', {
         createdAt: message.createdAt,
@@ -4688,16 +5139,56 @@ class LanternApp {
         ? requestedResumeIndex
         : 0;
 
-      let transferred = 0;
+      let transferred = Math.min(offer.size, resumeIndex * FILE_CHUNK_SIZE_BYTES);
+      this.db.upsertGroupAttachmentUpload({
+        fileId: offer.fileId,
+        groupId: group.groupId,
+        messageId: message.messageId,
+        status: 'uploading',
+        totalBytes: offer.size,
+        sentBytes: transferred,
+        nextChunkIndex: resumeIndex,
+        totalChunks,
+        retryCount,
+        lastError: null,
+        lastAttemptAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'send',
+        fileId: offer.fileId,
+        messageId: message.messageId,
+        peerId: group.groupId,
+        transferred,
+        total: offer.size,
+        stage: 'uploading',
+        attempt: retryCount,
+        detail: resumeIndex > 0 ? 'Retomando envio' : 'Enviando anexo'
+      });
       const inFlightChunks: Promise<void>[] = [];
-      for await (const chunk of this.fileTransfer.createChunkStream(message.filePath, offer.fileId)) {
+      for await (const chunk of this.fileTransfer.createChunkStream(
+        message.filePath,
+        offer.fileId,
+        resumeIndex
+      )) {
         const bytes = Buffer.byteLength(chunk.dataBase64, 'base64');
-        if (chunk.index < resumeIndex) {
-          transferred = Math.min(offer.size, transferred + bytes);
-          continue;
-        }
         const sendChunk = relay.sendGroupFileChunk(chunk).then(() => {
           transferred = Math.min(offer.size, transferred + bytes);
+          this.db.upsertGroupAttachmentUpload({
+            fileId: offer.fileId,
+            groupId: group.groupId,
+            messageId: message.messageId,
+            status: 'uploading',
+            totalBytes: offer.size,
+            sentBytes: transferred,
+            nextChunkIndex: chunk.index + 1,
+            totalChunks: chunk.total,
+            retryCount,
+            lastError: null,
+            lastAttemptAt: Date.now(),
+            updatedAt: Date.now()
+          });
           this.emitEvent({
             type: 'transfer:progress',
             direction: 'send',
@@ -4705,7 +5196,10 @@ class LanternApp {
             messageId: message.messageId,
             peerId: group.groupId,
             transferred,
-            total: offer.size
+            total: offer.size,
+            stage: 'uploading',
+            attempt: retryCount,
+            detail: 'Enviando anexo'
           });
         });
         inFlightChunks.push(sendChunk);
@@ -4721,11 +5215,82 @@ class LanternApp {
           messageId: message.messageId,
           peerId: group.groupId,
           transferred,
-          total: offer.size
+          total: offer.size,
+          stage: 'uploading',
+          attempt: retryCount,
+          detail: 'Enviando anexo'
         });
       }
       await Promise.all(inFlightChunks);
       await relay.completeGroupFile(offer.fileId);
+      this.db.upsertGroupAttachmentUpload({
+        fileId: offer.fileId,
+        groupId: group.groupId,
+        messageId: message.messageId,
+        status: 'complete',
+        totalBytes: offer.size,
+        sentBytes: offer.size,
+        nextChunkIndex: totalChunks,
+        totalChunks,
+        retryCount: 0,
+        lastError: null,
+        lastAttemptAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'send',
+        fileId: offer.fileId,
+        messageId: message.messageId,
+        peerId: group.groupId,
+        transferred: offer.size,
+        total: offer.size,
+        stage: 'complete',
+        attempt: retryCount,
+        detail: 'Concluído'
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const current = this.db.getGroupAttachmentUpload(offer.fileId);
+      const nextRetryCount = Math.max(0, current?.retryCount || 0) + 1;
+      this.db.upsertGroupAttachmentUpload({
+        fileId: offer.fileId,
+        groupId: group.groupId,
+        messageId: message.messageId,
+        status: nextRetryCount > this.groupFileDownloadMaxRetries ? 'failed' : 'retrying',
+        totalBytes: offer.size,
+        sentBytes: current?.sentBytes || 0,
+        nextChunkIndex: current?.nextChunkIndex || 0,
+        totalChunks,
+        retryCount: nextRetryCount,
+        lastError: reason,
+        lastAttemptAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      this.emitEvent({
+        type: 'transfer:progress',
+        direction: 'send',
+        fileId: offer.fileId,
+        messageId: message.messageId,
+        peerId: group.groupId,
+        transferred: current?.sentBytes || 0,
+        total: offer.size,
+        stage: nextRetryCount > this.groupFileDownloadMaxRetries ? 'failed' : 'reconnecting',
+        attempt: nextRetryCount,
+        detail:
+          nextRetryCount > this.groupFileDownloadMaxRetries
+            ? 'Não foi possível concluir o envio'
+            : 'Aguardando reconexão ao Relay'
+      });
+      if (nextRetryCount <= this.groupFileDownloadMaxRetries) {
+        const retryTimer = setTimeout(() => {
+          if (this.relay?.isConnected()) {
+            void this.resumePendingGroupFiles();
+          }
+        }, Math.min(10_000, 1_000 * 2 ** (nextRetryCount - 1)));
+        retryTimer.unref?.();
+      }
+      throw error;
     } finally {
       this.groupFileUploadsInFlight.delete(offer.fileId);
     }
@@ -4738,6 +5303,13 @@ class LanternApp {
       if (!groupId || !message.fileId || !message.filePath || !fs.existsSync(message.filePath)) continue;
       const group = this.db.getGroupById(groupId);
       if (!group || group.missingOnRelay || this.groupFileUploadsInFlight.has(message.fileId)) continue;
+      const uploadState = this.db.getGroupAttachmentUpload(message.fileId);
+      if (
+        uploadState?.status === 'failed' &&
+        uploadState.retryCount > this.groupFileDownloadMaxRetries
+      ) {
+        continue;
+      }
       try {
         const { offer } = await this.fileTransfer.createOffer(
           group.groupId,

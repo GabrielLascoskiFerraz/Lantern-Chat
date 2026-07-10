@@ -37,6 +37,11 @@ interface PendingPeerOperation {
   peerId: string;
   type: PendingPeerOperationType;
   createdAt: number;
+  updatedAt: number;
+  attempts: number;
+  lastAttemptAt: number | null;
+  nextAttemptAt: number;
+  lastError: string | null;
   payload: PendingPeerOperationPayload;
 }
 
@@ -44,6 +49,21 @@ interface PendingMessageReaction {
   messageId: string;
   reactorDeviceId: string;
   reaction: ReactPayload['reaction'];
+  updatedAt: number;
+}
+
+interface GroupAttachmentUploadState {
+  fileId: string;
+  groupId: string;
+  messageId: string;
+  status: 'pending' | 'uploading' | 'retrying' | 'complete' | 'failed';
+  totalBytes: number;
+  sentBytes: number;
+  nextChunkIndex: number;
+  totalChunks: number;
+  retryCount: number;
+  lastError: string | null;
+  lastAttemptAt: number | null;
   updatedAt: number;
 }
 
@@ -59,6 +79,7 @@ export class DbService {
     const dbPath = path.join(userDataPath, 'lantern.db');
     this.db = new Database(dbPath);
     runMigrations(this.db);
+    this.migrateLegacyPendingPeerOperations();
     this.ensureAnnouncementsConversation();
   }
 
@@ -600,14 +621,63 @@ export class DbService {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO group_attachment_downloads(fileId, groupId, messageId, status, localPath, receivedAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO group_attachment_downloads(
+           fileId, groupId, messageId, status, localPath, tempPath, totalBytes,
+           receivedBytes, nextChunkIndex, totalChunks, retryCount, lastError,
+           lastAttemptAt, requestId, receivedAt, updatedAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(fileId) DO UPDATE SET
            groupId = excluded.groupId,
            messageId = excluded.messageId,
            status = excluded.status,
-           localPath = COALESCE(excluded.localPath, group_attachment_downloads.localPath),
-           receivedAt = COALESCE(excluded.receivedAt, group_attachment_downloads.receivedAt),
+           localPath = CASE
+             WHEN excluded.status IN ('failed', 'expired') THEN NULL
+             WHEN excluded.status = 'complete' THEN excluded.localPath
+             ELSE COALESCE(excluded.localPath, group_attachment_downloads.localPath)
+           END,
+           tempPath = CASE
+             WHEN excluded.status IN ('complete', 'failed', 'expired') THEN NULL
+             ELSE COALESCE(excluded.tempPath, group_attachment_downloads.tempPath)
+           END,
+           totalBytes = CASE
+             WHEN excluded.totalBytes > 0 THEN excluded.totalBytes
+             ELSE group_attachment_downloads.totalBytes
+           END,
+           receivedBytes = CASE
+             WHEN excluded.status IN ('failed', 'expired') THEN 0
+             WHEN excluded.receivedBytes > group_attachment_downloads.receivedBytes
+               THEN excluded.receivedBytes
+             ELSE group_attachment_downloads.receivedBytes
+           END,
+           nextChunkIndex = CASE
+             WHEN excluded.status IN ('failed', 'expired') THEN 0
+             WHEN excluded.nextChunkIndex > group_attachment_downloads.nextChunkIndex
+               THEN excluded.nextChunkIndex
+             ELSE group_attachment_downloads.nextChunkIndex
+           END,
+           totalChunks = CASE
+             WHEN excluded.totalChunks > 0 THEN excluded.totalChunks
+             ELSE group_attachment_downloads.totalChunks
+           END,
+           retryCount = CASE
+             WHEN excluded.status = 'complete' THEN 0
+             WHEN excluded.retryCount > group_attachment_downloads.retryCount
+               THEN excluded.retryCount
+             ELSE group_attachment_downloads.retryCount
+           END,
+           lastError = CASE
+             WHEN excluded.status = 'complete' THEN NULL
+             ELSE COALESCE(excluded.lastError, group_attachment_downloads.lastError)
+           END,
+           lastAttemptAt = COALESCE(excluded.lastAttemptAt, group_attachment_downloads.lastAttemptAt),
+           requestId = CASE
+             WHEN excluded.status = 'downloading' THEN excluded.requestId
+             ELSE NULL
+           END,
+           receivedAt = CASE
+             WHEN excluded.status IN ('pending', 'reconnecting', 'downloading', 'retrying', 'failed') THEN NULL
+             ELSE COALESCE(excluded.receivedAt, group_attachment_downloads.receivedAt)
+           END,
            updatedAt = excluded.updatedAt`
       )
       .run(
@@ -616,6 +686,15 @@ export class DbService {
         input.messageId,
         input.status,
         input.localPath || null,
+        input.tempPath || null,
+        Math.max(0, Math.trunc(input.totalBytes || 0)),
+        Math.max(0, Math.trunc(input.receivedBytes || 0)),
+        Math.max(0, Math.trunc(input.nextChunkIndex || 0)),
+        Math.max(0, Math.trunc(input.totalChunks || 0)),
+        Math.max(0, Math.trunc(input.retryCount || 0)),
+        input.lastError || null,
+        input.lastAttemptAt || null,
+        input.requestId || null,
         input.receivedAt || null,
         input.updatedAt || now
       );
@@ -626,7 +705,9 @@ export class DbService {
     if (!cleanFileId) return null;
     const row = this.db
       .prepare(
-        `SELECT fileId, groupId, messageId, status, localPath, receivedAt, updatedAt
+        `SELECT fileId, groupId, messageId, status, localPath, tempPath, totalBytes,
+                receivedBytes, nextChunkIndex, totalChunks, retryCount, lastError,
+                lastAttemptAt, requestId, receivedAt, updatedAt
          FROM group_attachment_downloads
          WHERE fileId = ?`
       )
@@ -638,13 +719,64 @@ export class DbService {
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
     return this.db
       .prepare(
-        `SELECT fileId, groupId, messageId, status, localPath, receivedAt, updatedAt
+        `SELECT fileId, groupId, messageId, status, localPath, tempPath, totalBytes,
+                receivedBytes, nextChunkIndex, totalChunks, retryCount, lastError,
+                lastAttemptAt, requestId, receivedAt, updatedAt
          FROM group_attachment_downloads
-         WHERE status IN ('pending', 'downloading', 'failed')
+         WHERE status IN ('pending', 'reconnecting', 'downloading', 'retrying', 'failed')
          ORDER BY updatedAt ASC, fileId ASC
          LIMIT ?`
       )
       .all(safeLimit) as GroupAttachmentDownload[];
+  }
+
+  getGroupAttachmentUpload(fileId: string): GroupAttachmentUploadState | null {
+    const cleanFileId = (fileId || '').trim();
+    if (!cleanFileId) return null;
+    const row = this.db
+      .prepare(
+        `SELECT fileId, groupId, messageId, status, totalBytes, sentBytes,
+                nextChunkIndex, totalChunks, retryCount, lastError, lastAttemptAt, updatedAt
+         FROM group_attachment_uploads WHERE fileId = ?`
+      )
+      .get(cleanFileId) as GroupAttachmentUploadState | undefined;
+    return row || null;
+  }
+
+  upsertGroupAttachmentUpload(input: GroupAttachmentUploadState): void {
+    this.db
+      .prepare(
+        `INSERT INTO group_attachment_uploads(
+           fileId, groupId, messageId, status, totalBytes, sentBytes,
+           nextChunkIndex, totalChunks, retryCount, lastError, lastAttemptAt, updatedAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(fileId) DO UPDATE SET
+           groupId = excluded.groupId,
+           messageId = excluded.messageId,
+           status = excluded.status,
+           totalBytes = excluded.totalBytes,
+           sentBytes = excluded.sentBytes,
+           nextChunkIndex = excluded.nextChunkIndex,
+           totalChunks = excluded.totalChunks,
+           retryCount = excluded.retryCount,
+           lastError = excluded.lastError,
+           lastAttemptAt = excluded.lastAttemptAt,
+           updatedAt = excluded.updatedAt`
+      )
+      .run(
+        input.fileId,
+        input.groupId,
+        input.messageId,
+        input.status,
+        Math.max(0, Math.trunc(input.totalBytes || 0)),
+        Math.max(0, Math.trunc(input.sentBytes || 0)),
+        Math.max(0, Math.trunc(input.nextChunkIndex || 0)),
+        Math.max(0, Math.trunc(input.totalChunks || 0)),
+        Math.max(0, Math.trunc(input.retryCount || 0)),
+        input.lastError || null,
+        input.lastAttemptAt || null,
+        input.updatedAt || Date.now()
+      );
   }
 
   getPendingOutgoingGroupFiles(limit = 50): DbMessage[] {
@@ -1005,7 +1137,8 @@ export class DbService {
         `UPDATE messages
          SET
            filePath = CASE
-             WHEN status = 'delivered' AND ? = 'failed' THEN filePath
+             WHEN status IN ('delivered', 'read') AND ? = 'failed' THEN filePath
+             WHEN ? = 'failed' THEN NULL
              ELSE ?
            END,
            status = CASE
@@ -1016,7 +1149,7 @@ export class DbService {
            END
          WHERE fileId = ?`
       )
-      .run(status, filePath, status, status, fileId);
+      .run(status, status, filePath, status, status, fileId);
   }
 
   markIncomingFileForRetry(messageId: string): DbMessage | undefined {
@@ -2223,12 +2356,29 @@ export class DbService {
 
   getPendingPeerOperations(peerId?: string): PendingPeerOperation[] {
     const cleanPeerId = (peerId || '').trim();
-    const all = this.readPendingPeerOperations();
-    const filtered = cleanPeerId ? all.filter((row) => row.peerId === cleanPeerId) : all;
-    return filtered.sort((left, right) => {
-      if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
-      return left.id.localeCompare(right.id);
-    });
+    const rows = this.db
+      .prepare(
+        `SELECT id, peerId, type, payloadJson, attempts, lastAttemptAt,
+                nextAttemptAt, lastError, createdAt, updatedAt
+         FROM pending_peer_operations
+         ${cleanPeerId ? 'WHERE peerId = ?' : ''}
+         ORDER BY nextAttemptAt ASC, createdAt ASC, id ASC`
+      )
+      .all(...(cleanPeerId ? [cleanPeerId] : [])) as Array<{
+      id: string;
+      peerId: string;
+      type: PendingPeerOperationType;
+      payloadJson: string;
+      attempts: number;
+      lastAttemptAt: number | null;
+      nextAttemptAt: number;
+      lastError: string | null;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+    return rows
+      .map((row) => this.parsePendingPeerOperationRow(row))
+      .filter((row): row is PendingPeerOperation => Boolean(row));
   }
 
   enqueuePendingPeerOperation(
@@ -2265,61 +2415,83 @@ export class DbService {
       peerId: cleanPeerId,
       type,
       createdAt: now,
+      updatedAt: now,
+      attempts: 0,
+      lastAttemptAt: null,
+      nextAttemptAt: 0,
+      lastError: null,
       payload: normalizedPayload
     };
 
-    const all = this.readPendingPeerOperations();
-    const next =
-      type === 'chat:react'
-        ? all.filter(
-            (row) =>
-              !(
-                row.peerId === cleanPeerId &&
-                row.type === 'chat:react' &&
-                'targetMessageId' in row.payload &&
-                row.payload.targetMessageId === targetMessageId
-              )
-          )
-        : all;
-    next.push(operation);
-    this.writePendingPeerOperations(next);
+    const dedupeKey =
+      type === 'chat:react' ? `chat:react:${targetMessageId}` : type;
+    this.db
+      .prepare(
+        `INSERT INTO pending_peer_operations(
+           id, peerId, type, dedupeKey, payloadJson, attempts, lastAttemptAt,
+           nextAttemptAt, lastError, createdAt, updatedAt
+         ) VALUES (?, ?, ?, ?, ?, 0, NULL, 0, NULL, ?, ?)
+         ON CONFLICT(peerId, dedupeKey) DO UPDATE SET
+           id = excluded.id,
+           type = excluded.type,
+           payloadJson = excluded.payloadJson,
+           attempts = 0,
+           lastAttemptAt = NULL,
+           nextAttemptAt = 0,
+           lastError = NULL,
+           createdAt = excluded.createdAt,
+           updatedAt = excluded.updatedAt`
+      )
+      .run(
+        operation.id,
+        operation.peerId,
+        operation.type,
+        dedupeKey,
+        JSON.stringify(operation.payload),
+        operation.createdAt,
+        operation.updatedAt
+      );
     return operation;
   }
 
   removePendingPeerOperation(operationId: string): void {
     const cleanId = (operationId || '').trim();
     if (!cleanId) return;
-    const all = this.readPendingPeerOperations();
-    const next = all.filter((row) => row.id !== cleanId);
-    if (next.length === all.length) return;
-    this.writePendingPeerOperations(next);
+    this.db.prepare('DELETE FROM pending_peer_operations WHERE id = ?').run(cleanId);
   }
 
   clearPendingPeerOperationsForPeer(peerId: string): void {
     const cleanPeerId = (peerId || '').trim();
     if (!cleanPeerId) return;
-    const all = this.readPendingPeerOperations();
-    const next = all.filter((row) => row.peerId !== cleanPeerId);
-    if (next.length === all.length) return;
-    this.writePendingPeerOperations(next);
+    this.db.prepare('DELETE FROM pending_peer_operations WHERE peerId = ?').run(cleanPeerId);
   }
 
   removePendingReactionOperation(peerId: string, targetMessageId: string): void {
     const cleanPeerId = (peerId || '').trim();
     const cleanTargetMessageId = (targetMessageId || '').trim();
     if (!cleanPeerId || !cleanTargetMessageId) return;
-    const all = this.readPendingPeerOperations();
-    const next = all.filter(
-      (row) =>
-        !(
-          row.peerId === cleanPeerId &&
-          row.type === 'chat:react' &&
-          'targetMessageId' in row.payload &&
-          row.payload.targetMessageId === cleanTargetMessageId
-        )
-    );
-    if (next.length === all.length) return;
-    this.writePendingPeerOperations(next);
+    this.db
+      .prepare('DELETE FROM pending_peer_operations WHERE peerId = ? AND dedupeKey = ?')
+      .run(cleanPeerId, `chat:react:${cleanTargetMessageId}`);
+  }
+
+  markPendingPeerOperationFailed(operationId: string, error: string): void {
+    const cleanId = (operationId || '').trim();
+    if (!cleanId) return;
+    const current = this.db
+      .prepare('SELECT attempts FROM pending_peer_operations WHERE id = ?')
+      .get(cleanId) as { attempts: number } | undefined;
+    if (!current) return;
+    const now = Date.now();
+    const attempts = Math.max(0, Math.trunc(current.attempts || 0)) + 1;
+    const retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempts - 1));
+    this.db
+      .prepare(
+        `UPDATE pending_peer_operations
+         SET attempts = ?, lastAttemptAt = ?, nextAttemptAt = ?, lastError = ?, updatedAt = ?
+         WHERE id = ?`
+      )
+      .run(attempts, now, now + retryDelayMs, (error || 'Falha de envio').slice(0, 500), now, cleanId);
   }
 
   getRelaySettings(): {
@@ -2431,7 +2603,7 @@ export class DbService {
     this.db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
   }
 
-  private readPendingPeerOperations(): PendingPeerOperation[] {
+  private readLegacyPendingPeerOperations(): PendingPeerOperation[] {
     const raw = this.getAppSetting('pending.peerOps');
     if (!raw) return [];
     try {
@@ -2461,6 +2633,11 @@ export class DbService {
             peerId,
             type,
             createdAt,
+            updatedAt: createdAt,
+            attempts: 0,
+            lastAttemptAt: null,
+            nextAttemptAt: 0,
+            lastError: null,
             payload: { scope }
           });
           continue;
@@ -2486,6 +2663,11 @@ export class DbService {
             peerId,
             type,
             createdAt,
+            updatedAt: createdAt,
+            attempts: 0,
+            lastAttemptAt: null,
+            nextAttemptAt: 0,
+            lastError: null,
             payload: {
               targetMessageId,
               reaction
@@ -2499,11 +2681,102 @@ export class DbService {
     }
   }
 
-  private writePendingPeerOperations(rows: PendingPeerOperation[]): void {
-    if (!rows.length) {
+  private parsePendingPeerOperationRow(row: {
+    id: string;
+    peerId: string;
+    type: PendingPeerOperationType;
+    payloadJson: string;
+    attempts: number;
+    lastAttemptAt: number | null;
+    nextAttemptAt: number;
+    lastError: string | null;
+    createdAt: number;
+    updatedAt: number;
+  }): PendingPeerOperation | null {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      return null;
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const record = payload as Record<string, unknown>;
+    let normalizedPayload: PendingPeerOperationPayload;
+    if (row.type === 'chat:react') {
+      const targetMessageId =
+        typeof record.targetMessageId === 'string' ? record.targetMessageId.trim() : '';
+      if (!targetMessageId) return null;
+      const reaction =
+        record.reaction === '👍' ||
+        record.reaction === '👎' ||
+        record.reaction === '❤️' ||
+        record.reaction === '😢' ||
+        record.reaction === '😊' ||
+        record.reaction === '😂' ||
+        record.reaction === null
+          ? record.reaction
+          : null;
+      normalizedPayload = { targetMessageId, reaction };
+    } else if (row.type === 'chat:clear' || row.type === 'chat:forget') {
+      normalizedPayload = { scope: 'dm' };
+    } else {
+      return null;
+    }
+    return {
+      id: row.id,
+      peerId: row.peerId,
+      type: row.type,
+      payload: normalizedPayload,
+      attempts: Math.max(0, Math.trunc(row.attempts || 0)),
+      lastAttemptAt: row.lastAttemptAt || null,
+      nextAttemptAt: Math.max(0, Math.trunc(row.nextAttemptAt || 0)),
+      lastError: row.lastError || null,
+      createdAt: Math.max(1, Math.trunc(row.createdAt || Date.now())),
+      updatedAt: Math.max(1, Math.trunc(row.updatedAt || row.createdAt || Date.now()))
+    };
+  }
+
+  private migrateLegacyPendingPeerOperations(): void {
+    const legacy = this.readLegacyPendingPeerOperations();
+    if (legacy.length === 0) {
       this.deleteAppSetting('pending.peerOps');
       return;
     }
-    this.setAppSetting('pending.peerOps', JSON.stringify(rows));
+    const insert = this.db.prepare(
+      `INSERT INTO pending_peer_operations(
+         id, peerId, type, dedupeKey, payloadJson, attempts, lastAttemptAt,
+         nextAttemptAt, lastError, createdAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?, 0, NULL, 0, NULL, ?, ?)
+       ON CONFLICT(peerId, dedupeKey) DO UPDATE SET
+         id = excluded.id,
+         type = excluded.type,
+         payloadJson = excluded.payloadJson,
+         createdAt = excluded.createdAt,
+         updatedAt = excluded.updatedAt
+       WHERE excluded.createdAt >= pending_peer_operations.createdAt`
+    );
+    const migrate = this.db.transaction(() => {
+      for (const operation of legacy) {
+        const targetMessageId =
+          operation.type === 'chat:react' && 'targetMessageId' in operation.payload
+            ? operation.payload.targetMessageId
+            : '';
+        const dedupeKey =
+          operation.type === 'chat:react'
+            ? `chat:react:${targetMessageId}`
+            : operation.type;
+        insert.run(
+          operation.id,
+          operation.peerId,
+          operation.type,
+          dedupeKey,
+          JSON.stringify(operation.payload),
+          operation.createdAt,
+          operation.updatedAt
+        );
+      }
+      this.deleteAppSetting('pending.peerOps');
+    });
+    migrate();
   }
 }

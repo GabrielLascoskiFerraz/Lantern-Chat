@@ -103,6 +103,24 @@ export const runMigrations = (db: Database.Database): void => {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS pending_peer_operations (
+      id TEXT PRIMARY KEY,
+      peerId TEXT NOT NULL,
+      type TEXT NOT NULL,
+      dedupeKey TEXT NOT NULL,
+      payloadJson TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      lastAttemptAt INTEGER,
+      nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      lastError TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      UNIQUE(peerId, dedupeKey)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pending_peer_operations_peer_retry
+      ON pending_peer_operations(peerId, nextAttemptAt, createdAt);
+
     CREATE TABLE IF NOT EXISTS hidden_messages (
       messageId TEXT PRIMARY KEY,
       hiddenAt INTEGER NOT NULL
@@ -181,12 +199,39 @@ export const runMigrations = (db: Database.Database): void => {
       messageId TEXT NOT NULL,
       status TEXT NOT NULL,
       localPath TEXT,
+      tempPath TEXT,
+      totalBytes INTEGER NOT NULL DEFAULT 0,
+      receivedBytes INTEGER NOT NULL DEFAULT 0,
+      nextChunkIndex INTEGER NOT NULL DEFAULT 0,
+      totalChunks INTEGER NOT NULL DEFAULT 0,
+      retryCount INTEGER NOT NULL DEFAULT 0,
+      lastError TEXT,
+      lastAttemptAt INTEGER,
+      requestId TEXT,
       receivedAt INTEGER,
       updatedAt INTEGER NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_group_attachment_downloads_group
       ON group_attachment_downloads(groupId, status);
+
+    CREATE TABLE IF NOT EXISTS group_attachment_uploads (
+      fileId TEXT PRIMARY KEY,
+      groupId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      status TEXT NOT NULL,
+      totalBytes INTEGER NOT NULL DEFAULT 0,
+      sentBytes INTEGER NOT NULL DEFAULT 0,
+      nextChunkIndex INTEGER NOT NULL DEFAULT 0,
+      totalChunks INTEGER NOT NULL DEFAULT 0,
+      retryCount INTEGER NOT NULL DEFAULT 0,
+      lastError TEXT,
+      lastAttemptAt INTEGER,
+      updatedAt INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_attachment_uploads_group
+      ON group_attachment_uploads(groupId, status);
   `);
 
   const profileColumns = db.prepare('PRAGMA table_info(profile)').all() as Array<{ name: string }>;
@@ -341,4 +386,22 @@ export const runMigrations = (db: Database.Database): void => {
   if (!groupColumns.some((column) => column.name === 'missingOnRelay')) {
     db.exec('ALTER TABLE groups ADD COLUMN missingOnRelay INTEGER NOT NULL DEFAULT 0;');
   }
+
+  const groupAttachmentColumns = db
+    .prepare('PRAGMA table_info(group_attachment_downloads)')
+    .all() as Array<{ name: string }>;
+  const addGroupAttachmentColumn = (name: string, definition: string): void => {
+    if (!groupAttachmentColumns.some((column) => column.name === name)) {
+      db.exec(`ALTER TABLE group_attachment_downloads ADD COLUMN ${name} ${definition};`);
+    }
+  };
+  addGroupAttachmentColumn('tempPath', 'TEXT');
+  addGroupAttachmentColumn('totalBytes', 'INTEGER NOT NULL DEFAULT 0');
+  addGroupAttachmentColumn('receivedBytes', 'INTEGER NOT NULL DEFAULT 0');
+  addGroupAttachmentColumn('nextChunkIndex', 'INTEGER NOT NULL DEFAULT 0');
+  addGroupAttachmentColumn('totalChunks', 'INTEGER NOT NULL DEFAULT 0');
+  addGroupAttachmentColumn('retryCount', 'INTEGER NOT NULL DEFAULT 0');
+  addGroupAttachmentColumn('lastError', 'TEXT');
+  addGroupAttachmentColumn('lastAttemptAt', 'INTEGER');
+  addGroupAttachmentColumn('requestId', 'TEXT');
 };

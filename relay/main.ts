@@ -176,6 +176,24 @@ interface RelayDashboardSnapshot {
   announcementStoreFile: string;
   announcementsActive: number;
   stickersAvailable: number;
+  transferMetrics: {
+    uploadAttempts: number;
+    uploadsCompleted: number;
+    uploadsFailed: number;
+    downloadAttempts: number;
+    downloadsResumed: number;
+    downloadsCompleted: number;
+    downloadsFailed: number;
+    bytesUploaded: number;
+    bytesDownloaded: number;
+    retainedFiles: number;
+    retainedBytes: number;
+    activeUploads: number;
+    pendingRecipients: number;
+    averageSendLatencyMs: number;
+    maxSendLatencyMs: number;
+    sendFailures: number;
+  };
   peers: RelayDashboardPeer[];
   announcements: RelayDashboardAnnouncement[];
 }
@@ -831,6 +849,26 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         <div id="metric-revision" class="metric-value">--</div>
         <div id="metric-endpoint" class="metric-note">endpoint --</div>
       </article>
+      <article class="card metric">
+        <div class="metric-label">Anexos retidos</div>
+        <div id="metric-retained" class="metric-value">--</div>
+        <div id="metric-retained-bytes" class="metric-note">-- armazenados</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Transferências</div>
+        <div id="metric-transfers" class="metric-value">--</div>
+        <div id="metric-transfer-attempts" class="metric-note">-- tentativas</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Retomadas</div>
+        <div id="metric-resumes" class="metric-value">--</div>
+        <div id="metric-transfer-failures" class="metric-note">-- falhas</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Latência de envio</div>
+        <div id="metric-latency" class="metric-value">--</div>
+        <div id="metric-latency-max" class="metric-note">máxima --</div>
+      </article>
     </section>
 
     <section class="content">
@@ -879,6 +917,14 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     const formatTime = (ts) => {
       if (!Number.isFinite(ts) || ts <= 0) return '--';
       return dateTime.format(new Date(ts));
+    };
+
+    const formatBytes = (bytes) => {
+      const value = Math.max(0, Number(bytes) || 0);
+      if (value < 1024) return value + ' B';
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB';
+      if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + ' MB';
+      return (value / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
     };
 
     const setText = (id, value) => {
@@ -973,9 +1019,21 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       setText('metric-announcements', String(data.announcementsActive));
       setText('metric-revision', '#' + data.presenceRevision);
       setText('metric-endpoint', 'ws://' + data.host + ':' + data.port);
+      const transfers = data.transferMetrics || {};
+      const completedTransfers = Number(transfers.uploadsCompleted || 0) + Number(transfers.downloadsCompleted || 0);
+      const transferAttempts = Number(transfers.uploadAttempts || 0) + Number(transfers.downloadAttempts || 0);
+      const transferFailures = Number(transfers.uploadsFailed || 0) + Number(transfers.downloadsFailed || 0);
+      setText('metric-retained', String(transfers.retainedFiles || 0));
+      setText('metric-retained-bytes', formatBytes(transfers.retainedBytes) + ' · ' + String(transfers.pendingRecipients || 0) + ' entregas pendentes');
+      setText('metric-transfers', String(completedTransfers));
+      setText('metric-transfer-attempts', String(transferAttempts) + ' tentativas · ' + formatBytes(Number(transfers.bytesUploaded || 0) + Number(transfers.bytesDownloaded || 0)));
+      setText('metric-resumes', String(transfers.downloadsResumed || 0));
+      setText('metric-transfer-failures', String(transferFailures) + ' falhas · ' + String(transfers.activeUploads || 0) + ' uploads ativos');
+      setText('metric-latency', Number(transfers.averageSendLatencyMs || 0).toFixed(1) + ' ms');
+      setText('metric-latency-max', 'máxima ' + Number(transfers.maxSendLatencyMs || 0).toFixed(1) + ' ms · ' + String(transfers.sendFailures || 0) + ' falhas de socket');
       setText('peers-meta', String(data.peers.length) + ' online');
       setText('announcements-meta', String(data.announcements.length) + ' ativos');
-      setText('store-path', 'Dados de anúncios: ' + data.announcementStoreFile);
+      setText('store-path', 'Dados de anúncios: ' + data.announcementStoreFile + ' · métricas reiniciam com o Relay');
       setText('status-text', 'Online · atualizado ' + new Date().toLocaleTimeString('pt-BR'));
       const dot = $('status-dot');
       if (dot) dot.classList.remove('offline');
@@ -1025,6 +1083,21 @@ class LanternRelay {
   private published: Service | null = null;
   private udpSocket: UdpSocket | null = null;
   private presenceRevision = 0;
+  private readonly transferMetrics = {
+    uploadAttempts: 0,
+    uploadsCompleted: 0,
+    uploadsFailed: 0,
+    downloadAttempts: 0,
+    downloadsResumed: 0,
+    downloadsCompleted: 0,
+    downloadsFailed: 0,
+    bytesUploaded: 0,
+    bytesDownloaded: 0,
+    sendLatencyTotalMs: 0,
+    sendLatencyCount: 0,
+    maxSendLatencyMs: 0,
+    sendFailures: 0
+  };
 
   constructor(config: RelayConfig) {
     this.config = config;
@@ -1572,6 +1645,11 @@ class LanternRelay {
     const now = Date.now();
     const peers = this.listDashboardPeers(now);
     const announcements = this.listDashboardAnnouncements(peers, now);
+    const attachmentStats = this.groupStore.getAttachmentStats();
+    const averageSendLatencyMs =
+      this.transferMetrics.sendLatencyCount > 0
+        ? this.transferMetrics.sendLatencyTotalMs / this.transferMetrics.sendLatencyCount
+        : 0;
 
     return {
       ok: true,
@@ -1587,6 +1665,24 @@ class LanternRelay {
       announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
       announcementsActive: announcements.length,
       stickersAvailable: this.listStickerCatalog().length,
+      transferMetrics: {
+        uploadAttempts: this.transferMetrics.uploadAttempts,
+        uploadsCompleted: this.transferMetrics.uploadsCompleted,
+        uploadsFailed: this.transferMetrics.uploadsFailed,
+        downloadAttempts: this.transferMetrics.downloadAttempts,
+        downloadsResumed: this.transferMetrics.downloadsResumed,
+        downloadsCompleted: this.transferMetrics.downloadsCompleted,
+        downloadsFailed: this.transferMetrics.downloadsFailed,
+        bytesUploaded: this.transferMetrics.bytesUploaded,
+        bytesDownloaded: this.transferMetrics.bytesDownloaded,
+        retainedFiles: attachmentStats.retainedCount,
+        retainedBytes: attachmentStats.retainedBytes,
+        activeUploads: attachmentStats.activeUploads,
+        pendingRecipients: attachmentStats.pendingRecipients,
+        averageSendLatencyMs,
+        maxSendLatencyMs: this.transferMetrics.maxSendLatencyMs,
+        sendFailures: this.transferMetrics.sendFailures
+      },
       peers,
       announcements
     };
@@ -2207,6 +2303,7 @@ class LanternRelay {
           break;
         }
         case 'file:init': {
+          this.transferMetrics.uploadAttempts += 1;
           const offerRecord = asRecord(data.offer);
           const upload = this.groupStore.initGroupFile({
             actorDeviceId: session.peer.deviceId,
@@ -2257,6 +2354,7 @@ class LanternRelay {
     };
     try {
       await this.groupStore.appendGroupFileChunk(chunk, session.peer.deviceId);
+      this.transferMetrics.bytesUploaded += Buffer.byteLength(chunk.dataBase64 || '', 'base64');
       this.sendEnvelope(session.socket, {
         type: 'relay:group:file:chunk:ack',
         payload: { fileId: chunk.fileId, index: chunk.index }
@@ -2315,9 +2413,11 @@ class LanternRelay {
         session.peer.deviceId,
         metadata.fileId
       );
+      this.transferMetrics.uploadsCompleted += 1;
       this.sendGroupAck(session, requestId, { metadata });
       this.broadcastGroupEvents([messageEvent, attachmentEvent]);
     } catch (error) {
+      this.transferMetrics.uploadsFailed += 1;
       this.sendGroupRequestError(
         session,
         requestId,
@@ -2335,10 +2435,13 @@ class LanternRelay {
     const record = asRecord(payload);
     const requestId = asString(record?.requestId);
     const fileId = asString(record?.fileId);
+    const startIndex = Math.max(0, Math.trunc(asFiniteNumber(record?.startIndex) || 0));
     if (!fileId) {
       this.sendGroupRequestError(session, requestId, 'INVALID_FILE_ID', 'fileId inválido.');
       return;
     }
+    this.transferMetrics.downloadAttempts += 1;
+    if (startIndex > 0) this.transferMetrics.downloadsResumed += 1;
     try {
       const metadata = this.groupStore.getAttachmentMetadata(fileId);
       if (!metadata) {
@@ -2352,7 +2455,11 @@ class LanternRelay {
           metadata
         }
       });
-      for await (const chunk of this.groupStore.createAttachmentChunkStream(fileId, session.peer.deviceId)) {
+      for await (const chunk of this.groupStore.createAttachmentChunkStream(
+        fileId,
+        session.peer.deviceId,
+        startIndex
+      )) {
         const delivered = await this.sendEnvelopeWithStatus(session.socket, {
           type: 'relay:group:file:chunk',
           payload: {
@@ -2363,6 +2470,7 @@ class LanternRelay {
         if (!delivered) {
           throw new Error('Conexão encerrada durante o download do anexo.');
         }
+        this.transferMetrics.bytesDownloaded += Buffer.byteLength(chunk.dataBase64 || '', 'base64');
       }
       this.sendEnvelope(session.socket, {
         type: 'relay:group:file:complete',
@@ -2371,7 +2479,9 @@ class LanternRelay {
           fileId
         }
       });
+      this.transferMetrics.downloadsCompleted += 1;
     } catch (error) {
+      this.transferMetrics.downloadsFailed += 1;
       this.sendGroupRequestError(
         session,
         requestId,
@@ -3176,8 +3286,10 @@ class LanternRelay {
     envelope: RelayEnvelope
   ): Promise<boolean> {
     if (socket.readyState !== OPEN_READY_STATE) {
+      this.transferMetrics.sendFailures += 1;
       return false;
     }
+    const startedAt = Date.now();
     try {
       const payload = JSON.stringify(envelope);
       return await new Promise<boolean>((resolve) => {
@@ -3185,6 +3297,14 @@ class LanternRelay {
         const timeout = setTimeout(() => {
           if (settled) return;
           settled = true;
+          const latency = Math.max(0, Date.now() - startedAt);
+          this.transferMetrics.sendLatencyTotalMs += latency;
+          this.transferMetrics.sendLatencyCount += 1;
+          this.transferMetrics.maxSendLatencyMs = Math.max(
+            this.transferMetrics.maxSendLatencyMs,
+            latency
+          );
+          this.transferMetrics.sendFailures += 1;
           resolve(false);
         }, SEND_CALLBACK_TIMEOUT_MS);
         timeout.unref?.();
@@ -3193,10 +3313,19 @@ class LanternRelay {
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
+          const latency = Math.max(0, Date.now() - startedAt);
+          this.transferMetrics.sendLatencyTotalMs += latency;
+          this.transferMetrics.sendLatencyCount += 1;
+          this.transferMetrics.maxSendLatencyMs = Math.max(
+            this.transferMetrics.maxSendLatencyMs,
+            latency
+          );
+          if (error) this.transferMetrics.sendFailures += 1;
           resolve(!error);
         });
       });
     } catch {
+      this.transferMetrics.sendFailures += 1;
       return false;
     }
   }

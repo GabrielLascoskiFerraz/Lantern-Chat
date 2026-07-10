@@ -928,7 +928,7 @@ export class RelayClient {
     return promise;
   }
 
-  async requestGroupFile(fileId: string): Promise<string> {
+  async requestGroupFile(fileId: string, startIndex = 0): Promise<string> {
     await this.waitUntilReady(8_000);
     const requestId = randomUUID();
     return new Promise<string>((resolve, reject) => {
@@ -937,7 +937,8 @@ export class RelayClient {
           type: 'relay:group:file:request',
           payload: {
             requestId,
-            fileId
+            fileId,
+            startIndex: Math.max(0, Math.trunc(startIndex || 0))
           }
         },
         (error) => {

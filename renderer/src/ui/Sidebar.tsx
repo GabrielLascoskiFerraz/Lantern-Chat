@@ -605,6 +605,23 @@ export const Sidebar = ({
     const conversationId = `group:${group.groupId}`;
     const unread = unreadByConversation[conversationId] || 0;
     const previewText = conversationPreviewById[conversationId] || group.description || 'Grupo';
+    const activeMembers = (groupMembersById[group.groupId] || []).filter(
+      (member) => member.status === 'active'
+    );
+    const onlineMemberCount = relayConnected
+      ? activeMembers.filter(
+          (member) =>
+            member.deviceId === profile.deviceId || onlinePeerIds.includes(member.deviceId)
+        ).length
+      : 0;
+    const totalMemberCount = activeMembers.length;
+    const groupPresenceLabel = relayConnected
+      ? totalMemberCount > 0
+        ? `${onlineMemberCount}/${totalMemberCount} ${
+          totalMemberCount === 1 ? 'participante online' : 'participantes online'
+        }`
+        : 'Sincronizando participantes...'
+      : 'Relay offline';
 
     return (
       <div
@@ -626,7 +643,7 @@ export const Sidebar = ({
             <div className="conversation-submeta">
               <Caption1 className="conversation-status-line">
                 <span className={`conversation-status-pill ${relayConnected ? 'online' : 'offline'}`}>
-                  {relayConnected ? 'Grupo conectado' : 'Relay offline'}
+                  {groupPresenceLabel}
                 </span>
               </Caption1>
               <Caption1 className="conversation-preview conversation-preview-slot">
