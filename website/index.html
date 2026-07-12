@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fc">
+  <meta name="description" content="Lantern é um mensageiro desktop de código aberto para comunicação em redes locais.">
+  <meta property="og:title" content="Lantern — Perto da equipe. Dentro da rede.">
+  <meta property="og:description" content="Mensagens, grupos, anúncios e arquivos entre computadores conectados à mesma rede local.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/hero-lantern-ui.png">
+  <link rel="icon" href="assets/lantern-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <title>Lantern — Perto da equipe. Dentro da rede.</title>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
+  <header class="topbar" data-header>
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="Lantern">
+        <img src="assets/lantern-icon.png" alt="">
+        <span><b>Lantern</b><small data-i18n="brandTag">mensagens na sua rede local</small></span>
+      </a>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="nav" data-menu-toggle><span></span><span></span><span class="sr-only" data-i18n="openMenu">Abrir menu</span></button>
+      <nav id="nav" class="nav" data-nav>
+        <a href="#overview" data-i18n="navOverview">Visão geral</a>
+        <a href="#features" data-i18n="navFeatures">Recursos</a>
+        <a href="#architecture" data-i18n="navHow">Como funciona</a>
+        <a href="#privacy" data-i18n="navPrivacy">Privacidade</a>
+        <button class="language" type="button" data-language-toggle><span data-language-label>EN</span></button>
+        <a class="nav-cta" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases" target="_blank" rel="noreferrer"><span data-i18n="navDownload">Download</span><b>↗</b></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero wrap">
+      <div class="hero-copy reveal">
+        <div class="eyebrow"><span></span><b data-i18n="heroEyebrow">OPEN SOURCE · REDE LOCAL</b></div>
+        <h1><span data-i18n="heroTitleOne">Perto da equipe.</span><em data-i18n="heroTitleTwo">Dentro da rede.</em></h1>
+        <p data-i18n="heroLead">Lantern é um mensageiro desktop para computadores conectados à mesma rede local. Um LanternRelay coordena mensagens, grupos, anúncios, presença online e arquivos, sem exigir cadastro por e-mail.</p>
+        <div class="hero-actions">
+          <a class="primary-action magnetic" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases" target="_blank" rel="noreferrer"><span data-i18n="heroPrimary">Baixar a versão mais recente</span><b>↗</b></a>
+          <a class="secondary-action" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat" target="_blank" rel="noreferrer"><span data-i18n="heroSecondary">Ver o código</span><b>→</b></a>
+        </div>
+      </div>
+
+      <div class="hero-stage reveal delay-1" data-tilt>
+        <div class="halo halo-a" aria-hidden="true"></div><div class="halo halo-b" aria-hidden="true"></div>
+        <figure class="stage-window">
+          <img src="assets/hero-lantern-ui.png" alt="Captura real do Lantern mostrando a lista de contatos, o chat e a conexão com o Relay">
+          <figcaption><span class="live-mark"></span><span data-i18n="screenLabel">captura real</span></figcaption>
+        </figure>
+        <div class="glass-card relay-card"><span class="pulse"></span><div><b>LanternRelay</b><small data-i18n="chipRelay">online na rede</small></div></div>
+        <div class="glass-card profile-card"><img src="assets/lantern-icon.png" alt=""><div><b data-i18n="chipLocal">Perfil local</b><small data-i18n="chipNoAccount">sem conta por e-mail</small></div></div>
+      </div>
+    </section>
+
+    <section class="manifesto wrap reveal" id="overview">
+      <span class="section-label" data-i18n="manifestoKicker">A IDEIA</span>
+      <h2 data-i18n="manifestoTitle">A conversa vai longe. Os dados, nem tanto.</h2>
+      <p data-i18n="manifestoText">O Lantern foi pensado para ambientes em que os computadores já estão próximos — conectados pela mesma rede, trabalhando no mesmo ritmo. O Relay cuida da circulação. Cada dispositivo cuida da sua própria história.</p>
+    </section>
+
+    <section class="features wrap" id="features">
+      <div class="section-head reveal"><div><span class="section-label" data-i18n="featuresKicker">RECURSOS</span><h2 data-i18n="featuresTitle">Tudo no lugar. Inclusive a conversa.</h2></div><p data-i18n="featuresLead">Recursos familiares, organizados para o uso diário e sem transformar a interface em um painel de controle.</p></div>
+      <div class="feature-bento">
+        <article class="feature-card large reveal"><div class="icon-orb">↔</div><span class="feature-index">01</span><h3 data-i18n="featureChatTitle">Conversas e grupos</h3><p data-i18n="featureChatText">Mensagens individuais e grupos com participantes, funções administrativas, respostas, reações, favoritos e edição de mensagens recentes.</p><div class="feature-pills"><span data-i18n="miniPrivate">conversas privadas</span><span data-i18n="miniGroups">grupos organizados</span><span data-i18n="miniReactions">reações e respostas</span></div></article>
+        <article class="feature-card reveal delay-1"><div class="icon-orb">⇧</div><span class="feature-index">02</span><h3 data-i18n="featureFilesTitle">Arquivos, sem mudar de assunto</h3><p data-i18n="featureFilesText">Envie imagens e documentos de até 200 MB, acompanhe o progresso e use arrastar e soltar ou colar da área de transferência.</p></article>
+        <article class="feature-card dark reveal"><div class="icon-orb">!</div><span class="feature-index">03</span><h3 data-i18n="featureAnnouncementTitle">Um recado. A rede inteira.</h3><p data-i18n="featureAnnouncementText">Publique anúncios para todos, com reações, edição e expiração automática após 24 horas.</p></article>
+        <article class="feature-card reveal delay-1"><div class="icon-orb gif">GIF</div><span class="feature-index">04</span><h3 data-i18n="featureStickerTitle">Figurinhas daqui mesmo</h3><p data-i18n="featureStickerText">O Relay pode servir coleções de GIFs organizadas por categoria, sem depender de um catálogo externo.</p></article>
+        <article class="feature-card large gradient reveal"><div class="icon-orb">◉</div><span class="feature-index">05</span><h3 data-i18n="featureDesktopTitle">Um app que se sente em casa no desktop</h3><p data-i18n="featureDesktopText">Histórico local em SQLite, backup e restauração, exportação de conversas, notificações nativas, bandeja, temas, inicialização automática e modo Não Perturbe.</p><div class="feature-pills"><span>SQLite</span><span>TXT / HTML</span><span data-i18n="miniBackup">backup local</span></div></article>
+      </div>
+    </section>
+
+    <section class="architecture wrap" id="architecture">
+      <div class="section-head reveal"><div><span class="section-label" data-i18n="architectureKicker">COMO FUNCIONA</span><h2 data-i18n="architectureTitle">Um ponto de encontro. Vários pontos de vista.</h2></div><p data-i18n="architectureLead">O Relay centraliza a comunicação, mas cada cliente continua leve, local e independente.</p></div>
+      <div class="architecture-board reveal" data-parallax>
+        <div class="mesh" aria-hidden="true"></div>
+        <div class="client client-a"><img src="assets/lantern-icon.png" alt=""><div><b>Lantern</b><small data-i18n="clientLabel">cliente desktop</small></div><i></i></div>
+        <div class="client client-b"><img src="assets/lantern-icon.png" alt=""><div><b>Lantern</b><small data-i18n="clientLabel">cliente desktop</small></div><i></i></div>
+        <div class="relay"><span class="relay-rings"></span><img src="assets/lantern-icon.png" alt=""><b>LanternRelay</b><small data-i18n="relayLabel">serviço central da rede</small><em>43190</em></div>
+        <div class="client client-c"><img src="assets/lantern-icon.png" alt=""><div><b>Lantern</b><small data-i18n="clientLabel">cliente desktop</small></div><i></i></div>
+        <svg viewBox="0 0 1000 480" preserveAspectRatio="none" aria-hidden="true"><path d="M205 120 C350 120 390 240 455 240"/><path d="M205 365 C350 365 390 250 455 250"/><path d="M795 242 C680 242 620 242 545 242"/></svg>
+      </div>
+      <div class="steps">
+        <article class="reveal"><span>1</span><div><h3 data-i18n="stepOneTitle">Acenda o Relay</h3><p data-i18n="stepOneText">Escolha um computador acessível na rede e execute o LanternRelay.</p></div></article>
+        <article class="reveal delay-1"><span>2</span><div><h3 data-i18n="stepTwoTitle">Abra o Lantern</h3><p data-i18n="stepTwoText">Cada dispositivo mantém seu próprio perfil e histórico locais.</p></div></article>
+        <article class="reveal delay-2"><span>3</span><div><h3 data-i18n="stepThreeTitle">Deixe a rede falar</h3><p data-i18n="stepThreeText">Os usuários aparecem online e podem conversar, compartilhar arquivos e publicar avisos.</p></div></article>
+      </div>
+    </section>
+
+    <section class="privacy wrap reveal" id="privacy">
+      <div class="privacy-copy"><span class="section-label" data-i18n="privacyKicker">DADOS E PRIVACIDADE</span><h2 data-i18n="privacyTitle">Seu histórico fica perto. A arquitetura também.</h2><p data-i18n="privacyText">Cada instalação usa um perfil associado ao dispositivo. O Relay encaminha a comunicação, enquanto o histórico permanece no banco local de cada cliente.</p><div class="privacy-list"><span data-i18n="privacyOne">Perfil criado no próprio dispositivo</span><span data-i18n="privacyTwo">Mensagens encaminhadas pelo Relay local</span><span data-i18n="privacyThree">Backup, restauração e exportação locais</span></div><p class="privacy-note" data-i18n="privacyNote">A versão atual não oferece criptografia ponta a ponta. O Lantern deve ser usado em uma rede confiável, com o Relay e a infraestrutura local devidamente protegidos.</p></div>
+      <div class="privacy-visual" aria-hidden="true"><div class="privacy-icon"><img src="assets/lantern-icon.png" alt=""></div><span class="orbit one"></span><span class="orbit two"></span><span class="orbit three"></span><i class="node n1"></i><i class="node n2"></i><i class="node n3"></i></div>
+    </section>
+
+    <section class="download wrap reveal">
+      <div><span class="section-label" data-i18n="downloadKicker">COMECE PELO GITHUB</span><h2 data-i18n="downloadTitle">Baixe. Conecte. Converse.</h2><p data-i18n="downloadText">Cada rede precisa de um LanternRelay acessível e do aplicativo Lantern nos computadores participantes.</p><div class="download-actions"><a class="primary-action magnetic" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases" target="_blank" rel="noreferrer"><span data-i18n="downloadRelease">Abrir releases</span><b>↗</b></a><a class="secondary-action" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/blob/main/README.md" target="_blank" rel="noreferrer"><span data-i18n="readmeLink">Ler documentação</span><b>→</b></a></div></div>
+      <div class="platforms"><article><b>⌘</b><span>macOS</span><small data-i18n="macText">Apple Silicon e Intel</small></article><article><b>⊞</b><span>Windows</span><small data-i18n="winText">computadores x64</small></article><article><b>◈</b><span>Linux</span><small data-i18n="linuxText">build configurável pelo projeto</small></article></div>
+    </section>
+
+    <section class="final-cta wrap reveal"><img src="assets/lantern-icon.png" alt=""><div><span class="section-label" data-i18n="ctaKicker">CÓDIGO ABERTO</span><h2 data-i18n="ctaTitle">Uma pequena luz para a sua rede local.</h2></div><a class="round-link" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat" target="_blank" rel="noreferrer" aria-label="GitHub">↗</a></section>
+  </main>
+
+  <footer class="footer wrap"><div class="footer-brand"><img src="assets/lantern-icon.png" alt=""><b>Lantern</b></div><p data-i18n="footerText">Mensageiro desktop de código aberto para comunicação em redes locais.</p><div><a href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases" target="_blank" rel="noreferrer">Releases</a><span>MIT</span><span>© <span data-year></span></span></div></footer>
+  <script src="script.js"></script>
+</body>
+</html>
