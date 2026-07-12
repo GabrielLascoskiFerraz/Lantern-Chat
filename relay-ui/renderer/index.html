@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lantern Relay</title><link rel="stylesheet" href="./styles.css"></head>
+<body><main class="app-shell">
+  <header class="hero"><div><p class="eyebrow">LANTERN RELAY</p><h1>Relay canônico</h1><p id="connection-summary">Carregando estado…</p></div><span id="status-pill" class="status-pill offline">Offline</span></header>
+  <section class="action-row"><button id="start" class="primary">Iniciar Relay</button><button id="restart">Reiniciar</button><button id="stop" class="danger">Parar</button></section>
+  <section class="metrics"><article><span>Usuários conectados</span><strong id="metric-peers">0</strong></article><article><span>Anúncios ativos</span><strong id="metric-announcements">0</strong></article><article><span>Frames canônicos</span><strong id="metric-frames">0</strong></article><article><span>Tempo ativo</span><strong id="metric-uptime">--</strong></article></section>
+  <section class="card"><div class="section-title"><h2>Conexão do Relay</h2><span id="port-label">Porta 43190</span></div><p>WSS é recomendado e obrigatório para acesso externo. Sem certificado, o Relay aceita WS somente na rede local.</p><div id="addresses" class="addresses"></div></section>
+  <section class="card settings"><div class="section-title"><h2>Configuração segura</h2><span>Certificado obrigatório</span></div>
+    <label>Porta<input id="port-input" type="number" min="1" max="65535"></label>
+    <label>Certificado TLS (opcional no modo local)<div class="file-row"><input id="cert-input" readonly><button id="pick-cert">Selecionar</button></div></label>
+    <label>Chave privada<div class="file-row"><input id="key-input" readonly type="password"><button id="pick-key">Selecionar</button></div></label>
+    <button id="save-settings" class="primary">Aplicar configuração</button><p id="feedback" class="feedback" role="alert"></p>
+  </section>
+  <section class="card"><div class="section-title"><h2>Usuários conectados</h2><span id="users-count">0 online</span></div><div id="users" class="users"><p class="empty">Nenhum usuário conectado.</p></div></section>
+</main><script src="./app.js"></script></body></html>

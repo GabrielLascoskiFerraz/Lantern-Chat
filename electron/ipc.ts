@@ -133,7 +133,11 @@ export interface IpcBindings {
   getMessageFavorites: (messageIds: string[]) => Record<string, boolean>;
   getFavoriteMessages: (conversationId: string) => DbMessage[];
   resyncConversation: (conversationId: string) => Promise<void>;
-  getMessages: (conversationId: string, limit: number, before?: number) => DbMessage[];
+  getMessages: (
+    conversationId: string,
+    limit: number,
+    before?: number
+  ) => Promise<DbMessage[]> | DbMessage[];
   getMessagesByIds: (messageIds: string[]) => DbMessage[];
   searchConversationMessageIds: (
     conversationId: string,

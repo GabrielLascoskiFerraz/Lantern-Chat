@@ -1853,7 +1853,7 @@ export const ChatView = ({
                   ) : isFile ? (
                     <>
                       {!isStickerFile && <div className="message-file-title">📎 {message.fileName}</div>}
-                      {isImageFile && (
+                      {isImageFile && Boolean(message.filePath) && (
                         <button
                           type="button"
                           className={`message-image-preview-btn ${isStickerFile ? 'sticker-preview' : ''} ${previewDataUrl ? 'is-ready' : ''} ${
@@ -1916,8 +1916,9 @@ export const ChatView = ({
                           <Caption1>Não foi possível enviar este anexo.</Caption1>
                         </div>
                       ) : message.status === 'delivered' || message.status === 'read' ? (
-                        <div className="inline-status">
-                          <Caption1>Anexo indisponível neste dispositivo.</Caption1>
+                        <div className="inline-status pending">
+                          <Spinner size="tiny" />
+                          <Caption1>Recuperando anexo do Relay...</Caption1>
                         </div>
                       ) : outgoing && (message.status === 'sent' || message.status === null) ? (
                         <div className="inline-status pending">

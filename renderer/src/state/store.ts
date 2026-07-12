@@ -166,7 +166,6 @@ interface LanternState {
 
 const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
-const PROFILE_ONBOARDING_KEY_PREFIX = 'lantern.profile.onboarding.done';
 const MESSAGES_PAGE_SIZE = 80;
 const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
@@ -442,12 +441,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       ];
     const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
 
-    const onboardingKey = `${PROFILE_ONBOARDING_KEY_PREFIX}.${profile.deviceId}`;
-    const onboardingDone =
-      typeof window !== 'undefined' && window.localStorage.getItem(onboardingKey) === '1';
-    const profileLooksPristine = profile.updatedAt <= profile.createdAt;
-    const shouldOpenSettings = !onboardingDone || profileLooksPristine;
-
     const selectedAtLoad = get().selectedConversationId;
     const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
 
@@ -470,7 +463,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         [selectedAtLoad]: null
       },
       conversationPreviewById,
-      settingsOpen: shouldOpenSettings,
+      settingsOpen: false,
       ready: true,
       loadingConversationId: selectedAtLoad
     });
@@ -1161,24 +1154,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }
   },
   login: async (input) => {
-    set({ ready: false, startupError: null });
-    try {
-      await ipcClient.login(input);
-      await get().loadInitial();
-    } catch (error) {
-      set({ ready: true });
-      throw error;
-    }
+    set({ startupError: null });
+    await ipcClient.login(input);
+    await get().loadInitial();
   },
   register: async (input) => {
-    set({ ready: false, startupError: null });
-    try {
-      await ipcClient.register(input);
-      await get().loadInitial();
-    } catch (error) {
-      set({ ready: true });
-      throw error;
-    }
+    set({ startupError: null });
+    await ipcClient.register(input);
+    await get().loadInitial();
   },
   logout: async () => {
     await ipcClient.logout();
@@ -2011,10 +1994,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   },
   updateProfile: async (input) => {
     const profile = await ipcClient.updateProfile(input);
-    if (typeof window !== 'undefined') {
-      const onboardingKey = `${PROFILE_ONBOARDING_KEY_PREFIX}.${profile.deviceId}`;
-      window.localStorage.setItem(onboardingKey, '1');
-    }
     set({ profile });
   },
   createGroup: async (input) => {

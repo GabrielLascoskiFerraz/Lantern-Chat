@@ -3,6 +3,15 @@ import { Button, Field, Input, Select, Spinner, Switch } from '@fluentui/react-c
 import { ClientLocale, ClientRelayConfig, RelayConnectionMode, ipcClient } from '../api/ipcClient';
 import { localeLabels, translate } from '../i18n';
 import { useLanternStore } from '../state/store';
+import appIcon from '../../../assets/icon.png';
+
+const readableError = (error: unknown, fallback: string): string => {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback;
+  return message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim() || fallback;
+};
 
 export function LoginView() {
   const authState = useLanternStore((state) => state.authState);
@@ -62,7 +71,7 @@ export function LoginView() {
         await login({ relay, username, password });
       }
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : 'Falha ao entrar.');
+      setFeedback(readableError(error, 'Falha ao entrar.'));
     } finally {
       setBusy(false);
     }
@@ -70,15 +79,19 @@ export function LoginView() {
 
   return <main className="login-screen">
     <section className="login-brand">
-      <span className="login-mark">L</span>
-      <div><strong>Lantern</strong><span>Central</span></div>
-      <h1>{t('welcome')}</h1><p>{t('subtitle')}</p>
+      <div className="login-identity">
+        <img className="login-app-icon" src={appIcon} alt="" />
+        <div className="login-product"><strong>Lantern</strong><span>Mensageria segura</span></div>
+      </div>
+      <div className="login-copy"><h1>{t('welcome')}</h1><p>{t('subtitle')}</p></div>
     </section>
     <form className="login-card" onSubmit={submit}>
-      <Select value={locale} onChange={(_, data) => changeLocale(data.value as ClientLocale)}>
-        {Object.entries(localeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-      </Select>
-      <h2>{t('relay')}</h2>
+      <header className="login-card-header">
+        <div><span className="login-eyebrow">Relay canônico</span><h2>{t('relay')}</h2></div>
+        <Select aria-label="Idioma" value={locale} onChange={(_, data) => changeLocale(data.value as ClientLocale)}>
+          {Object.entries(localeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </Select>
+      </header>
       <div className="login-mode-tabs">
         {(['local-auto', 'local-manual', 'external-manual'] as RelayConnectionMode[]).map((value) =>
           <Button key={value} type="button" appearance={mode === value ? 'primary' : 'subtle'} onClick={() => setMode(value)}>
@@ -92,12 +105,12 @@ export function LoginView() {
         <Field label={t('host')} required><Input value={host} onChange={(_, d) => setHost(d.value)} placeholder="relay.exemplo.com" /></Field>
         <Field label={t('port')} required><Input value={port} onChange={(_, d) => setPort(d.value)} inputMode="numeric" /></Field>
       </div>}
-      {mode !== 'external-manual' && <Switch checked={secure} onChange={(_, d) => setSecure(d.checked)} label={t('secure')} />}
+      {mode === 'local-manual' && <Switch checked={secure} onChange={(_, d) => setSecure(d.checked)} label={t('secure')} />}
       {creating && <Field label={t('displayName')} required><Input autoComplete="name" value={displayName} onChange={(_, d) => setDisplayName(d.value)} /></Field>}
       <Field label={t('username')} required><Input autoComplete="username" value={username} onChange={(_, d) => setUsername(d.value)} /></Field>
       <Field label={t('password')} required><Input type="password" autoComplete="current-password" value={password} onChange={(_, d) => setPassword(d.value)} /></Field>
       {creating && <small className="login-account-hint">{t('accountHint')}</small>}
-      {feedback && <div className="login-feedback" role="status">{feedback}</div>}
+      {feedback && <div className="login-feedback" role="alert" aria-live="polite">{feedback}</div>}
       <Button type="submit" appearance="primary" size="large" disabled={busy || !username.trim() || !password || (creating && !displayName.trim())}>
         {busy ? t('entering') : t(creating ? 'createAccount' : 'enter')}
       </Button>

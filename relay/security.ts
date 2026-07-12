@@ -44,8 +44,8 @@ export const loadOrCreateMasterKey = (dataDir: string): Buffer => {
   return key;
 };
 
-export const hashPassword = (password: string): string => {
-  if (password.length < 10) {
+export const hashPassword = (password: string, allowBootstrapPassword = false): string => {
+  if (!allowBootstrapPassword && password.length < 10) {
     throw new Error('A senha deve ter pelo menos 10 caracteres.');
   }
   const salt = randomBytes(16);

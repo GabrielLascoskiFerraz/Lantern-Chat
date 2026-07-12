@@ -1,0 +1,12 @@
+{
+  "appId": "com.lantern.relay",
+  "productName": "Lantern Relay",
+  "directories": { "output": "dist-relay-ui-installers", "buildResources": "assets" },
+  "extraMetadata": { "main": "dist-relay-ui/relay-ui/main.js" },
+  "files": ["dist-relay-ui/**/*", "relay-ui/renderer/**/*", "assets/**/*", "package.json"],
+  "asar": true,
+  "asarUnpack": ["node_modules/better-sqlite3/**/*"],
+  "win": { "icon": "assets/icon.ico", "target": ["nsis"], "artifactName": "LanternRelay-Setup-${version}.${ext}" },
+  "mac": { "icon": "assets/icon.icns", "target": ["dmg", "zip"], "artifactName": "LanternRelay-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false }
+}

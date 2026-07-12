@@ -103,24 +103,6 @@ export const runMigrations = (db: Database.Database): void => {
       value TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS pending_peer_operations (
-      id TEXT PRIMARY KEY,
-      peerId TEXT NOT NULL,
-      type TEXT NOT NULL,
-      dedupeKey TEXT NOT NULL,
-      payloadJson TEXT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      lastAttemptAt INTEGER,
-      nextAttemptAt INTEGER NOT NULL DEFAULT 0,
-      lastError TEXT,
-      createdAt INTEGER NOT NULL,
-      updatedAt INTEGER NOT NULL,
-      UNIQUE(peerId, dedupeKey)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_pending_peer_operations_peer_retry
-      ON pending_peer_operations(peerId, nextAttemptAt, createdAt);
-
     CREATE TABLE IF NOT EXISTS hidden_messages (
       messageId TEXT PRIMARY KEY,
       hiddenAt INTEGER NOT NULL

@@ -56,7 +56,7 @@ const GROUP_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 
-interface RelayConfig {
+export interface RelayConfig {
   host: string;
   port: number;
   pingIntervalMs: number;
@@ -183,6 +183,7 @@ interface RelayDashboardSnapshot {
   uptimeMs: number;
   host: string;
   port: number;
+  tls: boolean;
   peersOnline: number;
   sessionsOpen: number;
   presenceRevision: number;
@@ -1124,7 +1125,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       setText('metric-started', 'iniciado em ' + formatTime(data.startedAt));
       setText('metric-announcements', String(data.announcementsActive));
       setText('metric-revision', '#' + data.presenceRevision);
-      setText('metric-endpoint', 'ws://' + data.host + ':' + data.port);
+      setText('metric-endpoint', (data.tls ? 'wss://' : 'ws://') + data.host + ':' + data.port);
       const transfers = data.transferMetrics || {};
       const completedTransfers = Number(transfers.uploadsCompleted || 0) + Number(transfers.downloadsCompleted || 0);
       const transferAttempts = Number(transfers.uploadAttempts || 0) + Number(transfers.downloadAttempts || 0);
@@ -1296,7 +1297,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 </body>
 </html>`;
 
-class LanternRelay {
+export class LanternRelay {
   private readonly config: RelayConfig;
   private readonly httpServer: HttpServer | HttpsServer;
   private readonly wsServer: WebSocketServer;
@@ -1493,7 +1494,8 @@ class LanternRelay {
         txt: {
           app: 'LanternRelay',
           version: RELAY_VERSION,
-          port: String(this.config.port)
+          port: String(this.config.port),
+          secure: String(Boolean(this.config.tlsCertFile))
         }
       });
       this.published.on('error', (error: unknown) => {
@@ -1972,11 +1974,8 @@ class LanternRelay {
   private isClientTransportAllowed(req: IncomingMessage): boolean {
     if (this.isTlsRequest(req) || this.isLoopbackRequest(req)) return true;
     const address = this.normalizeRemoteAddress(req.socket.remoteAddress || '');
-    const privateAddress =
-      /^10\./.test(address) ||
-      /^192\.168\./.test(address) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
-      /^fd[0-9a-f]{2}:/i.test(address) ||
+    const privateAddress = /^10\./.test(address) || /^192\.168\./.test(address) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(address) || /^fd[0-9a-f]{2}:/i.test(address) ||
       /^fe80:/i.test(address);
     return !this.config.externalMode && privateAddress;
   }
@@ -2186,7 +2185,7 @@ class LanternRelay {
     res.end(method === 'HEAD' ? undefined : json);
   }
 
-  private getDashboardSnapshot(): RelayDashboardSnapshot {
+  getDashboardSnapshot(): RelayDashboardSnapshot {
     this.sweepAnnouncements('dashboard_snapshot');
     const now = Date.now();
     const peers = this.listDashboardPeers(now);
@@ -2205,6 +2204,7 @@ class LanternRelay {
       uptimeMs: Math.max(0, now - this.startedAt),
       host: this.config.host,
       port: this.config.port,
+      tls: Boolean(this.config.tlsCertFile),
       peersOnline: peers.length,
       sessionsOpen: this.sessionsBySocket.size,
       presenceRevision: this.presenceRevision,
@@ -2423,6 +2423,9 @@ class LanternRelay {
       case 'relay:announcement:read':
         this.handleAnnouncementRead(session, envelope.payload);
         return;
+      case 'relay:history:request':
+        this.handleCanonicalHistoryRequest(session, envelope.payload);
+        return;
       case 'relay:groups:sync':
         this.handleGroupSyncRequest(session, envelope.payload);
         return;
@@ -2472,6 +2475,36 @@ class LanternRelay {
       default:
         this.sendError(session, 'UNKNOWN_TYPE', `Tipo não suportado: ${envelope.type}`);
     }
+  }
+
+  private handleCanonicalHistoryRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Autenticação necessária.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const peerUserId = asString(record?.peerUserId);
+    if (!requestId || !peerUserId) {
+      this.sendError(session, 'INVALID_HISTORY_REQUEST', 'Página de histórico inválida.');
+      return;
+    }
+    const before = asFiniteNumber(record?.before) || Number.MAX_SAFE_INTEGER;
+    const limit = Math.max(1, Math.min(Math.trunc(asFiniteNumber(record?.limit) || 100), 500));
+    const frames = this.centralStore
+      .listConversationFramesForUser(session.peer.deviceId, peerUserId, before, limit)
+      .map((frame) => ({
+        type: frame.type,
+        messageId: frame.messageId,
+        from: frame.senderUserId,
+        to: frame.targetUserId,
+        createdAt: frame.createdAt,
+        payload: frame.payload
+      }));
+    this.sendEnvelope(session.socket, {
+      type: 'relay:history:page',
+      payload: { requestId, frames, hasMore: frames.length === limit }
+    });
   }
 
   private handleCentralAttachmentInit(session: RelaySession, payload: unknown): void {
@@ -2642,7 +2675,8 @@ class LanternRelay {
       type: 'relay:history:snapshot',
       payload: {
         serverTime: now,
-        frames: this.centralStore.listFramesForUser(canonicalDeviceId, 0, 100_000).map((frame) => ({
+        // Apenas um índice leve (último frame por conversa); o histórico é paginado sob demanda.
+        frames: this.centralStore.listLatestConversationFramesForUser(canonicalDeviceId).map((frame) => ({
           type: frame.type,
           messageId: frame.messageId,
           from: frame.senderUserId,
@@ -2655,8 +2689,7 @@ class LanternRelay {
     this.sendEnvelope(session.socket, {
       type: 'relay:directory',
       payload: {
-        users: this.centralStore.listUsers()
-          .filter((user) => !user.disabled && user.userId !== canonicalDeviceId)
+        users: this.centralStore.listVisibleUsersForUser(canonicalDeviceId)
           .map((user) => ({
             deviceId: user.userId,
             username: user.username,
@@ -2854,6 +2887,16 @@ class LanternRelay {
       let events: RelayGroupEvent[] = [];
       let response: Record<string, unknown> = {};
       switch (action) {
+        case 'history': {
+          const history = this.groupStore.historyForDevice(
+            asString(data.groupId) || '',
+            session.peer.deviceId,
+            asFiniteNumber(data.before) || Number.MAX_SAFE_INTEGER,
+            Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500))
+          );
+          response = { events: history, hasMore: history.length === Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500)) };
+          break;
+        }
         case 'create': {
           const result = this.groupStore.createGroup({
             actor: session.peer,
@@ -3253,6 +3296,27 @@ class LanternRelay {
         'O campo "from" precisa ser o deviceId da sessão.',
         frame.messageId
       );
+      return;
+    }
+
+    if (frame.to) {
+      const target = this.centralStore.getUser(frame.to);
+      if (!target || target.disabled) {
+        this.sendError(session, 'UNKNOWN_TARGET', 'Destinatário canônico inexistente ou desativado.', frame.messageId);
+        return;
+      }
+    }
+
+    if ((frame.type === 'chat:clear' || frame.type === 'chat:forget') && frame.to) {
+      this.centralStore.setConversationState(
+        session.peer.deviceId,
+        frame.to,
+        frame.type === 'chat:forget'
+      );
+      this.sendEnvelope(session.socket, {
+        type: 'relay:send:ack',
+        payload: { frameMessageId: frame.messageId, deliveredTo: [] }
+      });
       return;
     }
 
@@ -3910,37 +3974,43 @@ class LanternRelay {
   }
 
   private sendPresenceSnapshot(session: RelaySession): void {
+    const viewerId = session.peer?.deviceId || '';
     this.sendEnvelope(session.socket, {
       type: 'relay:presence',
       payload: {
         serverTime: Date.now(),
         revision: this.presenceRevision,
-        peers: this.listPeers()
+        peers: this.listPeers().filter((peer) =>
+          peer.deviceId !== viewerId && this.centralStore.isUserVisibleTo(viewerId, peer.deviceId)
+        )
       }
     });
   }
 
   private broadcastPresence(reason = 'update'): void {
-    const payload = {
-      serverTime: Date.now(),
-      revision: this.presenceRevision,
-      peers: this.listPeers()
-    };
+    const peers = this.listPeers();
     const periodic = reason === 'periodic';
     logRelay('presence_broadcast', {
       reason,
       revision: this.presenceRevision,
       recipients: this.sessionsBySocket.size,
-      peersOnline: payload.peers.length
+      peersOnline: peers.length
     }, {
       level: periodic ? 'debug' : 'info',
       rateKey: periodic ? 'presence_broadcast_periodic' : undefined,
       rateLimitMs: periodic ? 20_000 : undefined
     });
     for (const session of this.sessionsBySocket.values()) {
+      const viewerId = session.peer?.deviceId || '';
       this.sendEnvelope(session.socket, {
         type: 'relay:presence',
-        payload
+        payload: {
+          serverTime: Date.now(),
+          revision: this.presenceRevision,
+          peers: peers.filter((peer) =>
+            peer.deviceId !== viewerId && this.centralStore.isUserVisibleTo(viewerId, peer.deviceId)
+          )
+        }
       });
     }
   }
@@ -3979,6 +4049,11 @@ class LanternRelay {
     );
 
     for (const session of this.sessionsBySocket.values()) {
+      const viewerId = session.peer?.deviceId || '';
+      if (input.op === 'upsert' &&
+          (input.peer.deviceId === viewerId || !this.centralStore.isUserVisibleTo(viewerId, input.peer.deviceId))) {
+        continue;
+      }
       this.sendEnvelope(session.socket, {
         type: 'relay:presence:delta',
         payload
@@ -4086,38 +4161,30 @@ const config: RelayConfig = {
   externalMode: process.env.LANTERN_RELAY_EXTERNAL === '1'
 };
 
-const relay = new LanternRelay(config);
+export const createRelayFromEnvironment = (): LanternRelay => new LanternRelay({ ...config });
 
-const shutdown = async (signal: string): Promise<void> => {
-  logRelay('shutdown', { signal });
-  try {
-    await relay.stop(signal);
-    process.exit(0);
-  } catch (error) {
-    console.error('[LanternRelay] erro ao encerrar:', error);
+if (require.main === module) {
+  const relay = createRelayFromEnvironment();
+  const shutdown = async (signal: string): Promise<void> => {
+    logRelay('shutdown', { signal });
+    try {
+      await relay.stop(signal);
+      process.exit(0);
+    } catch (error) {
+      console.error('[LanternRelay] erro ao encerrar:', error);
+      process.exit(1);
+    }
+  };
+
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('uncaughtException', (error) => console.error('[LanternRelay] uncaughtException:', error));
+  process.on('unhandledRejection', (reason) => console.error('[LanternRelay] unhandledRejection:', reason));
+
+  void relay.start().catch((error) => {
+    logRelay('startup_failed', {
+      message: error instanceof Error ? error.message : String(error)
+    });
     process.exit(1);
-  }
-};
-
-process.on('SIGINT', () => {
-  void shutdown('SIGINT');
-});
-
-process.on('SIGTERM', () => {
-  void shutdown('SIGTERM');
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('[LanternRelay] uncaughtException:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('[LanternRelay] unhandledRejection:', reason);
-});
-
-void relay.start().catch((error) => {
-  logRelay('startup_failed', {
-    message: error instanceof Error ? error.message : String(error)
   });
-  process.exit(1);
-});
+}

@@ -1,6 +1,6 @@
 {
   "appId": "com.lantern.central",
-  "productName": "Lantern Central",
+  "productName": "Lantern",
   "directories": {
     "output": "dist-installers",
     "buildResources": "assets"
@@ -15,12 +15,12 @@
   "win": {
     "icon": "assets/icon.ico",
     "target": ["nsis"],
-    "artifactName": "Lantern-Central-Setup-${version}.${ext}"
+    "artifactName": "Lantern-Setup-${version}.${ext}"
   },
   "mac": {
     "icon": "assets/icon.icns",
     "target": ["dmg", "zip"],
-    "artifactName": "Lantern-Central-${version}-${arch}.${ext}",
+    "artifactName": "Lantern-${version}-${arch}.${ext}",
     "category": "public.app-category.social-networking"
   },
   "nsis": {

@@ -427,13 +427,75 @@ export class GroupStore {
     }
     return groups.map((group) => {
       const knownSeq = Math.max(0, Math.trunc(knownSeqByGroup?.[group.groupId] || 0));
-      const events = (this.eventsByGroupId.get(group.groupId) || []).filter((event) => event.seq > knownSeq);
+      const pendingEvents = (this.eventsByGroupId.get(group.groupId) || [])
+        .filter((event) => event.seq > knownSeq);
+      const latestMessage = [...pendingEvents]
+        .reverse()
+        .find((event) => event.type === 'group.message.created');
+      const stateEvents = pendingEvents
+        .filter(
+          (event) =>
+            event.type === 'group.created' ||
+            event.type === 'group.updated' ||
+            event.type === 'group.deleted' ||
+            event.type.startsWith('group.member.')
+        )
+        .slice(-20);
+      const events = [...stateEvents, ...(latestMessage ? [latestMessage] : [])]
+        .sort((left, right) => left.seq - right.seq || left.eventId.localeCompare(right.eventId));
       return {
         group,
         members: Object.values(group.members),
         pinnedMessageIds: group.pinnedMessageIds,
         events
       };
+    });
+  }
+
+  historyForDevice(
+    groupId: string,
+    deviceId: string,
+    before = Number.MAX_SAFE_INTEGER,
+    limit = 100
+  ): RelayGroupEvent[] {
+    const group = this.getRequiredGroup(groupId);
+    this.assertActiveMember(group, deviceId);
+    const safeBefore = Number.isFinite(before) ? Math.max(1, Math.trunc(before)) : Number.MAX_SAFE_INTEGER;
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
+    const allEvents = this.eventsByGroupId.get(group.groupId) || [];
+    const createdPage = allEvents
+      .filter((event) => event.type === 'group.message.created' && event.createdAt < safeBefore)
+      .slice(-safeLimit);
+    const messageIds = new Set(
+      createdPage
+        .map((event) => {
+          const payload = event.payload && typeof event.payload === 'object'
+            ? event.payload as Record<string, unknown>
+            : {};
+          const message = payload.message && typeof payload.message === 'object'
+            ? payload.message as Record<string, unknown>
+            : {};
+          return typeof message.messageId === 'string' ? message.messageId : '';
+        })
+        .filter(Boolean)
+    );
+    if (messageIds.size === 0) return [];
+    return allEvents.filter((event) => {
+      if (createdPage.some((created) => created.eventId === event.eventId)) return true;
+      const payload = event.payload && typeof event.payload === 'object'
+        ? event.payload as Record<string, unknown>
+        : {};
+      const targetMessageId =
+        typeof payload.targetMessageId === 'string'
+          ? payload.targetMessageId
+          : typeof payload.messageId === 'string'
+            ? payload.messageId
+            : '';
+      if (targetMessageId && messageIds.has(targetMessageId)) return true;
+      const metadata = payload.metadata && typeof payload.metadata === 'object'
+        ? payload.metadata as Record<string, unknown>
+        : {};
+      return typeof metadata.messageId === 'string' && messageIds.has(metadata.messageId);
     });
   }
 

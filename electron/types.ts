@@ -1,5 +1,4 @@
 export type MessageType =
-  | 'hello'
   | 'chat:text'
   | 'chat:ack'
   | 'chat:react'
@@ -7,14 +6,9 @@ export type MessageType =
   | 'chat:edit'
   | 'chat:clear'
   | 'chat:forget'
-  | 'chat:sync:request'
-  | 'chat:sync:response'
   | 'group:event'
   | 'announce'
   | 'file:offer'
-  | 'file:request'
-  | 'file:chunk'
-  | 'file:complete'
   | 'typing';
 
 export interface Profile {
@@ -120,39 +114,6 @@ export interface TypingPayload {
   isTyping: boolean;
 }
 
-export interface SyncRequestPayload {
-  since: number;
-  limit: number;
-  fullResync?: boolean;
-}
-
-export interface SyncMessagePayload {
-  messageId: string;
-  senderDeviceId: string;
-  receiverDeviceId: string | null;
-  type: 'text' | 'announcement' | 'file';
-  bodyText: string | null;
-  fileId: string | null;
-  fileName: string | null;
-  fileSize: number | null;
-  fileSha256: string | null;
-  status: 'sent' | 'delivered' | 'read' | 'failed' | null;
-  reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
-  deletedAt: number | null;
-  replyToMessageId: string | null;
-  replyToSenderDeviceId: string | null;
-  replyToType: 'text' | 'announcement' | 'file' | null;
-  replyToPreviewText: string | null;
-  replyToFileName: string | null;
-  forwardedFromMessageId?: string | null;
-  editedAt?: number | null;
-  createdAt: number;
-}
-
-export interface SyncResponsePayload {
-  messages: SyncMessagePayload[];
-}
-
 export interface AnnouncementPayload {
   text: string;
   replyTo?: MessageReplyPayload | null;
@@ -177,24 +138,11 @@ export interface FileOfferPayload {
   forwardedFromMessageId?: string | null;
 }
 
-/**
- * Pedido idempotente para que o remetente reenvie um anexo que existe no
- * histórico local, mas ainda não está disponível neste dispositivo.
- */
-export interface FileRequestPayload {
-  targetMessageId: string;
-  fileId: string;
-}
-
 export interface FileChunkPayload {
   fileId: string;
   index: number;
   total: number;
   dataBase64: string;
-}
-
-export interface FileCompletePayload {
-  fileId: string;
 }
 
 export interface DbMessage {

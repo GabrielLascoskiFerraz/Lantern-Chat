@@ -4,7 +4,6 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
-  FILE_CHUNK_SIZE_BYTES,
   MAX_FILE_SIZE_BYTES,
   sanitizeFileName
 } from '../config';
@@ -25,15 +24,11 @@ import {
 interface MessageServiceDeps {
   db: DbService;
   profile: Profile;
-  sendToPeer: (peer: Peer, frame: ProtocolFrame) => Promise<void>;
-  sendBroadcast: (frame: ProtocolFrame) => Promise<string[]>;
   fileTransfer: FileTransferService;
   getPeer: (peerId: string) => Peer | undefined;
-  getOnlinePeers: () => Peer[];
-  onPeerUnreachable: (peerId: string) => void;
   emitEvent: (event: AppEvent) => void;
-  sendCanonicalFrame?: (frame: ProtocolFrame) => Promise<void>;
-  uploadCanonicalAttachment?: (input: {
+  sendCanonicalFrame: (frame: ProtocolFrame) => Promise<void>;
+  uploadCanonicalAttachment: (input: {
     message: DbMessage;
     offer: FileOfferPayload;
     filePath: string;
@@ -44,33 +39,20 @@ interface MessageServiceDeps {
 export class MessageService {
   private readonly db: DbService;
   private readonly profile: Profile;
-  private readonly sendToPeer: (peer: Peer, frame: ProtocolFrame) => Promise<void>;
-  private readonly sendBroadcast: (frame: ProtocolFrame) => Promise<string[]>;
   private readonly fileTransfer: FileTransferService;
   private readonly getPeer: (peerId: string) => Peer | undefined;
-  private readonly getOnlinePeers: () => Peer[];
-  private readonly onPeerUnreachable: (peerId: string) => void;
   private readonly emitEvent: (event: AppEvent) => void;
-  private readonly sendCanonicalFrame?: (frame: ProtocolFrame) => Promise<void>;
-  private readonly uploadCanonicalAttachment?: MessageServiceDeps['uploadCanonicalAttachment'];
-  private readonly inFlightFileTransfers = new Set<string>();
+  private readonly sendCanonicalFrame: (frame: ProtocolFrame) => Promise<void>;
+  private readonly uploadCanonicalAttachment: MessageServiceDeps['uploadCanonicalAttachment'];
 
   constructor(deps: MessageServiceDeps) {
     this.db = deps.db;
     this.profile = deps.profile;
-    this.sendToPeer = deps.sendToPeer;
-    this.sendBroadcast = deps.sendBroadcast;
     this.fileTransfer = deps.fileTransfer;
     this.getPeer = deps.getPeer;
-    this.getOnlinePeers = deps.getOnlinePeers;
-    this.onPeerUnreachable = deps.onPeerUnreachable;
     this.emitEvent = deps.emitEvent;
     this.sendCanonicalFrame = deps.sendCanonicalFrame;
     this.uploadCanonicalAttachment = deps.uploadCanonicalAttachment;
-  }
-
-  private markUnreachable(peer: Peer): void {
-    this.onPeerUnreachable(peer.deviceId);
   }
 
   private sanitizeReplyPayload(
@@ -93,135 +75,6 @@ export class MessageService {
       previewText: previewText.length > 0 ? previewText.slice(0, 300) : null,
       fileName: fileName.length > 0 ? fileName.slice(0, 260) : null
     };
-  }
-
-  private async streamFileChunksToPeer(
-    peer: Peer,
-    messageId: string,
-    offer: FileOfferPayload,
-    filePath: string,
-    startIndex = 0
-  ): Promise<void> {
-    let transferred = Math.min(offer.size, Math.max(0, startIndex) * FILE_CHUNK_SIZE_BYTES);
-    for await (const chunk of this.fileTransfer.createChunkStream(filePath, offer.fileId, startIndex)) {
-      transferred = Math.min(offer.size, transferred + Buffer.byteLength(chunk.dataBase64, 'base64'));
-      await this.sendToPeer(peer, this.fileTransfer.buildChunkFrame(peer.deviceId, chunk));
-      this.emitEvent({
-        type: 'transfer:progress',
-        direction: 'send',
-        fileId: offer.fileId,
-        messageId,
-        peerId: peer.deviceId,
-        transferred,
-        total: offer.size
-      });
-    }
-
-    await this.sendToPeer(peer, this.fileTransfer.buildCompleteFrame(peer.deviceId, offer.fileId));
-    this.emitEvent({
-      type: 'transfer:progress',
-      direction: 'send',
-      fileId: offer.fileId,
-      messageId,
-      peerId: peer.deviceId,
-      transferred: offer.size,
-      total: offer.size
-    });
-  }
-
-  private async sendFileFramesInBackground(
-    peer: Peer,
-    message: DbMessage,
-    offer: FileOfferPayload,
-    filePath: string,
-    replyTo?: MessageReplyPayload | null
-  ): Promise<void> {
-    const transferKey = `${peer.deviceId}:${message.messageId}`;
-    if (this.inFlightFileTransfers.has(transferKey)) {
-      return;
-    }
-    this.inFlightFileTransfers.add(transferKey);
-    try {
-      const offerWithReply: FileOfferPayload =
-        replyTo && !offer.replyTo
-          ? { ...offer, replyTo }
-          : offer;
-      const offerWithMeta: FileOfferPayload =
-        message.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
-          ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
-          : offerWithReply;
-      await this.sendToPeer(
-        peer,
-        this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, message.createdAt)
-      );
-      await this.streamFileChunksToPeer(peer, message.messageId, offer, filePath, 0);
-    } catch {
-      this.markUnreachable(peer);
-      // Mantém como "sent/pendente" para reenvio automático quando o peer voltar online.
-    } finally {
-      this.inFlightFileTransfers.delete(transferKey);
-    }
-  }
-
-  private getReplyPayloadFromMessage(message: DbMessage): MessageReplyPayload | null {
-    if (!message.replyToMessageId || !message.replyToSenderDeviceId || !message.replyToType) {
-      return null;
-    }
-    return {
-      messageId: message.replyToMessageId,
-      senderDeviceId: message.replyToSenderDeviceId,
-      type: message.replyToType,
-      previewText: message.replyToPreviewText,
-      fileName: message.replyToFileName
-    };
-  }
-
-  /**
-   * Reenvia um anexo já persistido localmente. Também é usado quando um
-   * destinatário recupera o histórico depois de perder os chunks originais.
-   */
-  async resendFileMessageToPeer(peer: Peer, fileMessage: DbMessage): Promise<boolean> {
-    if (
-      fileMessage.type !== 'file' ||
-      fileMessage.direction !== 'out' ||
-      fileMessage.receiverDeviceId !== peer.deviceId ||
-      !fileMessage.filePath ||
-      !fileMessage.fileId ||
-      !fs.existsSync(fileMessage.filePath)
-    ) {
-      return false;
-    }
-
-    const transferKey = `${peer.deviceId}:${fileMessage.messageId}`;
-    if (this.inFlightFileTransfers.has(transferKey)) {
-      return true;
-    }
-
-    this.inFlightFileTransfers.add(transferKey);
-    try {
-      const { offer } = await this.fileTransfer.createOffer(
-        peer.deviceId,
-        fileMessage.filePath,
-        fileMessage.messageId,
-        fileMessage.fileId,
-        fileMessage.fileName || undefined
-      );
-      const replyTo = this.getReplyPayloadFromMessage(fileMessage);
-      const offerWithReply: FileOfferPayload = replyTo && !offer.replyTo ? { ...offer, replyTo } : offer;
-      const offerWithMeta: FileOfferPayload =
-        fileMessage.forwardedFromMessageId && !offerWithReply.forwardedFromMessageId
-          ? { ...offerWithReply, forwardedFromMessageId: fileMessage.forwardedFromMessageId }
-          : offerWithReply;
-
-      await this.sendToPeer(
-        peer,
-        this.fileTransfer.buildOfferFrame(peer.deviceId, offerWithMeta, fileMessage.createdAt)
-      );
-      await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, 0);
-      return true;
-    } finally {
-      this.inFlightFileTransfers.delete(transferKey);
-    }
   }
 
   async sendText(
@@ -276,21 +129,8 @@ export class MessageService {
       createdAt
     };
 
+    await this.sendCanonicalFrame(frame);
     this.db.saveMessage(message);
-
-    if (this.sendCanonicalFrame) {
-      try {
-        await this.sendCanonicalFrame(frame);
-      } catch {
-        // O frame permanece no cache local e será recuperado pelo snapshot do Relay.
-      }
-    } else if (peer) {
-      try {
-        await this.sendToPeer(peer, frame);
-      } catch {
-        this.markUnreachable(peer);
-      }
-    }
 
     return message;
   }
@@ -343,7 +183,7 @@ export class MessageService {
     };
 
     try {
-      await this.sendBroadcast(frame);
+      await this.sendCanonicalFrame(frame);
     } catch {
       throw new Error('Não foi possível publicar o anúncio no Relay.');
     }
@@ -414,87 +254,33 @@ export class MessageService {
     });
 
     setImmediate(() => {
-      if (this.uploadCanonicalAttachment && this.sendCanonicalFrame) {
-        const offerWithReply = sanitizedReply ? { ...offer, replyTo: sanitizedReply } : offer;
-        const offerWithMeta = message.forwardedFromMessageId
-          ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
-          : offerWithReply;
-        void this.uploadCanonicalAttachment({
-          message,
-          offer,
-          filePath: managedFilePath,
-          onProgress: (transferred) => this.emitEvent({
-            type: 'transfer:progress', direction: 'send', fileId: offer.fileId,
-            messageId, peerId, transferred, total: offer.size
-          })
-        }).then(() => this.sendCanonicalFrame!(
-          this.fileTransfer.buildOfferFrame(peerId, offerWithMeta, message.createdAt)
-        )).then(() => {
-          this.db.updateMessageStatus(messageId, 'delivered');
-          const updated = this.db.getMessageById(messageId);
-          if (updated) this.emitEvent({ type: 'message:updated', message: updated });
-        }).catch((error) => {
-          this.emitEvent({
-            type: 'ui:toast', level: 'warning',
-            message: error instanceof Error ? error.message : 'Não foi possível armazenar o anexo no Relay.'
-          });
+      const offerWithReply = sanitizedReply ? { ...offer, replyTo: sanitizedReply } : offer;
+      const offerWithMeta = message.forwardedFromMessageId
+        ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
+        : offerWithReply;
+      void this.uploadCanonicalAttachment({
+        message,
+        offer,
+        filePath: managedFilePath,
+        onProgress: (transferred) => this.emitEvent({
+          type: 'transfer:progress', direction: 'send', fileId: offer.fileId,
+          messageId, peerId, transferred, total: offer.size
+        })
+      }).then(() => this.sendCanonicalFrame(
+        this.fileTransfer.buildOfferFrame(peerId, offerWithMeta, message.createdAt)
+      )).then(() => {
+        this.db.updateMessageStatus(messageId, 'delivered');
+        const updated = this.db.getMessageById(messageId);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      }).catch((error) => {
+        this.emitEvent({
+          type: 'ui:toast', level: 'warning',
+          message: error instanceof Error ? error.message : 'Não foi possível armazenar o anexo no Relay.'
         });
-        return;
-      }
-      if (!peer) return;
-      void this.sendFileFramesInBackground(peer, message, offer, managedFilePath, sanitizedReply);
+      });
     });
 
     return message;
-  }
-
-  async retryFailedMessagesForPeer(peer: Peer): Promise<void> {
-    const pendingTextMessages = this.db.getOutgoingTextMessagesForPeer(peer.deviceId, 100);
-    for (const message of pendingTextMessages) {
-      if (!message.bodyText) continue;
-
-      if (message.status !== 'sent') {
-        this.db.updateMessageStatus(message.messageId, 'sent');
-        const updated = this.db.getMessageById(message.messageId);
-        if (updated) {
-          this.emitEvent({
-            type: 'message:updated',
-            message: updated
-          });
-        }
-      }
-
-      const frame: ProtocolFrame<ChatTextPayload> = {
-        type: 'chat:text',
-        messageId: message.messageId,
-        from: this.profile.deviceId,
-        to: peer.deviceId,
-        createdAt: message.createdAt,
-        payload: {
-          text: message.bodyText,
-          replyTo:
-            message.replyToMessageId &&
-            message.replyToSenderDeviceId &&
-            message.replyToType
-              ? {
-                  messageId: message.replyToMessageId,
-                  senderDeviceId: message.replyToSenderDeviceId,
-                  type: message.replyToType,
-                  previewText: message.replyToPreviewText,
-                  fileName: message.replyToFileName
-                }
-              : null,
-          forwardedFromMessageId: message.forwardedFromMessageId || null
-        }
-      };
-
-      try {
-        await this.sendToPeer(peer, frame);
-      } catch {
-        this.markUnreachable(peer);
-        break;
-      }
-    }
   }
 
   private isEphemeralOutgoingFile(filePath: string): boolean {
@@ -535,32 +321,4 @@ export class MessageService {
     return managedPath;
   }
 
-  async replayPendingFilesForPeer(peer: Peer): Promise<void> {
-    const pendingFiles = this.db.getOutgoingFileMessagesForPeer(peer.deviceId, 20);
-    for (const fileMessage of pendingFiles) {
-      try {
-        await this.resendFileMessageToPeer(peer, fileMessage);
-      } catch {
-        this.markUnreachable(peer);
-        break;
-      }
-    }
-  }
-
-  async resumeFileFromIndex(peer: Peer, fileMessage: DbMessage, nextIndex: number): Promise<void> {
-    if (!fileMessage.filePath || !fileMessage.fileId || !fs.existsSync(fileMessage.filePath)) {
-      return;
-    }
-
-    const { offer } = await this.fileTransfer.createOffer(
-      peer.deviceId,
-      fileMessage.filePath,
-      fileMessage.messageId,
-      fileMessage.fileId,
-      fileMessage.fileName || undefined
-    );
-    const totalChunks = this.fileTransfer.getChunkCountForSize(offer.size);
-    const startIndex = Math.max(0, Math.min(nextIndex, totalChunks));
-    await this.streamFileChunksToPeer(peer, fileMessage.messageId, offer, fileMessage.filePath, startIndex);
-  }
 }

@@ -253,7 +253,7 @@ const isIpv4 = (value: string): boolean => /^\d+\.\d+\.\d+\.\d+$/.test(value);
 const isIpv6 = (value: string): boolean => value.includes(':');
 const isIpv6LinkLocal = (value: string): boolean => /^fe80:/i.test(value);
 
-const formatWsUrl = (host: string, port: number): string | null => {
+const formatWsUrl = (host: string, port: number, secure = false): string | null => {
   const normalized = host.trim();
   if (!normalized) return null;
   let safeHost = normalized;
@@ -267,7 +267,7 @@ const formatWsUrl = (host: string, port: number): string | null => {
     }
     safeHost = `[${safeHost}]`;
   }
-  const url = `ws://${safeHost}:${port}`;
+  const url = `${secure ? 'wss' : 'ws'}://${safeHost}:${port}`;
   try {
     new URL(url);
     return url;
@@ -359,6 +359,7 @@ const parseServiceToUrl = (service: Service): string | null => {
 
   const txt = (service.txt || {}) as Record<string, unknown>;
   const txtPort = Number(asString(txt.port) || asString(txt.wsPort) || '');
+  const secure = txt.secure === true || txt.secure === 'true' || txt.tls === true || txt.tls === 'true';
   const port = Number.isFinite(txtPort) && txtPort > 0 ? txtPort : Number(service.port || 0);
   if (!Number.isFinite(port) || port <= 0) return null;
 
@@ -390,7 +391,7 @@ const parseServiceToUrl = (service: Service): string | null => {
     .map((candidate) => candidate.host);
 
   for (const host of orderedHosts) {
-    const url = formatWsUrl(host, port);
+    const url = formatWsUrl(host, port, secure);
     if (url) return url;
   }
 
@@ -543,7 +544,7 @@ export class RelayClient {
     if (this.started) return;
     this.started = true;
 
-    if (!this.explicitRelayUrl) {
+    if (!this.explicitRelayUrl && this.endpointSettings.automatic) {
       this.startRelayDiscovery();
     }
 
@@ -690,6 +691,24 @@ export class RelayClient {
         payload: { requestId, attachmentId, startIndex: 0 }
       });
     });
+  }
+
+  async requestConversationHistory(
+    peerUserId: string,
+    before = Number.MAX_SAFE_INTEGER,
+    limit = 100
+  ): Promise<ProtocolFrame[]> {
+    await this.waitUntilReady(8_000);
+    const result = await this.centralRequest('relay:history:request', {
+      peerUserId,
+      before,
+      limit: Math.max(1, Math.min(Math.trunc(limit) || 100, 500))
+    });
+    return Array.isArray(result.frames)
+      ? result.frames.filter(
+          (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
+        )
+      : [];
   }
 
   private centralRequest(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1423,6 +1442,17 @@ export class RelayClient {
         else normalized.forEach((frame) => this.callbacks.onFrame(frame));
         return;
       }
+      case 'relay:history:page': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        if (!requestId) return;
+        const pending = this.pendingCentralAcks.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingCentralAcks.delete(requestId);
+        pending.resolve(payload || {});
+        return;
+      }
       case 'relay:presence': {
         const payload = asRecord(envelope.payload) as RelayPresencePayload | null;
         const revision =
@@ -2009,7 +2039,7 @@ export class RelayClient {
       Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535
         ? Math.trunc(rawPort)
         : DEFAULT_RELAY_PORT;
-    return formatWsUrl(remoteAddress, port);
+    return formatWsUrl(remoteAddress, port, envelope.secure === true);
   }
 
   private waitUntilReady(timeoutMs: number): Promise<void> {

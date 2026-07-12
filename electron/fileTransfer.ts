@@ -553,25 +553,4 @@ export class FileTransferService {
     };
   }
 
-  buildChunkFrame(to: string, chunk: FileChunkPayload): ProtocolFrame<FileChunkPayload> {
-    return {
-      type: 'file:chunk',
-      messageId: randomUUID(),
-      from: this.profile.deviceId,
-      to,
-      createdAt: Date.now(),
-      payload: chunk
-    };
-  }
-
-  buildCompleteFrame(to: string, fileId: string): ProtocolFrame<{ fileId: string }> {
-    return {
-      type: 'file:complete',
-      messageId: randomUUID(),
-      from: this.profile.deviceId,
-      to,
-      createdAt: Date.now(),
-      payload: { fileId }
-    };
-  }
 }

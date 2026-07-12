@@ -1,34 +1,69 @@
-# Lantern Central
+# Lantern
 
-Variante do Lantern orientada a servidor. O **LanternRelay é a fonte canônica** de contas, presença, mensagens, anúncios, grupos e anexos. O aplicativo Electron mantém somente cache local descartável para melhorar desempenho e uso offline da interface.
+Mensageiro desktop para redes locais ou ambientes externos, com um **Relay canônico** responsável por contas, sessões, presença, conversas, grupos, anúncios e anexos. Os clientes Electron mantêm apenas um cache local reconstruível; a fonte durável dos dados é o servidor.
 
-## Principais diferenças
+## Arquitetura atual
 
-- Login obrigatório com conta criada pelo administrador.
-- Relay local com descoberta automática ou endereço manual.
-- Relay externo exclusivamente por conexão segura `WSS/HTTPS`.
-- Dashboard administrativa acessível somente por `localhost` do servidor.
-- Contas com usuário, nome, setor, idioma, perfil e senha.
-- Setor exibido junto ao contato na sidebar.
-- Sessões revogáveis e logout com limpeza do cache local.
-- Mensagens e anexos armazenados no Relay com criptografia em repouso.
-- Política de retenção: permanente, 1 mês, 6 meses ou 1 ano.
-- Interface de entrada em português, inglês e espanhol.
-- Backup/restauração local removidos: o Relay é responsável pelos dados duráveis.
+```text
+┌──────────────────┐        WS/WSS         ┌──────────────────────────┐
+│ Clientes Lantern │ ◀──────────────────▶  │ Lantern Relay canônico  │
+│ macOS / Windows  │                       │ SQLite + anexos cifrados │
+└──────────────────┘                       └──────────────────────────┘
+                                                   ▲
+                                                   │ localhost
+                                    ┌──────────────┴──────────────┐
+                                    │ Dashboard web / Relay UI   │
+                                    └─────────────────────────────┘
+```
+
+- O Relay valida e persiste todas as operações duráveis.
+- O banco SQLite do cliente é cache de interface, não uma fonte concorrente de verdade.
+- Envios só são confirmados localmente depois da confirmação do Relay.
+- Limpar ou esquecer uma conversa é persistido por usuário no servidor.
+- Mensagens de chats e grupos são carregadas em páginas sob demanda.
+- No login, o cliente recebe apenas um índice leve: o último item de cada chat e o estado atual/última mensagem de cada grupo.
+- Anexos são baixados somente para as páginas abertas. Se uma cópia local desaparecer, ela é recuperada novamente do Relay quando a mensagem voltar a ficar visível.
+- Downloads interrompidos têm retomada e novas tentativas automáticas, com validação de tamanho e SHA-256.
+
+## Funcionalidades
+
+- Contas centralizadas administradas pelo Relay.
+- Login automático nas próximas aberturas usando token protegido pelo `safeStorage` do Electron.
+- Conversas diretas, respostas, encaminhamento, edição, exclusão, reações e favoritos locais.
+- Grupos com membros, administradores, transferência de propriedade, mensagens fixadas e anexos.
+- Anúncios com expiração, leitura e reações.
+- Presença e diretório canônicos, inclusive para usuários offline.
+- Descoberta automática do Relay por mDNS e UDP, além de endereço manual.
+- Figurinhas distribuídas pelo Relay.
+- Inicialização automática opcional do cliente com o sistema.
+- Interface em português, inglês e espanhol.
+- Política de retenção permanente, 1 mês, 6 meses ou 1 ano.
 
 ## Segurança
 
-- Senhas são derivadas com `scrypt` e nunca armazenadas em texto puro.
-- Tokens de sessão são aleatórios e persistidos no servidor apenas como hash.
-- No cliente, o token é protegido pelo `safeStorage` do Electron.
-- Mensagens e metadados sensíveis usam AES-256-GCM no armazenamento do Relay.
-- Anexos são criptografados por partes com AES-256-GCM.
-- Alterações administrativas exigem sessão por cookie `HttpOnly`, `SameSite=Strict` e token CSRF.
-- Tentativas de login recebem limitação por endereço.
-- O painel administrativo rejeita conexões que não venham da interface loopback.
-- O modo externo recusa inicialização sem certificado e chave TLS.
+- Senhas derivadas com `scrypt`; nenhuma senha é armazenada em texto puro.
+- Tokens de sessão aleatórios, armazenados no Relay somente como hash.
+- Token do cliente cifrado pelo armazenamento seguro do sistema operacional.
+- Mensagens e metadados sensíveis cifrados em repouso com AES-256-GCM.
+- Anexos persistidos em partes cifradas e validados por SHA-256.
+- Dashboard administrativa limitada à interface loopback.
+- Administração protegida por cookie `HttpOnly`, `SameSite=Strict` e token CSRF.
+- Limitação de tentativas de autenticação por endereço.
+- Modo externo exige HTTPS/WSS e recusa a inicialização sem certificado e chave.
 
-> Guarde uma cópia segura de `<dados-do-relay>/central/master.key`. Sem essa chave, os dados criptografados não podem ser recuperados.
+> Preserve uma cópia segura de `<dados-do-relay>/central/master.key`. Sem essa chave, os dados cifrados do Relay não podem ser recuperados.
+
+## Transporte seguro e rede local
+
+Para acesso externo, use um domínio e certificado emitido por uma autoridade confiável. Certificados TLS públicos não podem cobrir automaticamente todos os IPs variáveis de qualquer rede local.
+
+Por isso, o comportamento é:
+
+- **Externo:** HTTPS/WSS obrigatório.
+- **Local com certificado confiável:** WSS.
+- **Local sem certificado confiável:** WS permitido somente na LAN.
+
+O cliente respeita o protocolo anunciado pelo Relay e não converte silenciosamente um endpoint `ws://` local em `wss://`.
 
 ## Requisitos
 
@@ -36,29 +71,34 @@ Variante do Lantern orientada a servidor. O **LanternRelay é a fonte canônica*
 - npm 10+
 - Git
 
+Instalação:
+
 ```bash
 npm ci
 ```
 
+Módulos nativos, como `better-sqlite3`, precisam usar o ABI do Electron. Os scripts do projeto já iniciam o Relay com `ELECTRON_RUN_AS_NODE=1`; se necessário, reconstrua-os com:
+
+```bash
+npm run rebuild:native
+```
+
 ## Desenvolvimento
+
+Cliente, renderer e Relay:
 
 ```bash
 npm run dev
 ```
 
-O primeiro início do Relay cria a conta `admin`. Defina a senha inicial antes de iniciar:
+Dois ou três clientes isolados para testes locais:
 
 ```bash
-LANTERN_RELAY_ADMIN_PASSWORD='uma-senha-forte' npm run relay:start
+npm run dev:dual
+npm run dev:triple
 ```
 
-Sem essa variável, o Relay gera uma senha temporária e a imprime uma única vez no console.
-
-Dashboard local:
-
-```text
-http://127.0.0.1:43190/
-```
+O renderer fica disponível em `http://localhost:5173` e o Relay usa, por padrão, a porta `43190`.
 
 Healthcheck:
 
@@ -66,79 +106,159 @@ Healthcheck:
 http://127.0.0.1:43190/health
 ```
 
-## Relay na rede local
+Dashboard administrativa local:
+
+```text
+http://127.0.0.1:43190/
+```
+
+## Conta administrativa inicial
+
+No primeiro início, o Relay cria a conta administrativa `admin`. Para desenvolvimento, a credencial padrão é:
+
+```text
+usuário: admin
+senha: root
+```
+
+Defina uma senha inicial diferente antes da primeira execução:
 
 ```bash
 LANTERN_RELAY_ADMIN_PASSWORD='uma-senha-forte' npm run relay:start
 ```
 
-Os clientes podem usar **Local automático** ou informar IP e porta em **Local manual**.
+Troque a credencial padrão imediatamente fora de um ambiente de desenvolvimento.
 
-## Relay externo
+## Executando o Relay
 
-Use um domínio com certificado TLS válido. A terminação TLS pode ser feita diretamente pelo Relay:
+### Linha de comando
+
+Rede local, com descoberta automática:
+
+```bash
+npm run relay:start
+```
+
+Host, porta e diretório de dados personalizados:
+
+```bash
+LANTERN_RELAY_DATA_DIR='/caminho/lantern-relay' \
+LANTERN_RELAY_HOST='0.0.0.0' \
+LANTERN_RELAY_PORT='43190' \
+npm run relay:start
+```
+
+Modo externo com TLS obrigatório:
 
 ```bash
 LANTERN_RELAY_EXTERNAL=1 \
-LANTERN_RELAY_TLS_CERT=/caminho/fullchain.pem \
-LANTERN_RELAY_TLS_KEY=/caminho/privkey.pem \
+LANTERN_RELAY_TLS_CERT='/caminho/fullchain.pem' \
+LANTERN_RELAY_TLS_KEY='/caminho/privkey.pem' \
 LANTERN_RELAY_ADMIN_PASSWORD='uma-senha-forte' \
 npm run relay:start
 ```
 
-No cliente, selecione **Externo** e informe domínio e porta. Esse modo sempre usa `WSS/HTTPS`; conexões externas sem TLS são recusadas.
+Variáveis úteis:
 
-Recomendações de produção:
+| Variável | Finalidade |
+| --- | --- |
+| `LANTERN_RELAY_DATA_DIR` | Diretório raiz dos dados do Relay |
+| `LANTERN_RELAY_HOST` / `LANTERN_RELAY_PORT` | Interface e porta de escuta |
+| `LANTERN_RELAY_TLS_CERT` / `LANTERN_RELAY_TLS_KEY` | Certificado e chave TLS |
+| `LANTERN_RELAY_EXTERNAL=1` | Exige transporte seguro |
+| `LANTERN_RELAY_ADMIN_PASSWORD` | Senha do administrador no primeiro início |
+| `LANTERN_RELAY_MASTER_KEY` | Chave mestra fornecida externamente |
+| `LANTERN_RELAY_DASHBOARD_TOKEN` | Proteção adicional opcional da dashboard |
+| `LANTERN_RELAY_LOG_LEVEL` | `debug`, `info`, `warn` ou `error` |
+| `LANTERN_RELAY_STICKERS_DIR` | Catálogo de figurinhas servido pelo Relay |
 
-- Execute o Relay com usuário de sistema sem privilégios.
-- Restrinja firewall à porta pública necessária.
-- Não exponha a dashboard: ela só deve ser aberta localmente no servidor.
-- Faça backup do diretório de dados do Relay, especialmente `central/master.key` e `central/lantern-relay.db`.
-- Use certificado de uma autoridade confiável e rotação periódica de credenciais.
+### Lantern Relay UI
+
+O projeto também inclui um aplicativo desktop dedicado para operar o servidor:
+
+```bash
+npm run relay-ui:dev
+```
+
+A Relay UI permite:
+
+- iniciar, parar e reiniciar o Relay;
+- configurar porta, certificado e chave;
+- copiar endereços locais disponíveis;
+- acompanhar usuários conectados, anúncios, frames e tempo ativo.
+
+Certificado e chave são opcionais juntos no modo local. Para rede externa, use o Relay em modo externo com TLS obrigatório.
 
 ## Administração
 
-Na dashboard local é possível:
+Na dashboard web local é possível:
 
-- criar e excluir contas;
+- criar, editar, ativar e excluir contas;
 - definir nome, setor, idioma e função;
-- ativar/desativar usuários;
 - redefinir senhas e revogar sessões;
-- consultar usuários conectados, anúncios e tempo de atividade;
-- escolher retenção permanente, 1 mês, 6 meses ou 1 ano.
+- acompanhar usuários conectados e métricas do Relay;
+- administrar anúncios;
+- configurar a política de retenção.
 
-## Dados
+## Persistência e backup
 
-O Relay armazena seus dados em um diretório `central` dentro da pasta de dados resolvida para o executável:
+Quando executado pelos scripts de desenvolvimento, o diretório padrão é `dist-relay`. Em binários standalone, os dados ficam ao lado do executável. A Relay UI usa a pasta de dados da própria aplicação em `relay-data`.
 
-- `central/lantern-relay.db`: banco canônico;
-- `central/master.key`: chave de criptografia;
-- `central/attachments/`: partes criptografadas dos anexos.
+Estrutura principal:
 
-O banco SQLite do Electron é cache. Ele pode ser reconstruído a partir do snapshot do Relay e é apagado ao sair da conta.
+```text
+<dados-do-relay>/
+├── central/
+│   ├── lantern-relay.db
+│   ├── master.key
+│   └── attachments/
+├── groups.json
+├── group-attachments/
+├── announcements.json
+└── stickers/
+```
 
-## Verificação e build
+Faça backup consistente do diretório inteiro, principalmente de `central/master.key`, `central/lantern-relay.db`, `groups.json` e dos diretórios de anexos. O cache SQLite dos clientes não substitui esse backup e pode ser reconstruído a partir do Relay.
+
+## Verificação
 
 ```bash
+npm run lint
 npm run build:renderer
 npm run build:electron
 npm run build:relay
+npm run build:relay-ui
 ```
 
-Cliente:
+## Builds
+
+Cliente Lantern:
 
 ```bash
 npm run build:mac
 npm run build:win
+npm run build:linux
 ```
 
-Relay:
+Relay standalone:
 
 ```bash
 npm run relay:dist:mac
 npm run relay:dist:win
+npm run relay:dist:linux
 ```
 
-## Estado da arquitetura
+Lantern Relay UI:
 
-Esta branch é uma bifurcação incompatível com os perfis locais da edição LAN original. Não há migração automática de bancos, identidades ou sessões antigas. Essa separação é intencional para manter o modelo centralizado simples, auditável e seguro.
+```bash
+npm run relay-ui:build:mac
+npm run relay-ui:build:win
+```
+
+Artefatos são gravados nos diretórios configurados pelos builders, principalmente `dist-installers`, `dist-relay` e `dist-relay-ui-installers`.
+
+## Observações de compatibilidade
+
+Esta edição usa o Relay como autoridade única e não é compatível com o antigo modelo em que cada cliente mantinha sua própria fonte de dados e sincronizava diretamente com outros peers. Módulos de servidor WebSocket local, sincronização peer-to-peer, operações pendentes por contato e backup/restauração do banco do cliente foram removidos intencionalmente.
+
+O identificador técnico do aplicativo permanece `com.lantern.central` para preservar a continuidade de instalações existentes, mas o nome exibido do produto é somente **Lantern**.

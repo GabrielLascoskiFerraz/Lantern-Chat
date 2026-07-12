@@ -16,7 +16,6 @@ import { NotificationService } from './notifications';
 import { RelayClient, RelayEndpointSettings, RelayPeerSnapshot } from './relayClient';
 import { MessageService } from './services/MessageService';
 import { PresenceService } from './services/PresenceService';
-import { SyncService } from './services/SyncService';
 import { TrayController } from './tray';
 import { AuthService } from './authService';
 import {
@@ -31,9 +30,6 @@ import {
   DeletePayload,
   DbMessage,
   EditMessagePayload,
-  FileChunkPayload,
-  FileCompletePayload,
-  FileRequestPayload,
   ForgetPeerPayload,
   FileOfferPayload,
   GroupEvent,
@@ -46,8 +42,6 @@ import {
   ProtocolFrame,
   ReactPayload,
   StickerCatalogItem,
-  SyncRequestPayload,
-  SyncResponsePayload,
   TypingPayload
 } from './types';
 
@@ -69,19 +63,16 @@ class LanternApp {
   private tray!: TrayController;
   private presence!: PresenceService;
   private messageService!: MessageService;
-  private syncService!: SyncService;
   private readonly networkMode: 'relay' = 'relay';
   private emitEvent: (event: AppEvent) => void = () => undefined;
   private peersById = new Map<string, Peer>();
   private readonly knownOnlinePeerIds = new Set<string>();
-  private readonly syncRequestAtByPeer = new Map<string, number>();
   private readonly peerUnreachableFailures = new Map<string, { count: number; lastAt: number }>();
   private readonly forgottenPeersById = new Map<
     string,
     { waitingForOffline: boolean; updatedAt: number }
   >();
   private activeConversationId = ANNOUNCEMENTS_CONVERSATION_ID;
-  private readonly syncRetryMinIntervalMs = 12_000;
   private readonly syncNotificationMaxAgeMs = 2 * 60 * 1000;
   private readonly peerUnreachableFailureThreshold = 2;
   private readonly peerUnreachableFailureWindowMs = 15_000;
@@ -105,9 +96,8 @@ class LanternApp {
   private readonly groupFileDownloadStartTimeoutMs = 20_000;
   private readonly groupFileDownloadMaxRetries = 3;
   private readonly groupFileUploadsInFlight = new Set<string>();
-  private readonly directFileRequestAtByMessageId = new Map<string, number>();
-  private readonly directFileRequestInFlight = new Set<string>();
-  private readonly directFileRequestMinIntervalMs = 5_000;
+  private readonly canonicalAttachmentDownloadsInFlight = new Set<string>();
+  private readonly canonicalAttachmentRetryTimers = new Map<string, NodeJS.Timeout>();
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -221,6 +211,7 @@ class LanternApp {
 
   private async logout(): Promise<void> {
     this.relay?.stop();
+    this.clearCanonicalAttachmentRetries();
     await this.authService.logout();
     this.authState = this.authService.getState();
     this.db.clearCachedUserData();
@@ -236,7 +227,12 @@ class LanternApp {
   }
 
   async start(): Promise<void> {
-    app.setName('Lantern Central');
+    const legacyUserData = path.join(app.getPath('appData'), 'Lantern Central');
+    const renamedUserData = path.join(app.getPath('appData'), 'Lantern');
+    if (fs.existsSync(legacyUserData) && !fs.existsSync(renamedUserData)) {
+      app.setPath('userData', legacyUserData);
+    }
+    app.setName('Lantern');
     app.setAppUserModelId(APP_ID);
     const appIconPath = this.resolveAppIconPath();
     if (process.platform === 'darwin' && appIconPath) {
@@ -264,7 +260,6 @@ class LanternApp {
     }
     this.relaySettings = this.db.getRelaySettings();
     this.presence = new PresenceService();
-    this.syncService = new SyncService(this.db, this.profile);
 
     this.mainWindow = this.createWindow();
     this.notifications = new NotificationService(() => this.mainWindow);
@@ -397,12 +392,8 @@ class LanternApp {
     this.messageService = new MessageService({
       db: this.db,
       profile: this.profile,
-      sendToPeer: (peer, frame) => this.sendToPeer(peer, frame),
-      sendBroadcast: (frame) => this.sendBroadcast(frame),
       fileTransfer: this.fileTransfer,
       getPeer: (peerId) => this.presence.getPeer(peerId),
-      getOnlinePeers: () => this.presence.getOnlinePeers(),
-      onPeerUnreachable: (peerId) => this.markPeerUnreachable(peerId, { force: true }),
       emitEvent: (event) => this.emitEvent(event)
       ,sendCanonicalFrame: async (frame) => {
         if (!this.relay?.isConnected()) throw new Error('Relay offline.');
@@ -493,7 +484,8 @@ class LanternApp {
       getMessageFavorites: (messageIds) => this.db.getMessageFavoritesMap(messageIds),
       getFavoriteMessages: (conversationId) => this.db.getFavoriteMessages(conversationId),
       resyncConversation: (conversationId) => this.resyncConversation(conversationId),
-      getMessages: (conversationId, limit, before) => this.db.getMessages(conversationId, limit, before),
+      getMessages: (conversationId, limit, before) =>
+        this.getMessagesAndRecoverMissingAttachments(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
       searchConversationMessageIds: (conversationId, query, limit, offset) =>
         this.db.searchConversationMessageIds(conversationId, query, limit, offset),
@@ -1008,17 +1000,11 @@ class LanternApp {
         source: 'relay'
       };
 
-      const hasPendingOps = this.db.getPendingPeerOperations(peer.deviceId).length > 0;
       if (this.isPeerForgotten(peer.deviceId)) {
-        if (hasPendingOps) {
-          void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
-        }
         continue;
       }
 
       incomingIds.add(peer.deviceId);
-      const wasOnline = this.knownOnlinePeerIds.has(peer.deviceId);
-
       const touched = this.presence.touchOnlinePeer(peer, this.db, { bypassCooldown: true });
       if (touched) {
         changed = true;
@@ -1028,16 +1014,6 @@ class LanternApp {
       this.knownOnlinePeerIds.add(peer.deviceId);
       this.peerUnreachableFailures.delete(peer.deviceId);
 
-      // Evita tempestade de sync: só sincroniza quando o peer transita de offline -> online.
-      if (!wasOnline) {
-        void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
-        void this.requestSync(peer).catch(() => undefined);
-        void this.messageService.retryFailedMessagesForPeer(peer).catch(() => undefined);
-        void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
-        this.requestMissingDirectAttachmentsForPeer(peer);
-      } else if (hasPendingOps) {
-        void this.flushPendingPeerOperations(peer.deviceId, peer).catch(() => undefined);
-      }
     }
 
     for (const knownOnlinePeerId of Array.from(this.knownOnlinePeerIds.values())) {
@@ -1118,65 +1094,6 @@ class LanternApp {
     return undefined;
   }
 
-  private async requestSync(
-    peer: Peer,
-    options?: {
-      force?: boolean;
-      throwOnFail?: boolean;
-      since?: number;
-      limit?: number;
-      fullResync?: boolean;
-    }
-  ): Promise<void> {
-    const now = Date.now();
-    const force = Boolean(options?.force);
-    const throwOnFail = Boolean(options?.throwOnFail);
-    const fullResync = Boolean(options?.fullResync);
-    const last = this.syncRequestAtByPeer.get(peer.deviceId) || 0;
-    if (!force && now - last < this.syncRetryMinIntervalMs) {
-      return;
-    }
-    this.syncRequestAtByPeer.set(peer.deviceId, now);
-
-    const normalizedSince =
-      typeof options?.since === 'number' && Number.isFinite(options.since) && options.since >= 0
-        ? Math.trunc(options.since)
-        : this.db.getLatestRelevantMessageTimestamp(peer.deviceId);
-    const normalizedLimit =
-      typeof options?.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
-        ? Math.trunc(options.limit)
-        : 1000;
-
-    const frame: ProtocolFrame<SyncRequestPayload> = {
-      type: 'chat:sync:request',
-      messageId: randomUUID(),
-      from: this.profile.deviceId,
-      to: peer.deviceId,
-      createdAt: now,
-      payload: {
-        since: normalizedSince,
-        limit: normalizedLimit,
-        fullResync
-      }
-    };
-
-    this.beginSyncActivity();
-    try {
-      await this.sendToPeer(peer, frame);
-      // Arquivos são transmitidos em segundo plano para não atrasar respostas
-      // de sync, presença e novos frames na fila do processo principal.
-      void this.messageService.replayPendingFilesForPeer(peer).catch(() => undefined);
-      this.requestMissingDirectAttachmentsForPeer(peer);
-    } catch (error) {
-      if (throwOnFail) {
-        throw error;
-      }
-      // peer offline ou inacessível; próxima presença online tentará novamente
-    } finally {
-      this.endSyncActivity();
-    }
-  }
-
   private hasUsableLocalAttachment(message: DbMessage | undefined): boolean {
     if (!message?.filePath) return false;
     try {
@@ -1186,61 +1103,99 @@ class LanternApp {
     }
   }
 
-  private async requestMissingDirectAttachment(message: DbMessage, preferredPeer?: Peer): Promise<void> {
-    if (this.authState?.authenticated && this.relay?.isConnected() && message.fileId) {
-      await this.downloadCanonicalAttachment(message).catch(() => undefined);
-      return;
-    }
-    if (
-      message.type !== 'file' ||
-      message.direction !== 'in' ||
-      message.deletedAt ||
-      !message.fileId ||
-      !message.senderDeviceId ||
-      message.senderDeviceId === this.profile.deviceId ||
-      this.hasUsableLocalAttachment(message)
-    ) {
-      return;
-    }
-
-    const peer =
-      preferredPeer && preferredPeer.deviceId === message.senderDeviceId
-        ? preferredPeer
-        : this.presence.getPeer(message.senderDeviceId) || this.resolvePeerForTransport(message.senderDeviceId);
-    if (!peer) return;
-
-    const requestKey = message.messageId;
-    const now = Date.now();
-    const lastRequestAt = this.directFileRequestAtByMessageId.get(requestKey) || 0;
-    if (
-      this.directFileRequestInFlight.has(requestKey) ||
-      now - lastRequestAt < this.directFileRequestMinIntervalMs
-    ) {
-      return;
-    }
-
-    this.directFileRequestAtByMessageId.set(requestKey, now);
-    this.directFileRequestInFlight.add(requestKey);
-    try {
-      const waiting = this.db.markIncomingFileForRetry(message.messageId);
-      if (waiting) {
-        this.emitEvent({ type: 'message:updated', message: waiting });
+  private async getMessagesAndRecoverMissingAttachments(
+    conversationId: string,
+    limit: number,
+    before?: number
+  ): Promise<DbMessage[]> {
+    const groupId = this.groupIdFromConversationId(conversationId);
+    const pageLimit = Math.max(1, Math.min(Math.trunc(limit || 50), 100));
+    if (this.relay?.isConnected()) {
+      try {
+        if (groupId) {
+          const result = await this.relay.sendGroupAction('history', {
+            groupId,
+            before: before || Number.MAX_SAFE_INTEGER,
+            limit: Math.max(1, Math.min(Math.trunc(limit || 50), 100))
+          });
+          const events = Array.isArray(result.events)
+            ? result.events.filter(
+                (value): value is GroupEvent => Boolean(value && typeof value === 'object')
+              )
+            : [];
+          events
+            .sort((left, right) => left.seq - right.seq || left.eventId.localeCompare(right.eventId))
+            .forEach((event) => this.applyGroupEvent(event));
+        } else if (conversationId.startsWith('dm:')) {
+          const peerUserId = conversationId.slice(3).trim();
+          if (peerUserId) {
+            const frames = await this.relay.requestConversationHistory(
+              peerUserId,
+              before || Number.MAX_SAFE_INTEGER,
+              pageLimit
+            );
+            await this.applyCanonicalHistorySnapshot(frames);
+          }
+        }
+      } catch (error) {
+        console.warn(
+          '[Lantern][Relay] falha ao carregar página do histórico:',
+          error instanceof Error ? error.message : String(error)
+        );
       }
-      await this.sendToPeer(peer, {
-        type: 'file:request',
-        messageId: randomUUID(),
-        from: this.profile.deviceId,
-        to: message.senderDeviceId,
-        createdAt: now,
-        payload: {
-          targetMessageId: message.messageId,
-          fileId: message.fileId
-        } satisfies FileRequestPayload
+    }
+
+    const messages = this.db.getMessages(conversationId, limit, before);
+    if (!this.relay?.isConnected()) return messages;
+
+    for (const message of messages) {
+      if (
+        message.type !== 'file' ||
+        !message.fileId ||
+        !message.senderDeviceId ||
+        this.hasUsableLocalAttachment(message)
+      ) {
+        continue;
+      }
+      if (groupId) {
+        void this.requestGroupAttachmentIfNeeded({
+          fileId: message.fileId,
+          groupId,
+          messageId: message.messageId,
+          senderDeviceId: message.senderDeviceId,
+          fileSize: message.fileSize || 0
+        }).catch(() => undefined);
+      } else if (conversationId.startsWith('dm:')) {
+        void this.downloadMissingCanonicalAttachment(message);
+      }
+    }
+    return messages;
+  }
+
+  private async downloadMissingCanonicalAttachment(message: DbMessage): Promise<void> {
+    if (!this.authState?.authenticated || !this.relay?.isConnected() || !message.fileId) return;
+    try {
+      await this.downloadCanonicalAttachment(message);
+      const retry = this.canonicalAttachmentRetryTimers.get(message.messageId);
+      if (retry) clearTimeout(retry);
+      this.canonicalAttachmentRetryTimers.delete(message.messageId);
+    } catch (error) {
+      if (this.canonicalAttachmentRetryTimers.has(message.messageId)) return;
+      this.emitEvent({
+        type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
+        messageId: message.messageId, peerId: message.senderDeviceId,
+        transferred: 0, total: message.fileSize || 0, stage: 'retrying',
+        detail: error instanceof Error ? error.message : 'Tentando baixar novamente do Relay.'
       });
-    } catch {
-      // O próximo snapshot de presença ou sync tentará novamente.
-    } finally {
-      this.directFileRequestInFlight.delete(requestKey);
+      const retry = setTimeout(() => {
+        this.canonicalAttachmentRetryTimers.delete(message.messageId);
+        const latest = this.db.getMessageById(message.messageId);
+        if (latest && !this.hasUsableLocalAttachment(latest)) {
+          void this.downloadMissingCanonicalAttachment(latest);
+        }
+      }, 5_000);
+      retry.unref?.();
+      this.canonicalAttachmentRetryTimers.set(message.messageId, retry);
     }
   }
 
@@ -1248,8 +1203,8 @@ class LanternApp {
     if (!this.relay || !message.fileId || !message.fileName || !message.fileSize || !message.fileSha256) {
       throw new Error('Metadados do anexo incompletos.');
     }
-    if (this.hasUsableLocalAttachment(message) || this.directFileRequestInFlight.has(message.messageId)) return;
-    this.directFileRequestInFlight.add(message.messageId);
+    if (this.hasUsableLocalAttachment(message) || this.canonicalAttachmentDownloadsInFlight.has(message.messageId)) return;
+    this.canonicalAttachmentDownloadsInFlight.add(message.messageId);
     const offer: FileOfferPayload = {
       fileId: message.fileId,
       messageId: message.messageId,
@@ -1277,17 +1232,7 @@ class LanternApp {
       });
       await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
     } finally {
-      this.directFileRequestInFlight.delete(message.messageId);
-    }
-  }
-
-  private requestMissingDirectAttachmentsForPeer(peer: Peer): void {
-    // Limita a recuperação inicial para não abrir dezenas de streams grandes
-    // quando um dispositivo volta depois de muito tempo offline.
-    for (const message of this.db.getIncomingFileMessagesForPeer(peer.deviceId, 20)) {
-      if (!this.hasUsableLocalAttachment(message)) {
-        void this.requestMissingDirectAttachment(message, peer);
-      }
+      this.canonicalAttachmentDownloadsInFlight.delete(message.messageId);
     }
   }
 
@@ -1329,32 +1274,25 @@ class LanternApp {
       throw new Error('Ressincronização disponível apenas para conversas diretas.');
     }
 
-    const peerId = conversationId.slice(3).trim();
-    if (!peerId) {
+    if (!conversationId.slice(3).trim()) {
       throw new Error('Contato inválido para ressincronizar.');
     }
-
-    const peer = this.resolvePeerForTransport(peerId);
-    if (!peer) {
-      throw new Error('Contato offline no relay.');
-    }
-
-    await this.requestSync(peer, {
-      force: true,
-      throwOnFail: true,
-      since: 0,
-      limit: 100_000,
-      fullResync: true
-    });
+    const relay = this.requireConnectedRelay();
+    relay.stop();
+    await relay.start();
 
     this.emitEvent({
       type: 'ui:toast',
       level: 'success',
-      message: 'Ressincronização iniciada. A conversa será alinhada nos dois clientes.'
+      message: 'Cache reconstruído a partir do histórico canônico do Relay.'
     });
   }
 
   private async sendToPeer(peer: Peer, frame: ProtocolFrame): Promise<void> {
+    await this.sendCanonicalFrame(frame);
+  }
+
+  private async sendCanonicalFrame(frame: ProtocolFrame): Promise<void> {
     if (!this.relay || !this.relay.isConnected()) {
       throw new Error('Relay offline.');
     }
@@ -1369,15 +1307,14 @@ class LanternApp {
     }
   }
 
+  private requireConnectedRelay(): RelayClient {
+    if (!this.relay || !this.relay.isConnected()) throw new Error('Relay offline.');
+    return this.relay;
+  }
+
   private async sendBroadcast(frame: ProtocolFrame): Promise<string[]> {
-    if (!this.relay || !this.relay.isConnected()) {
-      throw new Error('Relay offline.');
-    }
-    const result = await this.relay.sendFrame({
-      ...frame,
-      to: null
-    });
-    return result.deliveredTo;
+    await this.sendCanonicalFrame({ ...frame, to: null });
+    return [];
   }
 
   private normalizeInboundCreatedAt(rawCreatedAt: number): number {
@@ -1682,100 +1619,9 @@ class LanternApp {
   }
 
   private dropPeerRuntimeState(peerId: string): boolean {
-    this.syncRequestAtByPeer.delete(peerId);
     this.knownOnlinePeerIds.delete(peerId);
     this.peerUnreachableFailures.delete(peerId);
     return this.presence.markPeerOffline(peerId);
-  }
-
-  private enqueuePendingPeerOperationIfMissing(
-    peerId: string,
-    type: 'chat:clear' | 'chat:forget'
-  ): void {
-    const cleanPeerId = (peerId || '').trim();
-    if (!cleanPeerId) return;
-    const exists = this.db
-      .getPendingPeerOperations(cleanPeerId)
-      .some((row) => row.type === type);
-    if (exists) return;
-    this.db.enqueuePendingPeerOperation(cleanPeerId, type, { scope: 'dm' });
-  }
-
-  private enqueuePendingReactionOperation(
-    peerId: string,
-    targetMessageId: string,
-    reaction: ReactPayload['reaction']
-  ): void {
-    const cleanPeerId = (peerId || '').trim();
-    const cleanTargetMessageId = (targetMessageId || '').trim();
-    if (!cleanPeerId || !cleanTargetMessageId) return;
-    this.db.enqueuePendingPeerOperation(cleanPeerId, 'chat:react', {
-      targetMessageId: cleanTargetMessageId,
-      reaction
-    });
-  }
-
-  private async flushPendingPeerOperations(peerId: string, peerOverride?: Peer): Promise<void> {
-    const cleanPeerId = (peerId || '').trim();
-    if (!cleanPeerId) return;
-    if (!this.relay || !this.relay.isConnected()) return;
-
-    const peer = peerOverride || this.resolvePeerForTransport(cleanPeerId);
-    if (!peer) return;
-
-    const pending = this.db.getPendingPeerOperations(cleanPeerId);
-    if (pending.length === 0) return;
-
-    for (const operation of pending) {
-      if (operation.nextAttemptAt > Date.now()) {
-        break;
-      }
-      let frame: ProtocolFrame;
-      if (operation.type === 'chat:clear' && 'scope' in operation.payload) {
-        frame = {
-          type: 'chat:clear',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: cleanPeerId,
-          createdAt: Date.now(),
-          payload: { scope: operation.payload.scope }
-        } satisfies ProtocolFrame<ClearConversationPayload>;
-      } else if (operation.type === 'chat:react' && 'targetMessageId' in operation.payload) {
-        frame = {
-          type: 'chat:react',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: cleanPeerId,
-          createdAt: operation.createdAt,
-          payload: {
-            targetMessageId: operation.payload.targetMessageId,
-            reaction: operation.payload.reaction
-          }
-        } satisfies ProtocolFrame<ReactPayload>;
-      } else if (operation.type === 'chat:forget' && 'scope' in operation.payload) {
-        frame = {
-          type: 'chat:forget',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: cleanPeerId,
-          createdAt: Date.now(),
-          payload: { scope: operation.payload.scope }
-        } satisfies ProtocolFrame<ForgetPeerPayload>;
-      } else {
-        this.db.removePendingPeerOperation(operation.id);
-        continue;
-      }
-      try {
-        await this.sendToPeer(peer, frame);
-        this.db.removePendingPeerOperation(operation.id);
-      } catch (error) {
-        this.db.markPendingPeerOperationFailed(
-          operation.id,
-          error instanceof Error ? error.message : String(error)
-        );
-        break;
-      }
-    }
   }
 
   private forgetPeerLocally(peerId: string): void {
@@ -1871,17 +1717,18 @@ class LanternApp {
     if (source.type === 'file') {
       if (!this.hasUsableLocalAttachment(source)) {
         const groupId = this.groupIdFromConversationId(source.conversationId);
-        if (groupId && source.fileId && source.senderDeviceId !== this.profile.deviceId) {
+        if (groupId && source.fileId && source.senderDeviceId) {
           void this.requestGroupAttachmentIfNeeded({
             fileId: source.fileId,
             groupId,
             messageId: source.messageId,
-            senderDeviceId: source.senderDeviceId
+            senderDeviceId: source.senderDeviceId,
+            fileSize: source.fileSize || 0
           }).catch(() => undefined);
           throw new Error('Este anexo ainda está sendo baixado do Relay. Tente novamente em instantes.');
         }
         if (source.direction === 'in' && source.conversationId.startsWith('dm:')) {
-          void this.requestMissingDirectAttachment(source);
+          void this.downloadMissingCanonicalAttachment(source);
           throw new Error('Este anexo ainda está sendo recebido. Tente novamente em instantes.');
         }
         throw new Error('Este anexo não está mais disponível neste dispositivo.');
@@ -1912,6 +1759,12 @@ class LanternApp {
 
     const groupId = this.groupIdFromConversationId(conversationId);
     if (groupId) {
+      await this.requireConnectedRelay().sendGroupAction('react', {
+        groupId,
+        targetMessageId: messageId,
+        reaction,
+        updatedAt: reactionUpdatedAt
+      });
       const summary = this.db.setMessageReaction(
         messageId,
         this.profile.deviceId,
@@ -1920,96 +1773,41 @@ class LanternApp {
         reactionUpdatedAt
       );
       this.emitEvent({ type: 'message:reactions', messageId, summary });
-      try {
-        await this.relay?.sendGroupAction('react', {
-          groupId,
-          targetMessageId: messageId,
-          reaction,
-          updatedAt: reactionUpdatedAt
-        });
-      } catch {
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'warning',
-          message: 'Relay offline. Reação do grupo não enviada.'
-        });
-      }
       return targetMessage;
     }
 
     const isAnnouncementConversation =
       conversationId === ANNOUNCEMENTS_CONVERSATION_ID || targetMessage.type === 'announcement';
-    const summary = this.db.setMessageReaction(
-      messageId,
-      this.profile.deviceId,
-      reaction,
-      this.profile.deviceId,
-      reactionUpdatedAt
-    );
-    this.emitEvent({
-      type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
-      messageId,
-      summary
-    });
 
     if (conversationId.startsWith('dm:')) {
       const peerId = conversationId.slice(3).trim();
       if (!peerId) return targetMessage;
-      const peer = this.getPeerFromConversationId(conversationId);
-      if (!peer) {
-        this.enqueuePendingReactionOperation(peerId, messageId, reaction);
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'info',
-          message: 'Contato offline. A reação será sincronizada quando ele voltar.'
-        });
-        return targetMessage;
-      }
       const frame: ProtocolFrame<ReactPayload> = {
         type: 'chat:react',
         messageId: randomUUID(),
         from: this.profile.deviceId,
-        to: peer.deviceId,
+        to: peerId,
         createdAt: reactionUpdatedAt,
         payload: {
           targetMessageId: messageId,
           reaction
         }
       };
-      try {
-        await this.sendToPeer(peer, frame);
-        this.db.removePendingReactionOperation(peer.deviceId, messageId);
-      } catch {
-        this.enqueuePendingReactionOperation(peer.deviceId, messageId, reaction);
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'info',
-          message: 'Contato offline. A reação será sincronizada quando ele voltar.'
-        });
-        return targetMessage;
-      }
+      await this.sendCanonicalFrame(frame);
     } else if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
-      try {
-        await this.sendBroadcast({
-          type: 'chat:react',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: null,
-          createdAt: Date.now(),
-          payload: {
-            targetMessageId: messageId,
-            reaction
-          }
-        } satisfies ProtocolFrame<ReactPayload>);
-      } catch {
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'warning',
-          message: 'Relay offline. Reação não enviada.'
-        });
-        return targetMessage;
-      }
+      await this.sendBroadcast({
+        type: 'chat:react', messageId: randomUUID(), from: this.profile.deviceId, to: null,
+        createdAt: reactionUpdatedAt, payload: { targetMessageId: messageId, reaction }
+      } satisfies ProtocolFrame<ReactPayload>);
     }
+    const summary = this.db.setMessageReaction(
+      messageId, this.profile.deviceId, reaction, this.profile.deviceId, reactionUpdatedAt
+    );
+    this.emitEvent({
+      type: isAnnouncementConversation ? 'announcement:reactions' : 'message:reactions',
+      messageId,
+      summary
+    });
     return targetMessage;
   }
 
@@ -2083,48 +1881,35 @@ class LanternApp {
       return updatedAnnouncement || null;
     }
 
-    const updated = this.db.updateMessageText(messageId, normalizedText, editedAt);
-    if (!updated) return null;
-
-    this.emitEvent({ type: 'message:updated', message: updated });
-
     const groupId = this.groupIdFromConversationId(conversationId);
     if (groupId) {
-      await this.relay?.sendGroupAction('editMessage', {
+      await this.requireConnectedRelay().sendGroupAction('editMessage', {
         groupId,
         targetMessageId: messageId,
-        text: updated.bodyText || '',
+        text: normalizedText,
         editedAt
       });
-      return updated;
-    }
-
-    const peer = this.getPeerFromConversationId(conversationId);
-    if (peer) {
+    } else {
+      const peerId = conversationId.startsWith('dm:') ? conversationId.slice(3).trim() : '';
+      if (!peerId) throw new Error('Conversa canônica inválida.');
       const frame: ProtocolFrame<EditMessagePayload> = {
         type: 'chat:edit',
         messageId: randomUUID(),
         from: this.profile.deviceId,
-        to: peer.deviceId,
+        to: peerId,
         createdAt: editedAt,
         payload: {
           targetMessageId: messageId,
-          text: updated.bodyText || '',
+          text: normalizedText,
           editedAt
         }
       };
-      try {
-        await this.sendToPeer(peer, frame);
-      } catch {
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'info',
-          message: 'Contato offline. A edição será sincronizada quando ele voltar.'
-        });
-      }
+      await this.sendCanonicalFrame(frame);
     }
 
-    return updated;
+    const updated = this.db.updateMessageText(messageId, normalizedText, editedAt);
+    if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+    return updated || null;
   }
 
   private deleteMessageForMe(conversationId: string, messageId: string): DbMessage | null {
@@ -2283,87 +2068,32 @@ class LanternApp {
       throw new Error('Somente mensagens enviadas por você podem ser apagadas para todos.');
     }
 
-    if (existing.filePath) {
-      this.removeManagedAttachment(existing.filePath);
+    const groupId = this.groupIdFromConversationId(conversationId);
+    if (groupId) {
+      await this.requireConnectedRelay().sendGroupAction('deleteMessage', {
+        groupId,
+        targetMessageId: messageId,
+        deletedAt: Date.now()
+      });
+    } else {
+      const peerId = conversationId === ANNOUNCEMENTS_CONVERSATION_ID
+        ? null
+        : conversationId.startsWith('dm:') ? conversationId.slice(3).trim() : '';
+      if (peerId === '') throw new Error('Conversa canônica inválida.');
+      await this.sendCanonicalFrame({
+        type: 'chat:delete',
+        messageId: randomUUID(),
+        from: this.profile.deviceId,
+        to: peerId,
+        createdAt: Date.now(),
+        payload: { targetMessageId: messageId }
+      } satisfies ProtocolFrame<DeletePayload>);
     }
-
-    // "sent/failed/null" ainda representam entrega pendente.
-    // "read" é mais forte que delivered e deve propagar exclusão remota.
-    const isPendingDelivery =
-      existing.status === 'sent' || existing.status === 'failed' || existing.status === null;
 
     const updated = this.db.deleteMessageForEveryone(messageId);
     if (!updated) return null;
+    if (existing.filePath) this.removeManagedAttachment(existing.filePath);
     this.notifications.closeMessageNotification(messageId);
-
-    const groupId = this.groupIdFromConversationId(conversationId);
-    if (groupId) {
-      try {
-        await this.relay?.sendGroupAction('deleteMessage', {
-          groupId,
-          targetMessageId: messageId,
-          deletedAt: Date.now()
-        });
-      } catch {
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'warning',
-          message: 'Relay offline. A exclusão do grupo será aplicada apenas localmente por enquanto.'
-        });
-      }
-      this.emitEvent({
-        type: 'message:removed',
-        conversationId: updated.conversationId,
-        messageId: updated.messageId
-      });
-      return updated;
-    }
-
-    const peerIdFromConversation = conversationId.startsWith('dm:')
-      ? conversationId.slice(3)
-      : null;
-    const isPeerOnlineNow = peerIdFromConversation
-      ? Boolean(this.presence.getPeer(peerIdFromConversation))
-      : false;
-
-    if (!isPendingDelivery || isPeerOnlineNow || conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
-      try {
-        if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
-          await this.sendBroadcast({
-            type: 'chat:delete',
-            messageId: randomUUID(),
-            from: this.profile.deviceId,
-            to: null,
-            createdAt: Date.now(),
-            payload: {
-              targetMessageId: messageId
-            }
-          } satisfies ProtocolFrame<DeletePayload>);
-        } else {
-          const peer = this.getPeerFromConversationId(conversationId);
-          if (peer) {
-            const frame: ProtocolFrame<DeletePayload> = {
-              type: 'chat:delete',
-              messageId: randomUUID(),
-              from: this.profile.deviceId,
-              to: peer.deviceId,
-              createdAt: Date.now(),
-              payload: {
-                targetMessageId: messageId
-              }
-            };
-            await this.sendToPeer(peer, frame);
-          }
-        }
-      } catch {
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'warning',
-          message:
-            'Contato offline no momento. A exclusão será sincronizada quando a conexão voltar.'
-        });
-      }
-    }
 
     this.emitEvent({
       type: 'message:removed',
@@ -2384,7 +2114,7 @@ class LanternApp {
     } catch {
       const pending = this.db.getMessageByFileId(fileId);
       if (pending?.senderDeviceId === senderDeviceId) {
-        void this.requestMissingDirectAttachment(pending, activePeer);
+        void this.downloadMissingCanonicalAttachment(pending);
       }
       return;
     }
@@ -2411,12 +2141,10 @@ class LanternApp {
         message: 'Falha na validação do anexo recebido. O remetente irá reenviar.'
       });
       if (updated?.senderDeviceId === senderDeviceId) {
-        void this.requestMissingDirectAttachment(updated, activePeer);
+        void this.downloadMissingCanonicalAttachment(updated);
       }
       return;
     }
-
-    this.directFileRequestAtByMessageId.delete(result.messageId);
 
     const ackPeer =
       activePeer && activePeer.deviceId === senderDeviceId
@@ -2526,7 +2254,7 @@ class LanternApp {
     }
 
     const peer = this.peersById.get(frame.from) || this.resolvePeerForTransport(frame.from);
-    const transportPeer = this.buildTransportPeerFromFrame(frame, peer);
+    const transportPeer = peer;
     const activePeer =
       this.presence.getPeer(frame.from) ||
       transportPeer ||
@@ -2545,13 +2273,6 @@ class LanternApp {
       } satisfies Peer);
 
     switch (frame.type) {
-      case 'hello': {
-        if (activePeer) {
-          void this.requestSync(activePeer).catch(() => undefined);
-          void this.messageService.retryFailedMessagesForPeer(activePeer).catch(() => undefined);
-        }
-        break;
-      }
       case 'chat:text': {
         const payload = frame.payload as ChatTextPayload;
         const replyTo = this.normalizeReplyPayload(payload.replyTo);
@@ -2732,14 +2453,6 @@ class LanternApp {
               payload.reaction,
               frame.createdAt
             );
-            if (deliverySource === 'live' && activePeer) {
-              void this.requestSync(activePeer, {
-                force: true,
-                since: 0,
-                limit: 100_000,
-                fullResync: true
-              }).catch(() => undefined);
-            }
           }
           break;
         }
@@ -2795,14 +2508,6 @@ class LanternApp {
             conversationId: updated.conversationId,
             messageId: updated.messageId
           });
-        } else if (deliverySource === 'live' && activePeer) {
-          // Corrige corrida: delete pode chegar antes do payload original.
-          void this.requestSync(activePeer, {
-            force: true,
-            since: 0,
-            limit: 100_000,
-            fullResync: true
-          }).catch(() => undefined);
         }
         break;
       }
@@ -2815,14 +2520,6 @@ class LanternApp {
         }
         const existing = this.db.getMessageById(targetMessageId);
         if (!existing) {
-          if (deliverySource === 'live' && activePeer) {
-            void this.requestSync(activePeer, {
-              force: true,
-              since: 0,
-              limit: 100_000,
-              fullResync: true
-            }).catch(() => undefined);
-          }
           break;
         }
         if (existing.senderDeviceId !== frame.from || existing.deletedAt || existing.type !== 'text') {
@@ -2836,171 +2533,6 @@ class LanternApp {
         }
         break;
       }
-      case 'chat:clear': {
-        const payload = frame.payload as ClearConversationPayload;
-        if (payload.scope === 'dm') {
-          const conversationId = `dm:${frame.from}`;
-          this.clearConversationLocal(conversationId);
-        }
-        break;
-      }
-      case 'chat:forget': {
-        const payload = frame.payload as ForgetPeerPayload;
-        if (payload.scope === 'dm') {
-          const conversationId = `dm:${frame.from}`;
-          this.clearConversationLocal(conversationId);
-          this.db.removeConversation(conversationId);
-          this.forgetPeerLocally(frame.from);
-          this.emitEvent({ type: 'peers:updated', peers: this.getVisibleOnlinePeers() });
-        }
-        break;
-      }
-      case 'chat:sync:request': {
-        this.beginSyncActivity();
-        try {
-          const payload = frame.payload as SyncRequestPayload;
-          const fullResyncRequested = Boolean(payload.fullResync);
-          const requestedLimit = fullResyncRequested
-            ? 100_000
-            : Math.max(100, Math.min(payload.limit || 1000, 5000));
-          const requestedSince = fullResyncRequested ? 0 : payload.since;
-          const syncFrame: ProtocolFrame<SyncResponsePayload> = {
-            type: 'chat:sync:response',
-            messageId: randomUUID(),
-            from: this.profile.deviceId,
-            to: frame.from,
-            createdAt: Date.now(),
-            payload: {
-              messages: this.syncService.buildSyncMessages(
-                frame.from,
-                requestedLimit,
-                requestedSince
-              )
-            }
-          };
-
-          if (activePeer) {
-            try {
-              await this.sendToPeer(activePeer, syncFrame);
-            } catch {
-              // sync-response best-effort durante oscilação de presença.
-            }
-          }
-          if (activePeer) {
-            await this.messageService.retryFailedMessagesForPeer(activePeer);
-            void this.messageService.replayPendingFilesForPeer(activePeer).catch(() => undefined);
-            if (fullResyncRequested) {
-              // Garante alinhamento bidirecional completo sem loop infinito.
-              await this.requestSync(activePeer, {
-                force: true,
-                since: 0,
-                limit: 100_000,
-                fullResync: false
-              });
-            }
-          }
-        } finally {
-          this.endSyncActivity();
-        }
-        break;
-      }
-      case 'chat:sync:response': {
-        this.beginSyncActivity();
-        try {
-          const payload = frame.payload as SyncResponsePayload;
-          const ackIds: string[] = [];
-
-          for (const syncMessage of payload.messages || []) {
-            const result = this.syncService.applySyncedMessage(syncMessage, this.peersById);
-            if (!result.row) {
-              continue;
-            }
-
-            if (result.row.deletedAt) {
-              this.notifications.closeMessageNotification(result.row.messageId);
-              this.emitEvent({
-                type: 'message:removed',
-                conversationId: result.row.conversationId,
-                messageId: result.row.messageId
-              });
-              continue;
-            }
-
-            if (result.inserted) {
-              if (result.row.direction === 'in') {
-                this.bumpUnreadIfBackground(result.row.conversationId, result.row.createdAt);
-                const syncSender =
-                  this.peersById.get(result.row.senderDeviceId) ||
-                  (activePeer && activePeer.deviceId === result.row.senderDeviceId
-                    ? activePeer
-                    : undefined);
-                this.notifyIncomingIfNeeded(
-                  result.row,
-                  'sync',
-                  syncSender
-                    ? {
-                        displayName: syncSender.displayName,
-                        avatarEmoji: syncSender.avatarEmoji,
-                        avatarBg: syncSender.avatarBg
-                      }
-                    : undefined
-                );
-              }
-              this.emitEvent({ type: 'message:received', message: result.row });
-              this.applyQueuedReactionsForMessage(result.row);
-            } else {
-              this.emitEvent({ type: 'message:updated', message: result.row });
-              if (result.row.editedAt) {
-                const syncSender =
-                  this.peersById.get(result.row.senderDeviceId) ||
-                  (activePeer && activePeer.deviceId === result.row.senderDeviceId
-                    ? activePeer
-                    : undefined);
-                this.replaceIncomingNotificationIfTracked(result.row, syncSender);
-              }
-              this.applyQueuedReactionsForMessage(result.row);
-            }
-
-            if (
-              result.row.direction === 'in' &&
-              (result.row.type === 'text' || result.row.type === 'announcement')
-            ) {
-              ackIds.push(result.row.messageId);
-            }
-            if (
-              result.row.direction === 'in' &&
-              result.row.type === 'file' &&
-              !this.hasUsableLocalAttachment(result.row)
-            ) {
-              void this.requestMissingDirectAttachment(result.row, activePeer);
-            }
-          }
-
-          for (const ackMessageId of ackIds) {
-            const ackFrame: ProtocolFrame<AckPayload> = {
-              type: 'chat:ack',
-              messageId: randomUUID(),
-              from: this.profile.deviceId,
-              to: frame.from,
-              createdAt: Date.now(),
-              payload: {
-                ackMessageId,
-                status: 'delivered'
-              }
-            };
-            if (activePeer) {
-              try {
-                await this.sendToPeer(activePeer, ackFrame);
-              } catch {
-                // ACK best-effort durante sync.
-              }
-            }
-          }
-        } finally {
-          this.endSyncActivity();
-        }
-        break;
-      }
       case 'typing': {
         const payload = frame.payload as TypingPayload;
         const conversationId = `dm:${frame.from}`;
@@ -3009,35 +2541,6 @@ class LanternApp {
           conversationId,
           peerId: frame.from,
           isTyping: Boolean(payload.isTyping)
-        });
-        break;
-      }
-      case 'file:request': {
-        const payload = frame.payload as FileRequestPayload;
-        const targetMessageId = (payload.targetMessageId || '').trim();
-        const requestedFileId = (payload.fileId || '').trim();
-        if (!targetMessageId || !requestedFileId || !activePeer) {
-          break;
-        }
-        const target = this.db.getMessageById(targetMessageId);
-        if (
-          !target ||
-          target.type !== 'file' ||
-          target.direction !== 'out' ||
-          target.deletedAt ||
-          target.senderDeviceId !== this.profile.deviceId ||
-          target.receiverDeviceId !== frame.from ||
-          target.fileId !== requestedFileId
-        ) {
-          break;
-        }
-        void this.messageService.resendFileMessageToPeer(activePeer, target).catch((error) => {
-          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
-            console.warn(
-              '[Lantern][Files] falha ao reenviar anexo solicitado:',
-              error instanceof Error ? error.message : String(error)
-            );
-          }
         });
         break;
       }
@@ -3132,46 +2635,10 @@ class LanternApp {
         }
 
         const storedFile = this.db.getMessageById(payload.messageId);
-        if (shouldReceiveFile && storedFile) {
-          void this.downloadCanonicalAttachment(storedFile).catch((error) => {
-            this.emitEvent({
-              type: 'ui:toast', level: 'warning',
-              message: error instanceof Error ? error.message : 'Não foi possível baixar o anexo do Relay.'
-            });
-          });
+        if (shouldReceiveFile && storedFile && this.activeConversationId === conversationId) {
+          void this.downloadMissingCanonicalAttachment(storedFile);
         }
 
-        break;
-      }
-      case 'file:chunk': {
-        const payload = frame.payload as FileChunkPayload;
-        let progress: { done: boolean; transferred: number; total: number };
-        try {
-          progress = this.fileTransfer.onChunk(payload);
-        } catch {
-          const pending = this.db.getMessageByFileId(payload.fileId);
-          if (pending?.senderDeviceId === frame.from) {
-            void this.requestMissingDirectAttachment(pending, activePeer);
-          }
-          break;
-        }
-        this.emitEvent({
-          type: 'transfer:progress',
-          direction: 'receive',
-          fileId: payload.fileId,
-          messageId: '',
-          peerId: frame.from,
-          transferred: progress.transferred,
-          total: progress.total
-        });
-        if (progress.done) {
-          await this.finalizeIncomingFileTransfer(payload.fileId, frame.from, activePeer);
-        }
-        break;
-      }
-      case 'file:complete': {
-        const payload = frame.payload as FileCompletePayload;
-        await this.finalizeIncomingFileTransfer(payload.fileId, frame.from, activePeer);
         break;
       }
       default:
@@ -3242,7 +2709,12 @@ class LanternApp {
       const inserted = this.db.saveMessage(row);
       const stored = this.db.getMessageById(frame.messageId) || row;
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: stored });
-      if (!this.hasUsableLocalAttachment(stored)) void this.downloadCanonicalAttachment(stored).catch(() => undefined);
+      if (
+        this.activeConversationId === conversationId &&
+        !this.hasUsableLocalAttachment(stored)
+      ) {
+        void this.downloadMissingCanonicalAttachment(stored);
+      }
       return;
     }
     if (frame.type === 'chat:edit') {
@@ -3275,87 +2747,8 @@ class LanternApp {
     }
   }
 
-  private buildTransportPeerFromFrame(
-    frame: ProtocolFrame,
-    existing?: Peer,
-    remoteAddress?: string
-  ): Peer | null {
-    if (!frame.from || frame.from === this.profile.deviceId) {
-      return null;
-    }
-
-    const normalizedRemoteAddress = (() => {
-      if (!remoteAddress) return '';
-      const value = remoteAddress.replace(/^::ffff:/, '');
-      if (value === '::1' || value.startsWith('127.')) return '';
-      return value;
-    })();
-
-    if (frame.type === 'hello') {
-      const payload = (frame.payload || {}) as Partial<{
-        deviceId: string;
-        displayName: string;
-        avatarEmoji: string;
-        avatarBg: string;
-        statusMessage: string;
-        appVersion: string;
-        wsPort: number | string;
-      }>;
-
-      if (payload.deviceId && payload.deviceId !== frame.from) {
-        return null;
-      }
-
-      const wsPortValue =
-        typeof payload.wsPort === 'string' || typeof payload.wsPort === 'number'
-          ? Number(payload.wsPort)
-          : NaN;
-      const resolvedPort =
-        Number.isFinite(wsPortValue) && wsPortValue > 0
-          ? wsPortValue
-          : existing?.port || 0;
-
-      return {
-        deviceId: frame.from,
-        displayName: payload.displayName || existing?.displayName || `Contato ${frame.from.slice(0, 6)}`,
-        avatarEmoji: payload.avatarEmoji || existing?.avatarEmoji || '🙂',
-        avatarBg: payload.avatarBg || existing?.avatarBg || '#5b5fc7',
-        statusMessage: payload.statusMessage || existing?.statusMessage || 'Disponível',
-        address: normalizedRemoteAddress || existing?.address || '',
-        port: resolvedPort,
-        appVersion: payload.appVersion || existing?.appVersion || 'unknown',
-        lastSeenAt: Date.now(),
-        source: 'relay'
-      };
-    }
-
-    if (!existing) {
-      if (!normalizedRemoteAddress) {
-        return null;
-      }
-      return {
-        deviceId: frame.from,
-        displayName: `Contato ${frame.from.slice(0, 6)}`,
-        avatarEmoji: '🙂',
-        avatarBg: '#5b5fc7',
-        statusMessage: 'Disponível',
-        address: normalizedRemoteAddress || '',
-        port: 0,
-        appVersion: 'unknown',
-        lastSeenAt: Date.now(),
-        source: 'relay'
-      };
-    }
-
-    return {
-      ...existing,
-      address: normalizedRemoteAddress || existing.address || '',
-      lastSeenAt: Date.now(),
-      source: 'relay'
-    };
-  }
-
   private cleanup(): void {
+    this.clearCanonicalAttachmentRetries();
     if (this.syncIdleTimer) {
       clearTimeout(this.syncIdleTimer);
       this.syncIdleTimer = null;
@@ -3367,7 +2760,6 @@ class LanternApp {
       // ignore
     }
     this.knownOnlinePeerIds.clear();
-    this.syncRequestAtByPeer.clear();
     this.peerUnreachableFailures.clear();
     this.forgottenPeersById.clear();
     try {
@@ -3382,6 +2774,12 @@ class LanternApp {
     }
   }
 
+  private clearCanonicalAttachmentRetries(): void {
+    for (const timer of this.canonicalAttachmentRetryTimers.values()) clearTimeout(timer);
+    this.canonicalAttachmentRetryTimers.clear();
+    this.canonicalAttachmentDownloadsInFlight.clear();
+  }
+
   private clearConversationLocal(conversationId: string): void {
     const filePaths = this.db.clearConversation(conversationId);
     for (const filePath of filePaths) {
@@ -3391,42 +2789,17 @@ class LanternApp {
   }
 
   private async clearConversation(conversationId: string): Promise<void> {
-    this.clearConversationLocal(conversationId);
-
     if (!conversationId.startsWith('dm:')) {
+      this.clearConversationLocal(conversationId);
       return;
     }
-
-    const peer = this.getPeerFromConversationId(conversationId);
-    if (!peer) {
-      this.enqueuePendingPeerOperationIfMissing(conversationId.slice(3), 'chat:clear');
-      this.emitEvent({
-        type: 'ui:toast',
-        level: 'warning',
-        message: 'Conversa limpa localmente. Será sincronizada quando o contato voltar online.'
-      });
-      return;
-    }
-
-    try {
-      await this.sendToPeer(peer, {
-        type: 'chat:clear',
-        messageId: randomUUID(),
-        from: this.profile.deviceId,
-        to: peer.deviceId,
-        createdAt: Date.now(),
-        payload: {
-          scope: 'dm'
-        }
-      } satisfies ProtocolFrame<ClearConversationPayload>);
-    } catch {
-      this.enqueuePendingPeerOperationIfMissing(conversationId.slice(3), 'chat:clear');
-      this.emitEvent({
-        type: 'ui:toast',
-        level: 'warning',
-        message: 'Conversa limpa localmente. Será sincronizada quando o contato voltar online.'
-      });
-    }
+    const peerId = conversationId.slice(3).trim();
+    if (!peerId) throw new Error('Conversa canônica inválida.');
+    await this.sendCanonicalFrame({
+      type: 'chat:clear', messageId: randomUUID(), from: this.profile.deviceId, to: peerId,
+      createdAt: Date.now(), payload: { scope: 'dm' }
+    } satisfies ProtocolFrame<ClearConversationPayload>);
+    this.clearConversationLocal(conversationId);
   }
 
   private async forgetContactConversation(conversationId: string): Promise<void> {
@@ -3436,47 +2809,11 @@ class LanternApp {
     }
 
     const peerId = conversationId.slice(3);
-    const peer = this.getPeerFromConversationId(conversationId);
+    await this.sendCanonicalFrame({
+      type: 'chat:forget', messageId: randomUUID(), from: this.profile.deviceId, to: peerId,
+      createdAt: Date.now(), payload: { scope: 'dm' }
+    } satisfies ProtocolFrame<ForgetPeerPayload>);
     this.clearConversationLocal(conversationId);
-    if (!peer) {
-      this.enqueuePendingPeerOperationIfMissing(peerId, 'chat:forget');
-      this.emitEvent({
-        type: 'ui:toast',
-        level: 'warning',
-        message: 'Contato removido localmente. A remoção será sincronizada quando o contato voltar online.'
-      });
-    } else {
-      try {
-        await this.sendToPeer(peer, {
-          type: 'chat:clear',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: peer.deviceId,
-          createdAt: Date.now(),
-          payload: {
-            scope: 'dm'
-          }
-        } satisfies ProtocolFrame<ClearConversationPayload>);
-
-        await this.sendToPeer(peer, {
-          type: 'chat:forget',
-          messageId: randomUUID(),
-          from: this.profile.deviceId,
-          to: peer.deviceId,
-          createdAt: Date.now(),
-          payload: {
-            scope: 'dm'
-          }
-        } satisfies ProtocolFrame<ForgetPeerPayload>);
-      } catch {
-        this.enqueuePendingPeerOperationIfMissing(peerId, 'chat:forget');
-        this.emitEvent({
-          type: 'ui:toast',
-          level: 'warning',
-          message: 'Contato removido localmente. A remoção será sincronizada quando o contato voltar online.'
-        });
-      }
-    }
 
     this.db.removeConversation(conversationId);
     this.forgetPeerLocally(peerId);
@@ -3802,7 +3139,8 @@ class LanternApp {
       const metadata = (payload.metadata && typeof payload.metadata === 'object'
         ? payload.metadata
         : null) as Record<string, unknown> | null;
-      if (metadata) {
+      const metadataGroupId = typeof metadata?.groupId === 'string' ? metadata.groupId : '';
+      if (metadata && this.activeConversationId === `group:${metadataGroupId}`) {
         this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
       }
     }
@@ -3904,8 +3242,16 @@ class LanternApp {
 
     const metadata = (payload.attachment && typeof payload.attachment === 'object'
       ? payload.attachment
-      : null) as Record<string, unknown> | null;
-    if (metadata) {
+      : message.type === 'file' && message.fileId
+        ? {
+            fileId: message.fileId,
+            groupId: event.groupId,
+            messageId: message.messageId,
+            senderDeviceId: message.senderDeviceId,
+            fileSize: message.fileSize || 0
+          }
+        : null) as Record<string, unknown> | null;
+    if (metadata && this.activeConversationId === conversationId) {
       this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
     }
   }
@@ -3919,7 +3265,7 @@ class LanternApp {
       typeof metadata.fileSize === 'number' && Number.isFinite(metadata.fileSize)
         ? Math.max(0, Math.trunc(metadata.fileSize))
         : 0;
-    if (!fileId || !groupId || !messageId || senderDeviceId === this.profile.deviceId) {
+    if (!fileId || !groupId || !messageId || !senderDeviceId) {
       return;
     }
     const message = this.db.getMessageById(messageId);
@@ -4157,15 +3503,6 @@ class LanternApp {
     }
     const previous = this.db.getGroupAttachmentDownload(download.fileId);
     const retryCount = Math.max(0, previous?.retryCount || 0) + 1;
-    if (retryCount > this.groupFileDownloadMaxRetries) {
-      this.markGroupFileDownloadFailed(
-        download.fileId,
-        download.groupId,
-        download.messageId,
-        reason
-      );
-      return;
-    }
     this.db.upsertGroupAttachmentDownload({
       fileId: download.fileId,
       groupId: download.groupId,
@@ -4214,7 +3551,7 @@ class LanternApp {
         messageId: download.messageId,
         senderDeviceId: download.senderDeviceId
       }).catch(() => undefined);
-    }, Math.min(5_000, 750 * 2 ** (retryCount - 1)));
+    }, Math.min(30_000, 1_000 * 2 ** Math.min(5, retryCount - 1)));
     timeout.unref?.();
     this.groupFileDownloadRetryTimerByFileId.set(download.fileId, timeout);
   }
@@ -5238,7 +4575,8 @@ class LanternApp {
         fileId: message.fileId,
         groupId: download.groupId,
         messageId: download.messageId,
-        senderDeviceId: message.senderDeviceId
+        senderDeviceId: message.senderDeviceId,
+        fileSize: message.fileSize || download.totalBytes || 0
       });
     }
   }

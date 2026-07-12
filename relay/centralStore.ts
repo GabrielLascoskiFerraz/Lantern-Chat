@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -145,6 +145,19 @@ export class CentralStore {
         ON canonical_frames(conversationId, createdAt, messageId);
       CREATE INDEX IF NOT EXISTS idx_frames_target_time
         ON canonical_frames(targetUserId, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_frames_sender_time
+        ON canonical_frames(senderUserId, createdAt, messageId);
+
+      CREATE TABLE IF NOT EXISTS user_conversation_state (
+        userId TEXT NOT NULL,
+        peerUserId TEXT NOT NULL,
+        clearedAt INTEGER NOT NULL DEFAULT 0,
+        forgotten INTEGER NOT NULL DEFAULT 0,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY(userId, peerUserId),
+        FOREIGN KEY(userId) REFERENCES users(userId) ON DELETE CASCADE,
+        FOREIGN KEY(peerUserId) REFERENCES users(userId) ON DELETE CASCADE
+      );
 
       CREATE TABLE IF NOT EXISTS attachments (
         attachmentId TEXT PRIMARY KEY,
@@ -179,22 +192,35 @@ export class CentralStore {
 
   private ensureBootstrapAdmin(): void {
     const count = this.db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
-    if (count.count > 0) return;
     const configured = (process.env.LANTERN_RELAY_ADMIN_PASSWORD || '').trim();
-    const password = configured || randomBytes(18).toString('base64url');
-    this.createUser({
-      username: 'admin',
-      displayName: 'Administrador',
-      department: 'Administração',
-      password,
-      role: 'admin',
-      locale: 'pt-BR'
-    });
-    this.log('bootstrap_admin_created', {
-      username: 'admin',
-      password: configured ? '(definida por LANTERN_RELAY_ADMIN_PASSWORD)' : password,
-      warning: configured ? undefined : 'Troque esta senha após o primeiro acesso.'
-    });
+    const password = configured || 'root';
+    const migrationKey = 'auth.bootstrap-admin-default-v2';
+
+    if (count.count === 0) {
+      this.createUser({
+        username: 'admin',
+        displayName: 'Administrador',
+        department: 'Administração',
+        password,
+        role: 'admin',
+        locale: 'pt-BR',
+        allowBootstrapPassword: !configured
+      });
+      this.log('bootstrap_admin_created', {
+        username: 'admin',
+        password: configured ? '(definida por LANTERN_RELAY_ADMIN_PASSWORD)' : 'root',
+        warning: configured ? undefined : 'Troque esta senha após o primeiro acesso.'
+      });
+    } else if (!configured && this.getSetting(migrationKey) !== 'applied') {
+      const admin = this.db.prepare("SELECT userId FROM users WHERE username = 'admin' AND role = 'admin'").get() as { userId: string } | undefined;
+      if (admin) {
+        this.db.prepare('UPDATE users SET passwordHash = ?, updatedAt = ? WHERE userId = ?')
+          .run(hashPassword('root', true), Date.now(), admin.userId);
+        this.db.prepare('DELETE FROM sessions WHERE userId = ?').run(admin.userId);
+        this.log('bootstrap_admin_password_migrated', { username: 'admin' });
+      }
+    }
+    this.setSetting(migrationKey, 'applied');
   }
 
   private toUser(row: UserRow): CentralUser {
@@ -219,6 +245,39 @@ export class CentralStore {
     return rows.map((row) => this.toUser(row));
   }
 
+  listVisibleUsersForUser(userId: string): CentralUser[] {
+    const rows = this.db.prepare(`
+      SELECT users.* FROM users
+      WHERE users.userId != ? AND users.disabled = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM user_conversation_state state
+          WHERE state.userId = ? AND state.peerUserId = users.userId AND state.forgotten = 1
+        )
+      ORDER BY users.department ASC, users.displayName ASC
+    `).all(userId, userId) as UserRow[];
+    return rows.map((row) => this.toUser(row));
+  }
+
+  isUserVisibleTo(userId: string, peerUserId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT forgotten FROM user_conversation_state WHERE userId = ? AND peerUserId = ?
+    `).get(userId, peerUserId) as { forgotten: number } | undefined;
+    return !row?.forgotten;
+  }
+
+  setConversationState(userId: string, peerUserId: string, forgotten: boolean): void {
+    if (!this.getUser(userId) || !this.getUser(peerUserId)) throw new Error('Conversa canônica inválida.');
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO user_conversation_state(userId, peerUserId, clearedAt, forgotten, updatedAt)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(userId, peerUserId) DO UPDATE SET
+        clearedAt = excluded.clearedAt,
+        forgotten = MAX(user_conversation_state.forgotten, excluded.forgotten),
+        updatedAt = excluded.updatedAt
+    `).run(userId, peerUserId, now, forgotten ? 1 : 0, now);
+  }
+
   getUser(userId: string): CentralUser | null {
     const row = this.db.prepare('SELECT * FROM users WHERE userId = ?').get(userId) as UserRow | undefined;
     return row ? this.toUser(row) : null;
@@ -231,6 +290,7 @@ export class CentralStore {
     password: string;
     role?: 'admin' | 'user';
     locale?: SupportedLocale;
+    allowBootstrapPassword?: boolean;
   }): CentralUser {
     const username = input.username.trim().toLowerCase();
     if (!USERNAME_RE.test(username)) throw new Error('Nome de usuário inválido.');
@@ -248,7 +308,7 @@ export class CentralStore {
       locale: normalizeLocale(input.locale),
       role: input.role === 'admin' ? 'admin' : 'user',
       disabled: 0,
-      passwordHash: hashPassword(input.password),
+      passwordHash: hashPassword(input.password, input.allowBootstrapPassword === true),
       createdAt: now,
       updatedAt: now
     };
@@ -393,24 +453,133 @@ export class CentralStore {
     return normalized;
   }
 
-  saveFrame(frame: CanonicalFrame): void {
+  saveFrame(frame: CanonicalFrame): 'inserted' | 'duplicate' {
     const payloadCipher = this.encrypted.encrypt(JSON.stringify(frame.payload ?? null));
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO canonical_frames(messageId, type, senderUserId, targetUserId, conversationId,
         payloadCipher, createdAt, deletedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
       ON CONFLICT(messageId) DO NOTHING
     `).run(frame.messageId, frame.type, frame.senderUserId, frame.targetUserId, frame.conversationId, payloadCipher, frame.createdAt);
+    if (result.changes > 0) return 'inserted';
+
+    const existing = this.db.prepare(`
+      SELECT type, senderUserId, targetUserId, conversationId, payloadCipher, createdAt
+      FROM canonical_frames WHERE messageId = ?
+    `).get(frame.messageId) as Omit<CanonicalFrame, 'messageId' | 'payload'> & { payloadCipher: string } | undefined;
+    const same = existing && existing.type === frame.type && existing.senderUserId === frame.senderUserId &&
+      existing.targetUserId === frame.targetUserId && existing.conversationId === frame.conversationId &&
+      existing.createdAt === frame.createdAt &&
+      JSON.stringify(JSON.parse(this.encrypted.decrypt(existing.payloadCipher))) === JSON.stringify(frame.payload ?? null);
+    if (!same) throw new Error('messageId já utilizado por outro frame canônico.');
+    return 'duplicate';
   }
 
   listFramesForUser(userId: string, after = 0, limit = 500): CanonicalFrame[] {
     const rows = this.db.prepare(`
-      SELECT messageId, type, senderUserId, targetUserId, conversationId, payloadCipher, createdAt
+      SELECT canonical_frames.messageId, canonical_frames.type, canonical_frames.senderUserId,
+        canonical_frames.targetUserId, canonical_frames.conversationId,
+        canonical_frames.payloadCipher, canonical_frames.createdAt
       FROM canonical_frames
+      LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
+        CASE WHEN canonical_frames.senderUserId = ? THEN canonical_frames.targetUserId
+             ELSE canonical_frames.senderUserId END
       WHERE deletedAt IS NULL AND createdAt > ?
+        AND createdAt > COALESCE(state.clearedAt, 0)
         AND (senderUserId = ? OR targetUserId = ? OR targetUserId IS NULL)
       ORDER BY createdAt ASC, messageId ASC LIMIT ?
-    `).all(Math.max(0, after), userId, userId, Math.max(1, Math.min(limit, 100_000))) as Array<{
+    `).all(userId, userId, Math.max(0, after), userId, userId, Math.max(1, Math.min(limit, 100_000))) as Array<{
+      messageId: string; type: string; senderUserId: string; targetUserId: string | null;
+      conversationId: string; payloadCipher: string; createdAt: number;
+    }>;
+    return rows.map((row) => ({
+      messageId: row.messageId,
+      type: row.type,
+      senderUserId: row.senderUserId,
+      targetUserId: row.targetUserId,
+      conversationId: row.conversationId,
+      createdAt: row.createdAt,
+      payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
+    }));
+  }
+
+  listConversationFramesForUser(
+    userId: string,
+    peerUserId: string,
+    before = Number.MAX_SAFE_INTEGER,
+    limit = 100
+  ): CanonicalFrame[] {
+    const safeBefore = Number.isFinite(before) ? Math.max(1, Math.trunc(before)) : Number.MAX_SAFE_INTEGER;
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
+    const rows = this.db.prepare(`
+      SELECT canonical_frames.messageId, canonical_frames.type, canonical_frames.senderUserId,
+        canonical_frames.targetUserId, canonical_frames.conversationId,
+        canonical_frames.payloadCipher, canonical_frames.createdAt
+      FROM canonical_frames
+      LEFT JOIN user_conversation_state state
+        ON state.userId = ? AND state.peerUserId = ?
+      WHERE canonical_frames.deletedAt IS NULL
+        AND canonical_frames.createdAt < ?
+        AND canonical_frames.createdAt > COALESCE(state.clearedAt, 0)
+        AND ((canonical_frames.senderUserId = ? AND canonical_frames.targetUserId = ?)
+          OR (canonical_frames.senderUserId = ? AND canonical_frames.targetUserId = ?))
+      ORDER BY canonical_frames.createdAt DESC, canonical_frames.messageId DESC
+      LIMIT ?
+    `).all(
+      userId,
+      peerUserId,
+      safeBefore,
+      userId,
+      peerUserId,
+      peerUserId,
+      userId,
+      safeLimit
+    ) as Array<{
+      messageId: string; type: string; senderUserId: string; targetUserId: string | null;
+      conversationId: string; payloadCipher: string; createdAt: number;
+    }>;
+    return rows.reverse().map((row) => ({
+      messageId: row.messageId,
+      type: row.type,
+      senderUserId: row.senderUserId,
+      targetUserId: row.targetUserId,
+      conversationId: row.conversationId,
+      createdAt: row.createdAt,
+      payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
+    }));
+  }
+
+  listLatestConversationFramesForUser(userId: string, limit = 500): CanonicalFrame[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 1_000));
+    const rows = this.db.prepare(`
+      WITH visible AS (
+        SELECT canonical_frames.messageId, canonical_frames.type,
+          canonical_frames.senderUserId, canonical_frames.targetUserId,
+          canonical_frames.conversationId, canonical_frames.payloadCipher,
+          canonical_frames.createdAt,
+          CASE WHEN canonical_frames.senderUserId = ? THEN canonical_frames.targetUserId
+               ELSE canonical_frames.senderUserId END AS peerUserId
+        FROM canonical_frames
+        LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
+          CASE WHEN canonical_frames.senderUserId = ? THEN canonical_frames.targetUserId
+               ELSE canonical_frames.senderUserId END
+        WHERE canonical_frames.deletedAt IS NULL
+          AND canonical_frames.targetUserId IS NOT NULL
+          AND canonical_frames.type IN ('chat:text', 'file:offer')
+          AND canonical_frames.createdAt > COALESCE(state.clearedAt, 0)
+          AND (canonical_frames.senderUserId = ? OR canonical_frames.targetUserId = ?)
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY peerUserId ORDER BY createdAt DESC, messageId DESC
+        ) AS rowNumber
+        FROM visible
+      )
+      SELECT messageId, type, senderUserId, targetUserId, conversationId, payloadCipher, createdAt
+      FROM ranked
+      WHERE rowNumber = 1
+      ORDER BY createdAt DESC, messageId DESC
+      LIMIT ?
+    `).all(userId, userId, userId, userId, userId, safeLimit) as Array<{
       messageId: string; type: string; senderUserId: string; targetUserId: string | null;
       conversationId: string; payloadCipher: string; createdAt: number;
     }>;
@@ -438,7 +607,14 @@ export class CentralStore {
     if (input.size < 0 || input.size > MAX_ATTACHMENT_BYTES) throw new Error('Tamanho de anexo inválido.');
     const totalChunks = Math.max(1, Math.ceil(input.size / ATTACHMENT_CHUNK_BYTES));
     const existing = this.db.prepare('SELECT * FROM attachments WHERE attachmentId = ?').get(input.attachmentId) as AttachmentRow | undefined;
-    if (existing) return { nextIndex: existing.receivedChunks, totalChunks: existing.totalChunks };
+    if (existing) {
+      if (existing.ownerUserId !== input.ownerUserId || existing.messageId !== input.messageId ||
+          existing.conversationId !== input.conversationId || existing.size !== input.size ||
+          existing.sha256 !== input.sha256) {
+        throw new Error('attachmentId já utilizado por outro anexo canônico.');
+      }
+      return { nextIndex: existing.receivedChunks, totalChunks: existing.totalChunks };
+    }
     this.db.prepare(`
       INSERT INTO attachments(attachmentId, messageId, ownerUserId, conversationId, fileNameCipher,
         mimeType, size, sha256, totalChunks, receivedChunks, complete, createdAt)

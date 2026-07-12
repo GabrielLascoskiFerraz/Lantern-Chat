@@ -19,7 +19,7 @@ export const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 export const ANNOUNCEMENT_PURGE_INTERVAL_MS = 5 * 60 * 1000;
 
 export const getAttachmentsDir = (downloadsPath: string): string =>
-  path.join(downloadsPath, 'Lantern Central Attachments');
+  path.join(downloadsPath, 'Lantern Attachments');
 
 export const sanitizeFileName = (name: string): string => {
   const withoutReserved = name.replace(/[<>:"/\\|?*]/g, '_');
