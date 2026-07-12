@@ -15,7 +15,6 @@ import {
   RelayGroupSnapshot
 } from './groupTypes';
 
-const GROUP_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GROUP_UPLOAD_STALE_MS = 2 * 60 * 60 * 1000;
 const GROUP_EVENTS_MAX_PER_GROUP = 10_000;
 const GROUP_FILE_CHUNK_SIZE_BYTES = 64 * 1024;
@@ -793,7 +792,7 @@ export class GroupStore {
       fileSize,
       sha256: input.offer.sha256,
       createdAt: now,
-      expiresAt: now + GROUP_ATTACHMENT_TTL_MS,
+      expiresAt: Number.MAX_SAFE_INTEGER,
       recipients,
       receivedByDeviceId: {
         [input.actorDeviceId]: now
@@ -918,7 +917,7 @@ export class GroupStore {
     startIndex = 0
   ): AsyncGenerator<RelayGroupFileChunk, void, void> {
     const metadata = this.attachmentsByFileId.get(fileId);
-    if (!metadata || metadata.deletedAt || !metadata.uploadedAt || metadata.expiresAt <= Date.now()) {
+    if (!metadata || metadata.deletedAt || !metadata.uploadedAt) {
       throw new Error('Anexo indisponível no Relay.');
     }
     const group = this.getRequiredGroup(metadata.groupId);
@@ -994,9 +993,6 @@ export class GroupStore {
     metadata.receivedByDeviceId[cleanDeviceId] = Date.now();
     this.attachmentsByFileId.set(fileId, metadata);
     this.writeAttachmentMetadata(metadata);
-    if (metadata.recipients.every((recipient) => metadata.receivedByDeviceId[recipient])) {
-      this.cleanupAttachment(metadata, false);
-    }
     this.schedulePersist();
     return metadata;
   }
@@ -1021,7 +1017,7 @@ export class GroupStore {
     }, metadata.uploadedAt);
   }
 
-  sweepAttachments(): { expired: number; completed: number; staleUploads: number } {
+  sweepAttachments(retentionCutoff: number | null = null): { expired: number; completed: number; staleUploads: number } {
     const now = Date.now();
     let expired = 0;
     let completed = 0;
@@ -1034,14 +1030,9 @@ export class GroupStore {
     }
     for (const metadata of Array.from(this.attachmentsByFileId.values())) {
       if (metadata.deletedAt) continue;
-      if (metadata.expiresAt <= now) {
+      if (retentionCutoff !== null && metadata.createdAt < retentionCutoff) {
         this.cleanupAttachment(metadata, false);
         expired += 1;
-        continue;
-      }
-      if (metadata.recipients.length > 0 && metadata.recipients.every((recipient) => metadata.receivedByDeviceId[recipient])) {
-        this.cleanupAttachment(metadata, false);
-        completed += 1;
       }
     }
     if (expired || completed || staleUploads) {

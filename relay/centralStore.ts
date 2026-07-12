@@ -376,6 +376,17 @@ export class CentralStore {
     return normalizeRetention(this.getSetting('retention.policy'));
   }
 
+  getRetentionCutoff(now = Date.now()): number | null {
+    const policy = this.getRetentionPolicy();
+    if (policy === 'forever') return null;
+    const ageMs = policy === '1_month'
+      ? 30 * 86400000
+      : policy === '6_months'
+        ? 183 * 86400000
+        : 365 * 86400000;
+    return now - ageMs;
+  }
+
   setRetentionPolicy(policy: RetentionPolicy): RetentionPolicy {
     const normalized = normalizeRetention(policy);
     this.setSetting('retention.policy', normalized);
@@ -497,10 +508,8 @@ export class CentralStore {
   }
 
   sweepRetention(): { framesDeleted: number; attachmentsDeleted: number } {
-    const policy = this.getRetentionPolicy();
-    if (policy === 'forever') return { framesDeleted: 0, attachmentsDeleted: 0 };
-    const ageMs = policy === '1_month' ? 30 * 86400000 : policy === '6_months' ? 183 * 86400000 : 365 * 86400000;
-    const cutoff = Date.now() - ageMs;
+    const cutoff = this.getRetentionCutoff();
+    if (cutoff === null) return { framesDeleted: 0, attachmentsDeleted: 0 };
     const attachmentRows = this.db.prepare(`
       SELECT attachmentId FROM attachments WHERE messageId IN (
         SELECT messageId FROM canonical_frames WHERE createdAt < ?

@@ -1618,7 +1618,7 @@ class LanternRelay {
   private startGroupSweepLoop(): void {
     if (this.groupSweepTimer) return;
     this.groupSweepTimer = setInterval(() => {
-      const result = this.groupStore.sweepAttachments();
+      const result = this.groupStore.sweepAttachments(this.centralStore.getRetentionCutoff());
       if (result.expired || result.completed || result.staleUploads) {
         logRelay('group_attachment_sweep', result, { level: 'info' });
       }
