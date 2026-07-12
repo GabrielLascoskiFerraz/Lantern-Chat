@@ -5,6 +5,7 @@ const { spawnSync } = require('node:child_process');
 const projectRoot = path.resolve(__dirname, '..');
 const distInstallersDir = path.join(projectRoot, 'dist-installers');
 const distRelayDir = path.join(projectRoot, 'dist-relay');
+const distRelayUiInstallersDir = path.join(projectRoot, 'dist-relay-ui-installers');
 const distReleaseDir = path.join(projectRoot, 'dist-release');
 const distReleaseAssetsDir = path.join(distReleaseDir, 'assets');
 const distReleaseTmpDir = path.join(distReleaseDir, 'tmp');
@@ -22,7 +23,8 @@ const parseArgs = () => {
     skipBuild: false,
     dryRun: false,
     draft: false,
-    prerelease: false
+    prerelease: false,
+    includeLinux: true
   };
 
   for (let i = 0; i < args.length; i += 1) {
@@ -63,6 +65,10 @@ const parseArgs = () => {
       result.prerelease = true;
       continue;
     }
+    if (arg === '--no-linux') {
+      result.includeLinux = false;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       console.log(`
 Uso:
@@ -76,6 +82,7 @@ Opcoes:
   --skip-build           Pula etapa de build e usa artefatos existentes
   --draft                Cria/edita release como draft
   --prerelease           Cria/edita release como prerelease
+  --no-linux             Não gera/publica os artefatos Linux
   --dry-run              Mostra comandos sem executar
 
 Prerequisitos:
@@ -197,47 +204,48 @@ const writeDefaultReleaseNotes = (tag) => {
   const notesPath = path.join(distReleaseDir, `RELEASE_NOTES_${tag}.md`);
   const notes = `# Lantern v${version}
 
-Primeira release pública do Lantern (cliente) + LanternRelay (servidor de ponte), focada em chat local com presença online confiável via relay central.
+Lantern 1.2.1 adds four interface languages and introduces Lantern Relay UI, a small desktop control panel for the Relay.
 
-## ✨ Destaques
+## Highlights
 
-- Chat 1:1 em tempo real.
-- Anúncios globais com expiração automática (24h).
-- Presença online/offline sincronizada pelo Relay.
-- Envio de arquivos/anexos com progresso.
-- Reações em mensagens e anúncios.
-- Notificações nativas + execução em tray.
-- Temas claro/escuro e ajustes visuais da interface.
+- Complete interface localization with automatic operating-system language detection and manual selection for Brazilian Portuguese, English, Spanish, and French.
+- Lantern Relay UI: start, stop, and restart the Relay from a compact desktop window, now localized using the system language.
+- Local network addresses and Relay port are displayed for easy manual client configuration.
+- Live Relay overview with connected users, active announcements, attachment retention, and uptime.
+- Configurable announcement expiration from 1 hour to 7 days.
+- Continued support for local Relay discovery, chat, groups, announcements, attachments, reactions, and notifications.
 
-## 📦 Arquivos desta release
+## Release assets
 
-- \`client-lantern-windows-setup.exe\` — Cliente Lantern para Windows.
-- \`server-relay-windows.zip\` — Relay (Server) para Windows.
-- \`client-lantern-mac-universal.dmg\` — Cliente Lantern para macOS (Apple Silicon e Intel).
-- \`server-relay-mac.zip\` — Relay (Server) para macOS.
+- \`client-lantern-windows-setup.exe\` — Lantern client for Windows x64.
+- \`client-lantern-mac-universal.dmg\` — Lantern client for macOS (Apple Silicon and Intel).
+- \`client-lantern-linux.AppImage\` — Lantern client for Linux x64.
+- \`relay-lantern-windows-setup.exe\` — Lantern Relay UI for Windows x64.
+- \`relay-lantern-mac-universal.dmg\` — Lantern Relay UI for macOS (Apple Silicon and Intel).
+- \`relay-lantern-linux.AppImage\` — Lantern Relay UI for Linux x64.
 
-## 🚀 Como usar (resumo)
+## Quick start
 
-1. Inicie o LanternRelay em uma única máquina da rede.
-2. Abra o Lantern nos clientes.
-3. Os clientes conectam ao relay e sincronizam presença/mensagens automaticamente.
+1. Run Lantern Relay UI on one machine in the network.
+2. Start the Relay and copy a displayed local address if clients need manual configuration.
+3. Open Lantern on client machines. Clients discover the Relay automatically or connect with the configured IP and port.
 
-## ⚠️ Observações
+## Notes
 
-- Todo o tráfego passa pelo Relay.
-- Mensagens/arquivos ficam salvos localmente no cliente.
-- Se o relay estiver offline, envio de mensagens/anúncios fica indisponível até reconectar.
+- All live traffic passes through the Relay.
+- Messages and attachments remain stored locally on client devices.
+- When the Relay is offline, new messages and announcements wait until the connection is restored.
 
-## ✅ Recomendação
+## Recommendation
 
-Manter apenas um Relay ativo por rede para evitar conflitos de presença.
+Keep only one active Relay per network to avoid discovery and presence conflicts.
 `;
   fs.mkdirSync(distReleaseDir, { recursive: true });
   fs.writeFileSync(notesPath, notes, 'utf8');
   return notesPath;
 };
 
-const buildReleaseAssets = (dryRun) => {
+const buildReleaseAssets = (dryRun, includeLinux) => {
   ensureDirClean(distReleaseAssetsDir);
   ensureDirClean(distReleaseTmpDir);
 
@@ -248,6 +256,10 @@ const buildReleaseAssets = (dryRun) => {
     findFile(distInstallersDir, (name) => /^Lantern-.*universal.*\.dmg$/i.test(name)) ||
     findFile(distInstallersDir, (name) => /^Lantern-.*arm64.*\.dmg$/i.test(name)) ||
     findFile(distInstallersDir, (name) => /^Lantern-.*\.dmg$/i.test(name));
+  const linuxClient = findFile(distInstallersDir, (name) => /^Lantern-.*\.AppImage$/i.test(name));
+  const relayUiWindows = findFile(distRelayUiInstallersDir, (name) => /^LanternRelay-Setup-.*\.exe$/i.test(name));
+  const relayUiMac = findFile(distRelayUiInstallersDir, (name) => /^LanternRelay-.*universal.*\.dmg$/i.test(name));
+  const relayUiLinux = findFile(distRelayUiInstallersDir, (name) => /^LanternRelay-.*\.AppImage$/i.test(name));
   const relayWin = path.join(distRelayDir, 'LanternRelay.exe');
   const relayMac =
     findFile(distRelayDir, (name) => /^LanternRelay-mac-arm64$/i.test(name)) ||
@@ -259,6 +271,12 @@ const buildReleaseAssets = (dryRun) => {
   }
   if (!macDmg) {
     throw new Error('DMG macOS não encontrado em dist-installers.');
+  }
+  if (!relayUiWindows || !relayUiMac) {
+    throw new Error('Artefatos do Relay UI não encontrados em dist-relay-ui-installers.');
+  }
+  if (includeLinux && (!linuxClient || !relayUiLinux)) {
+    throw new Error('Artefatos Linux não encontrados. Rode o build completo com Linux.');
   }
   if (!fs.existsSync(relayWin)) {
     throw new Error('Relay Windows não encontrado em dist-relay/LanternRelay.exe.');
@@ -274,13 +292,32 @@ const buildReleaseAssets = (dryRun) => {
   const targetMacDmg = path.join(distReleaseAssetsDir, 'client-lantern-mac-universal.dmg');
   const targetRelayWinZip = path.join(distReleaseAssetsDir, 'server-relay-windows.zip');
   const targetRelayMacZip = path.join(distReleaseAssetsDir, 'server-relay-mac.zip');
+  const targetLinuxClient = path.join(distReleaseAssetsDir, 'client-lantern-linux.AppImage');
+  const targetRelayUiWindows = path.join(distReleaseAssetsDir, 'relay-lantern-windows-setup.exe');
+  const targetRelayUiMac = path.join(distReleaseAssetsDir, 'relay-lantern-mac-universal.dmg');
+  const targetRelayUiLinux = path.join(distReleaseAssetsDir, 'relay-lantern-linux.AppImage');
 
   copyFile(windowsInstaller, targetWindowsInstaller);
   copyFile(macDmg, targetMacDmg);
   makeRelayZip(relayWin, targetRelayWinZip, dryRun);
   makeRelayZip(relayMac, targetRelayMacZip, dryRun);
+  copyFile(relayUiWindows, targetRelayUiWindows);
+  copyFile(relayUiMac, targetRelayUiMac);
+  if (includeLinux) {
+    copyFile(linuxClient, targetLinuxClient);
+    copyFile(relayUiLinux, targetRelayUiLinux);
+  }
 
-  return [targetWindowsInstaller, targetRelayWinZip, targetMacDmg, targetRelayMacZip];
+  return [
+    targetWindowsInstaller,
+    targetMacDmg,
+    ...(includeLinux ? [targetLinuxClient] : []),
+    targetRelayUiWindows,
+    targetRelayUiMac,
+    ...(includeLinux ? [targetRelayUiLinux] : []),
+    targetRelayWinZip,
+    targetRelayMacZip
+  ];
 };
 
 const ghArgsWithRepo = (args, repo) => (repo ? [...args, '--repo', repo] : args);
@@ -385,15 +422,15 @@ const main = () => {
   const options = parseArgs();
   if (!options.skipBuild) {
     run(
-      'Build completo macOS + Windows + relay',
+      `Build completo macOS + Windows${options.includeLinux ? ' + Linux' : ''} + Relay`,
       process.execPath,
-      ['./scripts/build-mac-win-from-mac.cjs'],
+      [options.includeLinux ? './scripts/build-all-platforms-from-mac.cjs' : './scripts/build-mac-win-from-mac.cjs'],
       {},
       options.dryRun
     );
   }
 
-  const assets = buildReleaseAssets(options.dryRun);
+  const assets = buildReleaseAssets(options.dryRun, options.includeLinux);
   const notesFile = options.notesFile
     ? path.resolve(projectRoot, options.notesFile)
     : writeDefaultReleaseNotes(options.tag);

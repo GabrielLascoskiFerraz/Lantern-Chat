@@ -140,6 +140,12 @@ export interface StartupSettings {
   doNotDisturbUntil: number;
 }
 
+export interface LanguageSettings {
+  mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr';
+  resolved: 'pt-BR' | 'en' | 'es' | 'fr';
+  systemLocale: string;
+}
+
 export type AppEvent =
   | { type: 'peers:updated'; peers: Peer[] }
   | { type: 'groups:updated'; groups: GroupInfo[] }
@@ -224,6 +230,8 @@ interface LanternApi {
   setGroupMessagePinned: (groupId: string, messageId: string, pinned: boolean) => Promise<void>;
   getRelaySettings: () => Promise<RelaySettings>;
   getStartupSettings: () => Promise<StartupSettings>;
+  getLanguageSettings: () => Promise<LanguageSettings>;
+  updateLanguageSettings: (mode: LanguageSettings['mode']) => Promise<LanguageSettings>;
   updateRelaySettings: (input: {
     automatic: boolean;
     host?: string;
@@ -368,6 +376,8 @@ export const ipcClient = {
     window.lantern.setGroupMessagePinned(groupId, messageId, pinned),
   getRelaySettings: () => window.lantern.getRelaySettings(),
   getStartupSettings: () => window.lantern.getStartupSettings(),
+  getLanguageSettings: () => window.lantern.getLanguageSettings(),
+  updateLanguageSettings: (mode: LanguageSettings['mode']) => window.lantern.updateLanguageSettings(mode),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     window.lantern.updateRelaySettings(input),
   forceRelayRediscovery: () => window.lantern.forceRelayRediscovery(),

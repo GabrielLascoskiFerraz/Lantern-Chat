@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 export const APP_ID = 'Lantern';
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.2.1';
 export const MDNS_TYPE = 'lanternchat';
 export const MDNS_PROTOCOL = 'tcp';
 export const UDP_DISCOVERY_PORT = 43180;

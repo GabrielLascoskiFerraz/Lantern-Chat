@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lantern Relay</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">LANTERN RELAY</p>
+          <h1 data-i18n="networkBridge">Network bridge</h1>
+          <p id="connection-summary">Loading Relay status…</p>
+        </div>
+        <span id="status-pill" class="status-pill offline">Offline</span>
+      </header>
+      <section class="action-row">
+        <button id="start" class="primary" data-i18n="startRelay">Start Relay</button>
+        <button id="restart" data-i18n="restart">Restart</button>
+        <button id="stop" class="danger" data-i18n="stop">Stop</button>
+      </section>
+      <section class="network-card">
+        <div class="section-title"><h2 data-i18n="manualConnection">Manual connection</h2><span id="port-label">Port 43190</span></div>
+        <p data-i18n="manualConnectionHelp">Use one of these local IP addresses in Lantern clients when automatic discovery is unavailable.</p>
+        <div id="addresses" class="addresses"></div>
+      </section>
+      <section class="metrics" aria-label="Relay metrics">
+        <article><span data-i18n="connectedUsers">Connected users</span><strong id="metric-peers">0</strong></article>
+        <article><span data-i18n="activeAnnouncements">Active announcements</span><strong id="metric-announcements">0</strong></article>
+        <article><span data-i18n="retainedAttachments">Attachments retained</span><strong id="metric-files">0</strong></article>
+        <article><span data-i18n="uptime">Uptime</span><strong id="metric-uptime">--</strong></article>
+      </section>
+      <section class="settings-card">
+        <div class="section-title"><h2 data-i18n="relaySettings">Relay settings</h2><span data-i18n="savedAutomatically">Saved automatically</span></div>
+        <label><span data-i18n="port">Port</span> <input id="port-input" type="number" min="1" max="65535" /></label>
+        <label><span data-i18n="announcementExpiration">Announcement expiration (hours)</span> <input id="ttl-input" type="number" min="1" max="168" /></label>
+        <button id="save-settings" data-i18n="applySettings">Apply settings</button>
+        <p class="helper" data-i18n="settingsHelp">Changing the port restarts the Relay. Changing expiration updates active announcements too.</p>
+      </section>
+      <section class="users-card">
+        <div class="section-title"><h2 data-i18n="connectedUsers">Connected users</h2><span id="users-count">0 online</span></div>
+        <div id="users" class="users"><p class="empty" data-i18n="noUsers">No users connected.</p></div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

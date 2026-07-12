@@ -57,6 +57,7 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { useI18n } from '../i18n';
 
 interface ChatViewProps {
   conversationId: string;
@@ -118,8 +119,8 @@ interface ReplyDraftUi extends MessageReplyReference {
   senderLabel: string;
 }
 
-const formatTime = (value: number): string =>
-  new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const formatTime = (value: number, locale: string): string =>
+  new Date(value).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 
 const isSameDay = (a: number, b: number): boolean => {
   const ad = new Date(a);
@@ -131,27 +132,27 @@ const isSameDay = (a: number, b: number): boolean => {
   );
 };
 
-const formatDateSeparator = (value: number): string => {
+const formatDateSeparator = (value: number, locale: string, t: (key: string) => string): string => {
   const now = new Date();
   const target = new Date(value);
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const targetDay = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
   const diffDays = Math.round((today - targetDay) / 86_400_000);
 
-  if (diffDays === 0) return 'Hoje';
-  if (diffDays === 1) return 'Ontem';
-  return target.toLocaleDateString('pt-BR', {
+  if (diffDays === 0) return t('Today');
+  if (diffDays === 1) return t('Yesterday');
+  return target.toLocaleDateString(locale, {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric'
   });
 };
 
-const statusLabel = (status: MessageRow['status']): string => {
-  if (status === 'read') return 'Entregue';
-  if (status === 'delivered') return 'Entregue';
-  if (status === 'failed') return 'Não enviada';
-  return 'Pendente';
+const statusLabel = (status: MessageRow['status'], t: (key: string) => string): string => {
+  if (status === 'read') return t('Delivered');
+  if (status === 'delivered') return t('Delivered');
+  if (status === 'failed') return t('Not sent');
+  return t('Pending');
 };
 
 const renderOutgoingStatusIcon = (status: MessageRow['status']): ReactNode => {
@@ -198,6 +199,7 @@ const imagePreviewStateCache = new Map<string, ImagePreviewState>();
 const transferStageLabel = (
   message: MessageRow,
   progressPercent: number | null,
+  t: (key: string, params?: Record<string, string | number>) => string,
   progress?: {
     stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
     attempt?: number;
@@ -205,39 +207,43 @@ const transferStageLabel = (
   }
 ): { label: string; tone: 'neutral' | 'active' | 'done' | 'error' } => {
   if (progress?.stage === 'reconnecting') {
-    return { label: 'Aguardando reconexão', tone: 'neutral' };
+    return { label: t('Aguardando reconexão'), tone: 'neutral' };
   }
   if (progress?.stage === 'retrying') {
     return {
-      label: `Baixando novamente${progress.attempt ? ` · tentativa ${progress.attempt}` : ''}`,
+      label: t('Baixando novamente{attempt}', {
+        attempt: progress.attempt ? ` · ${t('tentativa')} ${progress.attempt}` : ''
+      }),
       tone: 'active'
     };
   }
   if (progress?.stage === 'pending') {
-    return { label: progress.detail || 'Aguardando o Relay', tone: 'neutral' };
+    return { label: progress.detail || t('Aguardando o Relay'), tone: 'neutral' };
   }
   if (progress?.stage === 'failed') {
-    return { label: progress.detail || 'Falha definitiva', tone: 'error' };
+    return { label: progress.detail || t('Falha definitiva'), tone: 'error' };
   }
   if (progress?.stage === 'complete') {
-    return { label: 'Concluído', tone: 'done' };
+    return { label: t('Concluído'), tone: 'done' };
   }
   if (message.status === 'failed') {
-    return { label: 'Falha no envio', tone: 'error' };
+    return { label: t('Falha no envio'), tone: 'error' };
   }
   if (typeof progressPercent === 'number' && progressPercent >= 0 && progressPercent < 100) {
     return {
-      label: `${message.direction === 'out' ? 'Enviando' : 'Recebendo'} ${progressPercent}%`,
+      label: t(message.direction === 'out' ? 'Enviando {percent}%' : 'Recebendo {percent}%', {
+        percent: progressPercent
+      }),
       tone: 'active'
     };
   }
   if (message.status === 'delivered' || message.status === 'read') {
-    return { label: 'Concluído', tone: 'done' };
+    return { label: t('Concluído'), tone: 'done' };
   }
   if (message.status === 'sent') {
-    return { label: 'Preparando envio', tone: 'neutral' };
+    return { label: t('Preparando envio'), tone: 'neutral' };
   }
-  return { label: 'Processando', tone: 'neutral' };
+  return { label: t('Processando'), tone: 'neutral' };
 };
 
 const REACTIONS = ['👍', '👎', '❤️', '😂', '😊', '😢'] as const;
@@ -401,6 +407,7 @@ export const ChatView = ({
   onLoadOlderMessages,
   onEnsureMessagesLoaded
 }: ChatViewProps) => {
+  const { locale, t } = useI18n();
   const [previewStateByMessageId, setPreviewStateByMessageId] = useState<Record<string, ImagePreviewState>>(() => {
     const seed: Record<string, ImagePreviewState> = {};
     for (const message of messages) {
@@ -653,15 +660,15 @@ export const ChatView = ({
       const normalizedSenderId = safeString(senderDeviceId);
       const shortSenderId = normalizedSenderId ? normalizedSenderId.slice(0, 6) : 'desconhecido';
       if (normalizedSenderId === localProfile.deviceId) {
-        return 'Você';
+        return t('Você');
       }
       return (
         senderProfilesById[normalizedSenderId]?.displayName ||
-        (isGroup ? `Participante ${shortSenderId}` : peer?.displayName) ||
-        `Contato ${shortSenderId}`
+        (isGroup ? `${t('Participante')} ${shortSenderId}` : peer?.displayName) ||
+        `${t('Contato')} ${shortSenderId}`
       );
     },
-    [isGroup, localProfile.deviceId, peer?.displayName, senderProfilesById]
+    [isGroup, localProfile.deviceId, peer?.displayName, senderProfilesById, t]
   );
 
   const focusComposerInput = useCallback(() => {
@@ -1511,7 +1518,7 @@ export const ChatView = ({
   }, [activeMatchIndex, matchedMessageIds, loadOlderWithViewportLock, onEnsureMessagesLoaded]);
 
   if (!peer) {
-    return <div className="empty-state">Selecione um contato para abrir o histórico da conversa.</div>;
+    return <div className="empty-state">{t('Select a contact to open the conversation history.')}</div>;
   }
 
   return (
@@ -1523,14 +1530,17 @@ export const ChatView = ({
             <Text weight="semibold">{peer.displayName}</Text>
             <Caption1>
               {isGroup
-                ? `${Math.max(1, groupMemberCount)} participante${Math.max(1, groupMemberCount) === 1 ? '' : 's'}${
-                    safeString(groupDescription).trim() ? ` · ${safeString(groupDescription).trim()}` : ''
-                  }`
+                ? `${t(
+                    Math.max(1, groupMemberCount) === 1
+                      ? '{count} participant singular'
+                      : '{count} participant plural',
+                    { count: Math.max(1, groupMemberCount) }
+                  )}${safeString(groupDescription).trim() ? ` · ${safeString(groupDescription).trim()}` : ''}`
                 : peerTyping
-                ? 'digitando...'
+                ? t('Typing...')
                 : peerOnline
-                ? safeString(peer.statusMessage).trim() || 'Online'
-                : 'Offline · sem conexão no momento'}
+                ? safeString(peer.statusMessage).trim() || t('Online')
+                : t('Offline · no connection right now')}
             </Caption1>
           </div>
         </div>
@@ -1540,7 +1550,7 @@ export const ChatView = ({
               <div className="chat-search-content">
                 <Input
                   className="chat-search-input"
-                  placeholder="Buscar nesta conversa"
+                  placeholder={t('Search in conversation')}
                   value={searchQuery}
                   onChange={(_, data) => setSearchQuery(data.value)}
                   ref={searchInputRef}
@@ -1765,7 +1775,7 @@ export const ChatView = ({
             !transferInProgress &&
             (message.status === 'delivered' || message.status === 'read');
           const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
-          const transferStage = isFile ? transferStageLabel(message, progressPercent, progress) : null;
+          const transferStage = isFile ? transferStageLabel(message, progressPercent, t, progress) : null;
           const hasReplyReference = Boolean(message.replyToMessageId);
           const replySenderLabel = message.replyToSenderDeviceId
             ? senderLabelForMessage(message.replyToSenderDeviceId)
@@ -1779,7 +1789,7 @@ export const ChatView = ({
             <div key={message.messageId}>
               {startsNewDay && (
                 <div className="messages-date-separator">
-                  <span>{formatDateSeparator(message.createdAt)}</span>
+                  <span>{formatDateSeparator(message.createdAt, locale, t)}</span>
                 </div>
               )}
               {unreadSeparatorState !== 'hidden' &&
@@ -1849,7 +1859,7 @@ export const ChatView = ({
                     </button>
                   )}
                   {isDeleted ? (
-                    <div className="message-deleted">Esta mensagem foi apagada.</div>
+                    <div className="message-deleted">{t('Esta mensagem foi apagada.')}</div>
                   ) : isFile ? (
                     <>
                       {!isStickerFile && <div className="message-file-title">📎 {message.fileName}</div>}
@@ -1865,7 +1875,7 @@ export const ChatView = ({
                           {previewDataUrl && (
                             <img
                               src={previewDataUrl}
-                              alt={message.fileName || 'Imagem'}
+                              alt={message.fileName || t('Imagem')}
                               className="message-image-preview"
                             />
                           )}
@@ -1873,7 +1883,7 @@ export const ChatView = ({
                             className={`message-image-preview-placeholder ${previewVisible ? 'hidden' : ''}`}
                             aria-hidden
                           >
-                            {previewUnavailable ? 'Pré-visualização indisponível' : 'Carregando imagem...'}
+                            {previewUnavailable ? t('Pré-visualização indisponível') : t('Carregando imagem...')}
                           </div>
                         </button>
                       )}
@@ -1886,7 +1896,7 @@ export const ChatView = ({
                         <div className="message-file-progress-wrap">
                           <ProgressBar value={progressPercent / 100} thickness="medium" />
                           <div className="message-file-progress">
-                            Transferência: {progressPercent}% · {formatBytes(progress?.transferred)} /{' '}
+                            {t('Transferência:')} {progressPercent}% · {formatBytes(progress?.transferred)} /{' '}
                             {formatBytes(progress?.total)}
                           </div>
                         </div>
@@ -1900,14 +1910,14 @@ export const ChatView = ({
                         isStickerFile ? null : (
                         <div className="message-file-actions">
                           <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
-                            Abrir
+                            {t('Abrir')}
                           </Button>
                           <Button
                             size="small"
                             appearance="secondary"
                             onClick={() => void onSaveFileAs(message.filePath!, message.fileName)}
                           >
-                            Salvar como
+                            {t('Salvar como')}
                           </Button>
                         </div>
                         )
@@ -1953,9 +1963,9 @@ export const ChatView = ({
                     {message.editedAt && <span className="message-edited-label">editada</span>}
                     <span className="bubble-time">
                       {outgoing ? renderOutgoingStatusIcon(message.status) : null}
-                      <span>{formatTime(message.createdAt)}</span>
+                      <span>{formatTime(message.createdAt, locale)}</span>
                     </span>
-                    {outgoing && <span>{statusLabel(message.status)}</span>}
+                    {outgoing && <span>{statusLabel(message.status, t)}</span>}
                   </div>
                 </div>
 
@@ -2118,10 +2128,10 @@ export const ChatView = ({
       {(groupUnavailable || !peerOnline) && (
         <div className="chat-offline-hint">
           {groupUnavailable
-            ? 'Este grupo não existe mais no Relay. O envio está bloqueado, mas você pode excluir a conversa localmente.'
+            ? t('This group no longer exists on Relay. Sending is blocked, but you can delete the conversation locally.')
             : isGroup
-            ? 'Sem conexão com o Relay. Não é possível enviar mensagens ou anexos neste grupo agora.'
-            : 'Este contato está offline. Suas mensagens e anexos ficarão pendentes e serão enviados quando ele voltar.'}
+            ? t('No Relay connection. Messages and attachments cannot be sent to this group right now.')
+            : t('This contact is offline. Your messages and attachments will stay pending and send when they return.')}
         </div>
       )}
       {peerOnline && peerTyping && (
@@ -2136,7 +2146,7 @@ export const ChatView = ({
       )}
 
       <MessageComposer
-        placeholder="Digite sua mensagem"
+        placeholder={t('Type a message')}
         disabled={isGroup ? !peerOnline || groupUnavailable : false}
         autoFocusKey={peer.deviceId}
         onSend={async (text, replyTo) => {

@@ -18,6 +18,7 @@ import {
   Send20Filled
 } from '@fluentui/react-icons';
 import { ipcClient, MessageReplyReference, StickerCatalogItem } from '../api/ipcClient';
+import { useI18n } from '../i18n';
 
 interface MessageComposerProps {
   disabled?: boolean;
@@ -473,6 +474,7 @@ export const MessageComposer = ({
   onCancelEdit,
   placeholder
 }: MessageComposerProps) => {
+  const { t } = useI18n();
   const [text, setText] = useState('');
   const [pendingFilePaths, setPendingFilePaths] = useState<string[]>([]);
   const [pendingAttachmentByPath, setPendingAttachmentByPath] = useState<
@@ -1734,7 +1736,7 @@ export const MessageComposer = ({
               appearance="secondary"
               disabled={disabled || isSubmitting || editing}
             >
-              Anexar
+              {t('Attach')}
             </Button>
           )}
           <Button
@@ -1743,7 +1745,7 @@ export const MessageComposer = ({
             appearance="primary"
             disabled={disabled || isSubmitting || (!text.trim() && pendingFilePaths.length === 0)}
           >
-            {editing ? 'Salvar' : 'Enviar'}
+            {editing ? t('Save') : t('Send')}
           </Button>
         </div>
       </div>

@@ -3,6 +3,7 @@ import { createSocket, type RemoteInfo, type Socket as UdpSocket } from 'node:dg
 import fs from 'node:fs';
 import { createServer, IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import path from 'node:path';
+import os from 'node:os';
 import BonjourService, { Service } from 'bonjour-service';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { GroupStore } from './groupStore';
@@ -13,7 +14,7 @@ const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
 const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
 const RELAY_DISCOVERY_UDP_RESPONSE = 'lantern:relay:announce';
-const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const ANNOUNCEMENT_EDIT_WINDOW_MS = 10 * 60 * 1000;
 const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
@@ -57,6 +58,7 @@ interface RelayConfig {
   peerTimeoutMs: number;
   presenceBroadcastIntervalMs: number;
   maxPayloadBytes: number;
+  announcementTtlMs: number;
 }
 
 interface RelayPeerInfo {
@@ -176,6 +178,8 @@ interface RelayDashboardSnapshot {
   announcementStoreFile: string;
   announcementsActive: number;
   stickersAvailable: number;
+  announcementTtlMs: number;
+  localAddresses: string[];
   transferMetrics: {
     uploadAttempts: number;
     uploadsCompleted: number;
@@ -215,6 +219,8 @@ const DEFAULT_CONFIG: RelayConfig = {
   peerTimeoutMs: 30_000,
   presenceBroadcastIntervalMs: 12_000,
   maxPayloadBytes: 8 * 1024 * 1024
+  ,
+  announcementTtlMs: DEFAULT_ANNOUNCEMENT_TTL_MS
 };
 
 const asRecord = (value: unknown): JsonRecord | null => {
@@ -1065,8 +1071,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 </body>
 </html>`;
 
-class LanternRelay {
-  private readonly config: RelayConfig;
+export class LanternRelay {
+  private config: RelayConfig;
   private readonly httpServer: HttpServer;
   private readonly wsServer: WebSocketServer;
   private readonly startedAt = Date.now();
@@ -1640,7 +1646,7 @@ class LanternRelay {
     res.end(method === 'HEAD' ? undefined : json);
   }
 
-  private getDashboardSnapshot(): RelayDashboardSnapshot {
+  getDashboardSnapshot(): RelayDashboardSnapshot {
     this.sweepAnnouncements('dashboard_snapshot');
     const now = Date.now();
     const peers = this.listDashboardPeers(now);
@@ -1665,6 +1671,8 @@ class LanternRelay {
       announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
       announcementsActive: announcements.length,
       stickersAvailable: this.listStickerCatalog().length,
+      announcementTtlMs: this.config.announcementTtlMs,
+      localAddresses: this.getLocalAddresses(),
       transferMetrics: {
         uploadAttempts: this.transferMetrics.uploadAttempts,
         uploadsCompleted: this.transferMetrics.uploadsCompleted,
@@ -1686,6 +1694,42 @@ class LanternRelay {
       peers,
       announcements
     };
+  }
+
+  getConfig(): RelayConfig {
+    return { ...this.config };
+  }
+
+  setAnnouncementTtlHours(hours: number): number {
+    const numeric = Number(hours);
+    const safeHours = Number.isFinite(numeric) ? Math.min(168, Math.max(1, numeric)) : 24;
+    const ttlMs = Math.round(safeHours * 60 * 60 * 1000);
+    this.config = { ...this.config, announcementTtlMs: ttlMs };
+    const now = Date.now();
+    const expiredIds: string[] = [];
+    for (const state of this.announcementsById.values()) {
+      if (state.deletedAt || state.expiredAt) continue;
+      state.expiresAt = state.createdAt + ttlMs;
+      if (state.expiresAt <= now) expiredIds.push(state.messageId);
+    }
+    this.scheduleAnnouncementPersist();
+    this.sweepAnnouncements('ttl_updated');
+    for (const session of this.sessionsBySocket.values()) {
+      this.sendAnnouncementSnapshot(session, 'ttl_updated');
+    }
+    logRelay('announcement_ttl_updated', { hours: safeHours, ttlMs, expired: expiredIds.length });
+    return ttlMs;
+  }
+
+  private getLocalAddresses(): string[] {
+    const addresses = new Set<string>();
+    for (const entries of Object.values(os.networkInterfaces())) {
+      for (const entry of entries || []) {
+        if (entry.internal || entry.family !== 'IPv4') continue;
+        addresses.add(entry.address);
+      }
+    }
+    return Array.from(addresses).sort((a, b) => a.localeCompare(b));
   }
 
   private listDashboardPeers(now: number): RelayDashboardPeer[] {
@@ -2619,7 +2663,7 @@ class LanternRelay {
       Number.isFinite(frame.createdAt) && frame.createdAt > 0
         ? Math.trunc(frame.createdAt)
         : Date.now();
-    const expiresAt = createdAt + ANNOUNCEMENT_TTL_MS;
+    const expiresAt = createdAt + this.config.announcementTtlMs;
     const previous = this.announcementsById.get(frame.messageId);
     this.announcementsById.set(frame.messageId, {
       messageId: frame.messageId,
@@ -3341,40 +3385,51 @@ const config: RelayConfig = {
     DEFAULT_CONFIG.presenceBroadcastIntervalMs
   ),
   maxPayloadBytes: parseInteger(process.env.LANTERN_RELAY_MAX_PAYLOAD_BYTES, DEFAULT_CONFIG.maxPayloadBytes)
+  ,
+  announcementTtlMs: Math.min(
+    168 * 60 * 60 * 1000,
+    Math.max(
+      60 * 60 * 1000,
+      parseInteger(process.env.LANTERN_RELAY_ANNOUNCEMENT_TTL_HOURS, 24) * 60 * 60 * 1000
+    )
+  )
 };
 
-const relay = new LanternRelay(config);
+export const createRelayFromEnvironment = (): LanternRelay => new LanternRelay({ ...config });
 
-const shutdown = async (signal: string): Promise<void> => {
-  logRelay('shutdown', { signal });
-  try {
-    await relay.stop(signal);
-    process.exit(0);
-  } catch (error) {
-    console.error('[LanternRelay] erro ao encerrar:', error);
-    process.exit(1);
-  }
-};
+if (require.main === module) {
+  const relay = createRelayFromEnvironment();
+  const shutdown = async (signal: string): Promise<void> => {
+    logRelay('shutdown', { signal });
+    try {
+      await relay.stop(signal);
+      process.exit(0);
+    } catch (error) {
+      console.error('[LanternRelay] erro ao encerrar:', error);
+      process.exit(1);
+    }
+  };
 
-process.on('SIGINT', () => {
-  void shutdown('SIGINT');
-});
-
-process.on('SIGTERM', () => {
-  void shutdown('SIGTERM');
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('[LanternRelay] uncaughtException:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('[LanternRelay] unhandledRejection:', reason);
-});
-
-void relay.start().catch((error) => {
-  logRelay('startup_failed', {
-    message: error instanceof Error ? error.message : String(error)
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
   });
-  process.exit(1);
-});
+
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+
+  process.on('uncaughtException', (error) => {
+    console.error('[LanternRelay] uncaughtException:', error);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[LanternRelay] unhandledRejection:', reason);
+  });
+
+  void relay.start().catch((error) => {
+    logRelay('startup_failed', {
+      message: error instanceof Error ? error.message : String(error)
+    });
+    process.exit(1);
+  });
+}

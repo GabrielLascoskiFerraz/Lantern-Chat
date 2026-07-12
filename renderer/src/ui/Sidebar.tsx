@@ -39,6 +39,7 @@ import {
 import { GroupInfo, GroupMember, Peer, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { useI18n } from '../i18n';
 
 interface SidebarProps {
   profile: Profile;
@@ -129,6 +130,7 @@ export const Sidebar = ({
   relayEndpoint,
   syncActive
 }: SidebarProps) => {
+  const { locale, t } = useI18n();
   const pinnedStorageKey = 'lantern.sidebar.pinnedConversations';
   const filtered = useMemo(
     () => peers.filter((peer) => peer.displayName.toLowerCase().includes(search.toLowerCase())),
@@ -221,19 +223,19 @@ export const Sidebar = ({
 
       if (aUnread !== bUnread) return bUnread - aUnread;
 
-      return a.displayName.localeCompare(b.displayName, 'pt-BR', { sensitivity: 'base' });
+      return a.displayName.localeCompare(b.displayName, locale, { sensitivity: 'base' });
     });
   };
 
   const orderedFiltered = useMemo(() => {
     const mainPeers = filtered.filter((peer) => !archivedSet.has(`dm:${peer.deviceId}`));
     return orderSidebarPeers(mainPeers, true);
-  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
+  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds, locale]);
 
   const archivedPeers = useMemo(() => {
     const archived = filtered.filter((peer) => archivedSet.has(`dm:${peer.deviceId}`));
     return orderSidebarPeers(archived, false);
-  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds]);
+  }, [filtered, archivedSet, pinnedConversationIds, unreadByConversation, onlinePeerIds, locale]);
   const totalArchivedCount = useMemo(
     () => peers.filter((peer) => archivedSet.has(`dm:${peer.deviceId}`)).length,
     [peers, archivedSet]
@@ -260,7 +262,10 @@ export const Sidebar = ({
       ),
     [unreadByConversation]
   );
-  const unreadLabel = totalUnreadCount === 1 ? '1 não lida' : `${totalUnreadCount} não lidas`;
+  const unreadLabel = t(
+    totalUnreadCount === 1 ? '{count} unread singular' : '{count} unread plural',
+    { count: totalUnreadCount }
+  );
   const filteredGroups = useMemo(
     () => groups.filter((group) => group.name.toLowerCase().includes(search.toLowerCase())),
     [groups, search]
@@ -533,11 +538,11 @@ export const Sidebar = ({
     const isPinned = isConversationPinned(conversationId);
     const isOnline = onlinePeerIds.includes(peer.deviceId);
     const statusText = isOnline
-      ? (peer.statusMessage || '').trim() || 'Online'
-      : 'Offline';
+      ? (peer.statusMessage || '').trim() || t('Online')
+      : t('Offline');
     const previewText =
       conversationPreviewById[conversationId] ||
-      (isOnline ? 'Sem mensagens ainda' : 'Offline');
+      (isOnline ? t('No messages yet') : t('Offline'));
 
     return (
       <div
@@ -582,7 +587,7 @@ export const Sidebar = ({
             <button
               type="button"
               className={`conversation-pin-btn ${isPinned ? 'pinned' : ''}`}
-              title={isPinned ? 'Desfixar conversa' : 'Fixar conversa no topo'}
+              title={isPinned ? t('Unpin conversation') : t('Pin conversation to top')}
               onClick={(event) => {
                 event.stopPropagation();
                 toggleConversationPinned(conversationId);
@@ -604,7 +609,7 @@ export const Sidebar = ({
   const renderGroupItem = (group: GroupInfo) => {
     const conversationId = `group:${group.groupId}`;
     const unread = unreadByConversation[conversationId] || 0;
-    const previewText = conversationPreviewById[conversationId] || group.description || 'Grupo';
+    const previewText = conversationPreviewById[conversationId] || group.description || t('Group');
     const activeMembers = (groupMembersById[group.groupId] || []).filter(
       (member) => member.status === 'active'
     );
@@ -617,11 +622,12 @@ export const Sidebar = ({
     const totalMemberCount = activeMembers.length;
     const groupPresenceLabel = relayConnected
       ? totalMemberCount > 0
-        ? `${onlineMemberCount}/${totalMemberCount} ${
-          totalMemberCount === 1 ? 'participante online' : 'participantes online'
-        }`
-        : 'Sincronizando participantes...'
-      : 'Relay offline';
+        ? t('{online}/{total} participants online', {
+            online: onlineMemberCount,
+            total: totalMemberCount
+          })
+        : t('Syncing participants...')
+      : t('Relay offline');
 
     return (
       <div
@@ -707,7 +713,7 @@ export const Sidebar = ({
                 <div className="quick-status-custom">
                   <Input
                     value={customStatusDraft}
-                    placeholder="Status personalizado"
+                    placeholder={t('Custom status')}
                     onChange={(_, data) => setCustomStatusDraft(data.value)}
                     maxLength={120}
                   />
@@ -773,7 +779,7 @@ export const Sidebar = ({
         <Input
           className="search-input"
           value={search}
-          placeholder="Pesquisar contatos"
+          placeholder={t('Search')}
           onChange={(_, data) => onSearch(data.value)}
         />
       </div>
@@ -785,9 +791,9 @@ export const Sidebar = ({
         <div className="conversation-meta">
             <Megaphone20Regular className="conversation-leading-icon" />
             <div className="conversation-text">
-              <Text weight="semibold">Anúncios</Text>
+              <Text weight="semibold">{t('Announcements')}</Text>
               <Caption1 className="conversation-preview conversation-preview-slot">
-                {conversationPreviewById.announcements || 'Mensagens para todos'}
+                {conversationPreviewById.announcements || t('Messages for everyone')}
               </Caption1>
             </div>
           </div>
@@ -801,14 +807,14 @@ export const Sidebar = ({
       {(groups.length > 0 || search.trim().length === 0) && (
         <div className="sidebar-groups-section">
           <div className="sidebar-section-title">
-            <Caption1>Grupos</Caption1>
+            <Caption1>{t('Groups')}</Caption1>
             <Button
               size="small"
               appearance="subtle"
               icon={<Add20Regular />}
               onClick={() => setCreateGroupOpen(true)}
             >
-              Novo
+              {t('New')}
             </Button>
           </div>
           <div className="groups-list">
@@ -836,9 +842,9 @@ export const Sidebar = ({
       )}
 
       <div className="sidebar-section-title">
-        <Caption1>Contatos</Caption1>
+        <Caption1>{t('Contacts')}</Caption1>
         <Caption1 className="sidebar-section-summary">
-          {onlinePeerIds.length} online · {unreadLabel}
+          {t('{count} online', { count: onlinePeerIds.length })} · {unreadLabel}
         </Caption1>
       </div>
       <div className="contacts-list" ref={contactsListRef}>
@@ -859,7 +865,7 @@ export const Sidebar = ({
             >
               <span className="archived-conversations-label">
                 <Box20Regular />
-                <span>Arquivadas</span>
+                <span>{t('Archived')}</span>
               </span>
               <span className="archived-conversations-meta">
                 <span>{totalArchivedCount}</span>
@@ -893,7 +899,7 @@ export const Sidebar = ({
           <PlugDisconnected20Regular className="sidebar-footer-icon relay-offline" />
         )}
         <Caption1 title={relayEndpoint || undefined}>
-          {relayConnected ? 'Conectado ao Relay' : 'Não conectado ao Relay'}
+          {relayConnected ? t('Connected to Relay') : t('Not connected to Relay')}
         </Caption1>
         {syncActive && <ArrowSync20Regular className="sidebar-footer-sync" />}
       </div>

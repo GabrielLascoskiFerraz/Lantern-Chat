@@ -12,14 +12,16 @@ import {
   Switch,
   Text
 } from '@fluentui/react-components';
-import { ipcClient, Profile, RelaySettings, StartupSettings } from '../api/ipcClient';
+import { ipcClient, LanguageSettings, Profile, RelaySettings, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
+import { useI18n } from '../i18n';
 
 interface SettingsModalProps {
   open: boolean;
   profile: Profile;
   relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
+  languageSettings: LanguageSettings | null;
   onForceRelayRediscovery: () => Promise<void>;
   onClose: () => void;
   onSave: (payload: {
@@ -39,6 +41,7 @@ interface SettingsModalProps {
       downloadsDir: string;
       doNotDisturbUntil: number;
     };
+    languageMode: LanguageSettings['mode'];
   }) => Promise<void>;
 }
 
@@ -47,10 +50,12 @@ export const SettingsModal = ({
   profile,
   relaySettings,
   startupSettings,
+  languageSettings,
   onForceRelayRediscovery,
   onClose,
   onSave
 }: SettingsModalProps) => {
+  const { t, locale } = useI18n();
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [statusMessage, setStatusMessage] = useState(profile.statusMessage);
   const [avatarEmoji, setAvatarEmoji] = useState(profile.avatarEmoji);
@@ -64,11 +69,20 @@ export const SettingsModal = ({
   const [doNotDisturbUntil, setDoNotDisturbUntil] = useState(
     Number(startupSettings?.doNotDisturbUntil || 0)
   );
+  const [languageMode, setLanguageMode] = useState<LanguageSettings['mode']>(
+    languageSettings?.mode || 'auto'
+  );
   const [backupBusy, setBackupBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [rediscoverBusy, setRediscoverBusy] = useState(false);
   const [backupFeedback, setBackupFeedback] = useState('');
-  const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
+  const statusPresets = [
+    { key: 'Available', value: 'Disponível' },
+    { key: 'In a meeting', value: 'Em reunião' },
+    { key: 'Focused', value: 'Foco total' },
+    { key: 'Be right back', value: 'Volto já' },
+    { key: 'Do not disturb', value: 'Não perturbe' }
+  ];
   const emojiGroups = {
     rostos: [
       '🙂', '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇', '😉', '😍', '🥰',
@@ -136,6 +150,7 @@ export const SettingsModal = ({
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
     setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
+    setLanguageMode(languageSettings?.mode || 'auto');
     setBackupBusy(false);
     setRestoreBusy(false);
     setRediscoverBusy(false);
@@ -151,7 +166,7 @@ export const SettingsModal = ({
   useEffect(() => {
     if (!open) return;
     resetDraftFromProps();
-  }, [open, profile, relaySettings, startupSettings]);
+  }, [open, profile, relaySettings, startupSettings, languageSettings]);
 
   const parsedRelayPort = Number.parseInt(relayPortDraft, 10);
   const relayPort =
@@ -163,11 +178,11 @@ export const SettingsModal = ({
   const activeDoNotDisturbUntil =
     doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
   const doNotDisturbLabel = activeDoNotDisturbUntil
-    ? `Ativo até ${new Date(activeDoNotDisturbUntil).toLocaleTimeString('pt-BR', {
+    ? `${locale === 'pt-BR' ? 'Ativo até' : locale === 'es' ? 'Activo hasta' : locale === 'fr' ? 'Actif jusqu’à' : 'Active until'} ${new Date(activeDoNotDisturbUntil).toLocaleTimeString(locale, {
         hour: '2-digit',
         minute: '2-digit'
       })}`
-    : 'Desativado';
+    : t('Disabled');
   const setDoNotDisturbFor = (milliseconds: number): void => {
     setDoNotDisturbUntil(Date.now() + milliseconds);
   };
@@ -232,26 +247,26 @@ export const SettingsModal = ({
     <Dialog open={open} onOpenChange={(_, data) => !data.open && onClose()}>
       <DialogSurface className="settings-modal" style={dialogSurfaceStyle}>
         <DialogBody>
-          <DialogTitle>Perfil</DialogTitle>
+          <DialogTitle>{t('Profile')}</DialogTitle>
           <DialogContent className="settings-layout">
             <section className="settings-preview-card">
               <Avatar emoji={avatarEmoji} bg={avatarBg} size={124} />
               <Text weight="semibold" size={500}>
                 {displayName || profile.displayName}
               </Text>
-              <Text size={300}>{statusMessage || 'Disponível'}</Text>
+              <Text size={300}>{statusMessage || t('Available')}</Text>
               <Text size={200}>ID: {profile.deviceId.slice(0, 12)}</Text>
             </section>
 
             <section className="settings-controls">
-              <Field className="settings-field" label="Nome de exibição">
+              <Field className="settings-field" label={t('Display name')}>
                 <Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} />
               </Field>
-              <Field className="settings-field settings-field-status" label="Mensagem de status">
+              <Field className="settings-field settings-field-status" label={t('Status message')}>
                 <Input
                   value={statusMessage}
                   onChange={(_, data) => setStatusMessage(data.value)}
-                  placeholder="Ex.: Em reunião, respondo depois"
+                  placeholder={locale === 'pt-BR' ? 'Ex.: Em reunião, respondo depois' : locale === 'es' ? 'Ej.: En reunión, respondo después' : locale === 'fr' ? 'Ex. : En réunion, je réponds plus tard' : 'E.g. In a meeting, I will reply later'}
                   maxLength={120}
                 />
                 <div className="status-presets">
@@ -259,16 +274,16 @@ export const SettingsModal = ({
                     <button
                       type="button"
                       key={preset}
-                      className={`status-chip ${statusMessage.trim() === preset ? 'active' : ''}`}
-                      onClick={() => setStatusMessage(preset)}
+                      className={`status-chip ${statusMessage.trim() === preset.value ? 'active' : ''}`}
+                      onClick={() => setStatusMessage(preset.value)}
                     >
-                      {preset}
+                      {t(preset.key)}
                     </button>
                   ))}
                 </div>
               </Field>
 
-              <Field className="settings-field settings-field-emoji" label="Escolha seu emoji">
+              <Field className="settings-field settings-field-emoji" label={t('Choose your emoji')}>
                 <div className="emoji-group-tabs">
                   {(Object.keys(emojiGroups) as Array<keyof typeof emojiGroups>).map((group) => (
                     <button
@@ -297,7 +312,7 @@ export const SettingsModal = ({
                   <Input
                     value={customEmoji}
                     onChange={(_, data) => setCustomEmoji(data.value)}
-                    placeholder="Cole seu emoji personalizado aqui"
+                    placeholder={t('Copy your custom emoji here')}
                   />
                   <Button
                     appearance="secondary"
@@ -306,12 +321,12 @@ export const SettingsModal = ({
                       if (value) setAvatarEmoji(value);
                     }}
                   >
-                    Usar Emoji
+                    {t('Use emoji')}
                   </Button>
                 </div>
               </Field>
 
-              <Field className="settings-field settings-field-color" label="Cor do perfil">
+              <Field className="settings-field settings-field-color" label={t('Profile color')}>
                 <div className="color-wheel">
                   {colorOptions.map((color, index) => {
                     const angle = (360 / colorOptions.length) * index;
@@ -346,17 +361,17 @@ export const SettingsModal = ({
                 </div>
               </Field>
 
-              <Field className="settings-field settings-field-relay" label="Conexão com Relay">
+              <Field className="settings-field settings-field-relay" label={t('Relay connection')}>
                 <div className="settings-relay-toggle-row">
                   <Switch
-                    label="Automático"
+                    label={t('Automatic')}
                     checked={relayAutomatic}
                     onChange={(_, data) => setRelayAutomatic(Boolean(data.checked))}
                   />
                   <Text size={200} className={`relay-connection-badge ${relaySettings?.connected ? 'online' : 'offline'}`}>
                     {relaySettings?.connected
-                      ? `Conectado${relaySettings.endpoint ? `: ${relaySettings.endpoint}` : ''}`
-                      : 'Desconectado'}
+                      ? `${t('Connected')}${relaySettings.endpoint ? `: ${relaySettings.endpoint}` : ''}`
+                      : t('Disconnected')}
                   </Text>
                 </div>
                 {!relayAutomatic && (
@@ -364,12 +379,12 @@ export const SettingsModal = ({
                     <Input
                       value={relayHost}
                       onChange={(_, data) => setRelayHost(data.value)}
-                      placeholder="IP/host do Relay (ex.: 192.168.0.50)"
+                      placeholder={t('IP/Relay host (e.g. 192.168.0.50)')}
                     />
                     <Input
                       value={relayPortDraft}
                       onChange={(_, data) => setRelayPortDraft(data.value)}
-                      placeholder="Porta"
+                      placeholder={t('Port')}
                       type="number"
                       min={1}
                       max={65535}
@@ -382,18 +397,18 @@ export const SettingsModal = ({
                     disabled={rediscoverBusy}
                     onClick={() => void handleForceRediscovery()}
                   >
-                    {rediscoverBusy ? 'Redetectando...' : 'Redetectar agora'}
+                    {rediscoverBusy ? t('Rediscovering...') : t('Rediscover now')}
                   </Button>
                 </div>
                 <Text size={200} className="settings-relay-help">
-                  Automático usa descoberta na rede local. Manual força um Relay específico.
+                  {t('Automatic uses local network discovery. Manual forces a specific Relay.')}
                 </Text>
               </Field>
 
-              <Field className="settings-field" label="Inicialização">
+              <Field className="settings-field" label={t('Startup')}>
                 <div className="settings-relay-toggle-row">
                   <Switch
-                    label="Iniciar com o sistema"
+                    label={t('Start with the system')}
                     checked={openAtLogin}
                     disabled={!startupSettings?.supported}
                     onChange={(_, data) => setOpenAtLogin(Boolean(data.checked))}
@@ -401,21 +416,21 @@ export const SettingsModal = ({
                   <Text size={200} className={`relay-connection-badge ${openAtLogin ? 'online' : 'offline'}`}>
                     {startupSettings?.supported
                       ? openAtLogin
-                        ? 'Ativado'
-                        : 'Desativado'
+                        ? t('Enabled')
+                        : t('Disabled')
                       : 'Não suportado neste sistema'}
                   </Text>
                 </div>
               </Field>
 
-              <Field className="settings-field settings-field-dnd" label="Não perturbe">
+              <Field className="settings-field settings-field-dnd" label={t('Do not disturb')}>
                 <div className="settings-relay-toggle-row">
                   <Text size={200} className={`relay-connection-badge ${activeDoNotDisturbUntil ? 'online' : 'offline'}`}>
                     {doNotDisturbLabel}
                   </Text>
                   {activeDoNotDisturbUntil > 0 && (
                     <Button appearance="secondary" onClick={() => setDoNotDisturbUntil(0)}>
-                      Desativar
+                      {t('Turn off')}
                     </Button>
                   )}
                 </div>
@@ -427,15 +442,15 @@ export const SettingsModal = ({
                     1h
                   </Button>
                   <Button appearance="secondary" onClick={() => setDoNotDisturbUntilTomorrow()}>
-                    Até amanhã
+                    {t('Until tomorrow')}
                   </Button>
                 </div>
                 <Text size={200} className="settings-relay-help">
-                  Silencia notificações nativas e sons pelo período escolhido.
+                  {t('Native notifications and sounds are silenced for the selected period.')}
                 </Text>
               </Field>
 
-              <Field className="settings-field" label="Pasta padrão de recebimento">
+              <Field className="settings-field" label={t('Default download folder')}>
                 <div className="settings-relay-manual-grid">
                   <Input
                     value={downloadsDir}
@@ -450,36 +465,36 @@ export const SettingsModal = ({
                       })
                     }
                   >
-                    Escolher pasta
+                    {t('Choose folder')}
                   </Button>
                 </div>
                 <Text size={200} className="settings-relay-help">
-                  Os novos arquivos recebidos serão salvos nesta pasta.
+                  {t('New received files will be saved in this folder.')}
                 </Text>
               </Field>
 
-              <Field className="settings-field settings-field-backup" label="Backup e restauração local">
+              <Field className="settings-field settings-field-backup" label={t('Local backup and restore')}>
                 <div className="settings-backup-actions">
                   <Button
                     appearance="secondary"
                     disabled={backupBusy || restoreBusy}
                     onClick={() => void handleCreateBackup()}
                   >
-                    {backupBusy ? 'Gerando backup...' : 'Criar backup'}
+                    {backupBusy ? (locale === 'pt-BR' ? 'Gerando backup...' : 'Creating backup...') : t('Create backup')}
                   </Button>
                   <Button
                     appearance="secondary"
                     disabled={backupBusy || restoreBusy}
                     onClick={() => void handleRestoreBackup()}
                   >
-                    {restoreBusy ? 'Preparando restauração...' : 'Restaurar backup'}
+                    {restoreBusy ? (locale === 'pt-BR' ? 'Preparando restauração...' : 'Preparing restore...') : t('Restore backup')}
                   </Button>
                 </div>
                 <Text size={200} className="settings-relay-help">
-                  O backup inclui histórico local (SQLite) e anexos do Lantern.
+                  {t('The backup includes local history (SQLite) and Lantern attachments.')}
                 </Text>
                 <Text size={200} className="settings-relay-help">
-                  Ao restaurar, o aplicativo reinicia automaticamente para aplicar os dados.
+                  {t('After restoring, the app restarts automatically to apply the data.')}
                 </Text>
                 {backupFeedback && (
                   <Text size={200} className="settings-backup-feedback">
@@ -487,10 +502,28 @@ export const SettingsModal = ({
                   </Text>
                 )}
               </Field>
+              <Field className="settings-field settings-field-language" label={t('Language')}>
+                <select
+                  className="settings-language-select"
+                  value={languageMode}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === 'auto' || value === 'pt-BR' || value === 'en' || value === 'es' || value === 'fr') {
+                      setLanguageMode(value);
+                    }
+                  }}
+                >
+                  <option value="auto">{t('Use system language')} ({languageSettings?.systemLocale || 'en'})</option>
+                  <option value="pt-BR">{t('Portuguese (Brazil)')}</option>
+                  <option value="en">{t('English')}</option>
+                  <option value="es">{t('Spanish')}</option>
+                  <option value="fr">{t('French')}</option>
+                </select>
+              </Field>
             </section>
           </DialogContent>
           <DialogActions>
-            <Button appearance="secondary" onClick={onClose}>Cancelar</Button>
+            <Button appearance="secondary" onClick={onClose}>{t('Cancel')}</Button>
             <Button
               className="settings-save-btn"
               appearance="primary"
@@ -512,11 +545,12 @@ export const SettingsModal = ({
                     openAtLogin,
                     downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || ''),
                     doNotDisturbUntil: activeDoNotDisturbUntil
-                  }
+                  },
+                  languageMode
                 })
               }
             >
-              Salvar
+              {t('Save')}
             </Button>
           </DialogActions>
         </DialogBody>

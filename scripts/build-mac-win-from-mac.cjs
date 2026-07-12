@@ -44,15 +44,16 @@ const winSkipRcedit = args.has('--win-skip-rcedit');
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const relayMacTargetArg = process.arch === 'arm64' ? 'mac-arm64' : 'mac-x64';
+const electronVersion = require(path.join(projectRoot, 'node_modules', 'electron', 'package.json')).version;
 
-const run = (label, command, commandArgs) => {
+const run = (label, command, commandArgs, options = {}) => {
   const rendered = `${command} ${commandArgs.join(' ')}`;
   console.log(`[Lantern build] ${label}`);
   console.log(`[Lantern build] $ ${rendered}`);
   if (dryRun) return;
 
   const result = spawnSync(command, commandArgs, {
-    cwd: projectRoot,
+    cwd: options.cwd || projectRoot,
     stdio: 'inherit',
     shell: false
   });
@@ -63,6 +64,24 @@ const run = (label, command, commandArgs) => {
   if ((result.status ?? 1) !== 0) {
     throw new Error(`Falha em: ${label} (exit=${result.status ?? 'desconhecido'})`);
   }
+};
+
+const prepareUniversalMacNativeModule = () => {
+  const moduleDir = path.join(projectRoot, 'node_modules', 'better-sqlite3');
+  const prebuildInstall = path.join(projectRoot, 'node_modules', '.bin', 'prebuild-install');
+  if (!fs.existsSync(moduleDir) || !fs.existsSync(prebuildInstall)) return;
+  run(
+    'Preparando SQLite macOS x64 para o cliente universal',
+    prebuildInstall,
+    [
+      '--runtime=electron',
+      `--target=${electronVersion}`,
+      '--arch=x64',
+      '--platform=darwin',
+      '--force'
+    ],
+    { cwd: moduleDir }
+  );
 };
 
 const ensureInstallIfNeeded = () => {
@@ -82,6 +101,7 @@ const main = () => {
   run('Build do renderer', npmCmd, ['run', 'build:renderer']);
   run('Build do processo Electron', npmCmd, ['run', 'build:electron']);
 
+  prepareUniversalMacNativeModule();
   run('Gerando instalador macOS', npxCmd, [
     '--yes',
     'electron-builder',

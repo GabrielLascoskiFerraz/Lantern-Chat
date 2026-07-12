@@ -31,6 +31,15 @@ module.exports = [
     }
   },
   {
+    files: ['relay-ui/renderer/**/*.js', 'website/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2024
+      }
+    }
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {
       parser: tsparser,

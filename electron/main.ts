@@ -730,6 +730,8 @@ class LanternApp {
         this.setGroupMessagePinned(groupId, messageId, pinned),
       getRelaySettings: () => this.getRelaySettingsSnapshot(),
       getStartupSettings: () => this.getStartupSettingsSnapshot(),
+      getLanguageSettings: () => this.getLanguageSettingsSnapshot(),
+      updateLanguageSettings: (mode) => this.updateLanguageSettings(mode),
       updateRelaySettings: (input) => this.updateRelaySettings(input),
       forceRelayRediscovery: () => this.forceRelayRediscovery(),
       updateStartupSettings: (input) => this.updateStartupSettings(input),
@@ -1012,6 +1014,37 @@ class LanternApp {
       downloadsDir,
       doNotDisturbUntil
     };
+  }
+
+  private resolveSupportedLanguage(locale: string): 'pt-BR' | 'en' | 'es' | 'fr' {
+    const normalized = (locale || '').trim().toLowerCase();
+    if (normalized === 'pt-br' || normalized.startsWith('pt-')) return 'pt-BR';
+    if (normalized === 'es' || normalized.startsWith('es-')) return 'es';
+    if (normalized === 'fr' || normalized.startsWith('fr-')) return 'fr';
+    return 'en';
+  }
+
+  private getLanguageSettingsSnapshot(): {
+    mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr';
+    resolved: 'pt-BR' | 'en' | 'es' | 'fr';
+    systemLocale: string;
+  } {
+    const mode = this.db.getLanguageMode();
+    const systemLocale = app.getLocale() || 'en';
+    return {
+      mode,
+      resolved: mode === 'auto' ? this.resolveSupportedLanguage(systemLocale) : mode,
+      systemLocale
+    };
+  }
+
+  private updateLanguageSettings(mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr'): {
+    mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr';
+    resolved: 'pt-BR' | 'en' | 'es' | 'fr';
+    systemLocale: string;
+  } {
+    this.db.setLanguageMode(mode);
+    return this.getLanguageSettingsSnapshot();
   }
 
   private updateStartupSettings(input: {

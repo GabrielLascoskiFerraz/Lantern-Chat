@@ -8,6 +8,7 @@ import {
 import { ipcClient } from './api/ipcClient';
 import { Shell } from './ui/Shell';
 import { useLanternStore } from './state/store';
+import { I18nProvider } from './i18n';
 
 const brandPalette = {
   10: '#06122b',
@@ -76,6 +77,7 @@ export default function App() {
   const loadInitial = useLanternStore((state) => state.loadInitial);
   const resolvedTheme = useLanternStore((state) => state.resolvedTheme);
   const setSystemDark = useLanternStore((state) => state.setSystemDark);
+  const languageSettings = useLanternStore((state) => state.languageSettings);
   const platform =
     typeof window !== 'undefined' && window.lantern ? ipcClient.getPlatform() : 'linux';
 
@@ -106,10 +108,23 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', resolvedTheme);
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    if (!languageSettings) return;
+    document.documentElement.lang = languageSettings.resolved;
+  }, [languageSettings]);
+
+  const language = languageSettings || {
+    mode: 'auto' as const,
+    resolved: 'en' as const,
+    systemLocale: 'en'
+  };
+
   return (
     <FluentProvider theme={theme} className="app-root">
       <AppErrorBoundary>
-        <Shell />
+        <I18nProvider settings={language}>
+          <Shell />
+        </I18nProvider>
       </AppErrorBoundary>
     </FluentProvider>
   );

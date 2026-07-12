@@ -37,6 +37,7 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { useI18n } from '../i18n';
 
 interface AnnouncementsViewProps {
   messages: MessageRow[];
@@ -63,8 +64,8 @@ interface ReplyDraftUi extends MessageReplyReference {
 const REACTIONS: Array<'👍' | '👎' | '❤️' | '😢' | '😊' | '😂'> = ['👍', '👎', '❤️', '😂', '😊', '😢'];
 const SHOW_ANNOUNCEMENT_READ_BUTTON = false;
 
-const formatTime = (value: number): string =>
-  new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const formatTime = (value: number, locale: string): string =>
+  new Date(value).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 
 const renderMessageText = (text: string): ReactNode[] => {
   const regex = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
@@ -142,6 +143,7 @@ export const AnnouncementsView = ({
   onReactToMessage,
   onDeleteMessage
 }: AnnouncementsViewProps) => {
+  const { locale, t } = useI18n();
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
@@ -483,7 +485,7 @@ export const AnnouncementsView = ({
             <Text weight="semibold" size={500}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 <Megaphone20Regular />
-                Anúncios
+                {t('Announcements')}
               </span>
             </Text>
             <Caption1>Comunicados para todos os usuários online. Eles somem após 24h.</Caption1>
@@ -564,7 +566,7 @@ export const AnnouncementsView = ({
                       <div className="bubble-meta">
                         <span className="bubble-time">
                           <Checkmark20Regular />
-                          <span>{formatTime(message.createdAt)}</span>
+                          <span>{formatTime(message.createdAt, locale)}</span>
                         </span>
                         {message.editedAt && <span className="message-edited-label">editada</span>}
                         {SHOW_ANNOUNCEMENT_READ_BUTTON && (

@@ -13,15 +13,16 @@ No estado atual do projeto, **todo tráfego passa pelo LanternRelay**:
 - sincronização de estado
 - entrega de anexos em grupos
 
-Versão atual: **1.2.0**
+Versão atual: **1.2.1**
 
 ## Arquitetura atual
 
 - **Cliente:** Electron + React + Fluent UI
-- **Relay:** Node.js + WebSocket + mDNS
+- **Relay:** Node.js + WebSocket + mDNS, disponível em modo terminal ou com uma janela de controle nativa
 - **Banco local do cliente:** SQLite (`better-sqlite3`)
 - **Sem contas/login:** perfil local por dispositivo
-- **Anúncios:** armazenados no relay e expiram automaticamente após 24h
+- **Idiomas:** Português do Brasil, inglês, espanhol e francês. O idioma do sistema é detectado automaticamente e pode ser alterado em Configurações.
+- **Anúncios:** armazenados no relay e expiram automaticamente. No Relay UI, o período pode ser ajustado entre 1 hora e 7 dias.
 - **Grupos:** metadados e eventos sincronizados pelo relay
 - **Anexos de grupos:** enviados pelo relay, com cache temporário no servidor por até 7 dias ou até todos receberem
 
@@ -39,6 +40,7 @@ Versão atual: **1.2.0**
 - Backup e restore local dos dados do usuário.
 - Notificações nativas, tray e opção de inicializar com o sistema.
 - Descoberta automática do Relay via mDNS e configuração manual por IP/porta.
+- Relay UI com IPs locais copiáveis, usuários conectados, tempo ativo, métricas de anexos e controles para iniciar, parar e reiniciar o serviço.
 
 ## Requisitos
 
@@ -101,6 +103,14 @@ npm run relay:start
 
 Padrão: `ws://0.0.0.0:43190`
 
+### Via janela de controle
+
+```bash
+npm run relay-ui:dev
+```
+
+O Relay UI inicia o Relay automaticamente e mostra os IPs IPv4 da rede local. Use `IP:porta` nos clientes quando precisar configurar o Relay manualmente. A janela também permite iniciar, parar, reiniciar e alterar a expiração dos anúncios.
+
 Healthcheck HTTP:
 
 ```text
@@ -152,7 +162,7 @@ Observação:
 Se quiser compilar e publicar tudo em uma release do GitHub no mesmo fluxo:
 
 ```bash
-npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+npm run release:mac-win:from-mac -- --tag v1.2.1 --repo GabrielLascoskiFerraz/Lantern-Chat
 ```
 
 Pré-requisitos:
@@ -174,16 +184,36 @@ Esse comando:
 
 Opções úteis:
 - simular sem executar:  
-  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --dry-run`
+  `npm run release:mac-win:from-mac -- --tag v1.2.1 --repo GabrielLascoskiFerraz/Lantern-Chat --dry-run`
 - publicar com artefatos já gerados:  
-  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --skip-build`
+  `npm run release:mac-win:from-mac -- --tag v1.2.1 --repo GabrielLascoskiFerraz/Lantern-Chat --skip-build`
 - usar notas customizadas:  
-  `npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat --notes-file ./RELEASE_NOTES.md`
+  `npm run release:mac-win:from-mac -- --tag v1.2.1 --repo GabrielLascoskiFerraz/Lantern-Chat --notes-file ./RELEASE_NOTES.md`
 
 Se o `gh` não estiver no PATH, force o binário manualmente:
 
 ```bash
-GH_BIN=/opt/homebrew/bin/gh npm run release:mac-win:from-mac -- --tag v1.2.0 --repo GabrielLascoskiFerraz/Lantern-Chat
+GH_BIN=/opt/homebrew/bin/gh npm run release:mac-win:from-mac -- --tag v1.2.1 --repo GabrielLascoskiFerraz/Lantern-Chat
+```
+
+### Build completo para macOS, Windows e Linux no macOS
+
+Para gerar o cliente, o Relay UI e o Relay de terminal para as três plataformas:
+
+```bash
+npm run build:all:from-mac
+```
+
+Saídas principais:
+
+- Cliente: DMG universal do macOS, instalador Windows x64 e AppImage Linux x64.
+- Relay UI: DMG universal do macOS, instalador Windows x64 e AppImage Linux x64.
+- Relay de terminal: binários macOS, Windows e Linux em `dist-relay/`.
+
+Para criar ou atualizar a release com todos os arquivos:
+
+```bash
+npm run release:all:from-mac -- --tag v1.2.1 --title "Lantern 1.2.1" --repo GabrielLascoskiFerraz/Lantern-Chat
 ```
 
 ### Build explícito por plataforma
@@ -222,6 +252,14 @@ Saída:
 - macOS x64: `npm run relay:dist:mac:x64`
 - macOS arm64: `npm run relay:dist:mac:arm64`
 - Linux: `npm run relay:dist:linux`
+
+### Gerar instaladores do Relay UI
+
+- macOS universal: `npm run relay-ui:build:mac`
+- Windows x64: `npm run relay-ui:build:win`
+- Linux x64: `npm run relay-ui:build:linux`
+
+Saída: `dist-relay-ui-installers/`
 
 Saída esperada no Windows:
 - `dist-relay/LanternRelay.exe`
@@ -366,3 +404,17 @@ Se `node -v` não mudar após `nvm use`, ajuste o PATH para priorizar o Node do 
 
 - Confirme relay ativo em `http://IP:43190/health`
 - Teste com relay manual nas configurações do cliente (IP + porta)
+
+## Website do projeto
+
+O site público em inglês e português fica em `website/`. Ele é uma página estática sem dependências de build e usa screenshots reais da interface atual.
+
+Para visualizar localmente:
+
+```bash
+python3 -m http.server 4173 -d website
+```
+
+Depois, abra `http://localhost:4173`.
+
+O workflow `.github/workflows/pages.yml` publica automaticamente o conteúdo de `website/` no GitHub Pages sempre que houver push em `main` com alterações no site. No GitHub, deixe `Settings > Pages > Build and deployment > Source` como `GitHub Actions`.

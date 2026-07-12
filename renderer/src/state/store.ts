@@ -5,6 +5,7 @@ import {
   GroupInfo,
   GroupMember,
   ipcClient,
+  LanguageSettings,
   MessageReplyReference,
   MessageRow,
   Peer,
@@ -35,6 +36,7 @@ interface LanternState {
   profile: Profile | null;
   relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
+  languageSettings: LanguageSettings | null;
   peers: Peer[];
   groups: GroupInfo[];
   groupMembersById: Record<string, GroupMember[]>;
@@ -152,6 +154,7 @@ interface LanternState {
     downloadsDir?: string;
     doNotDisturbUntil?: number;
   }) => Promise<void>;
+  updateLanguageSettings: (mode: LanguageSettings['mode']) => Promise<void>;
   addManualPeer: (address: string, port: number) => Promise<void>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
@@ -160,7 +163,6 @@ interface LanternState {
 
 const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
-const PROFILE_ONBOARDING_KEY_PREFIX = 'lantern.profile.onboarding.done';
 const MESSAGES_PAGE_SIZE = 80;
 const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
@@ -337,6 +339,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   profile: null,
   relaySettings: null,
   startupSettings: null,
+  languageSettings: null,
   peers: [],
   groups: [],
   groupMembersById: {},
@@ -391,6 +394,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         profile,
         relaySettings,
         startupSettings,
+        languageSettings,
         peers,
         groups,
         onlinePeers,
@@ -401,6 +405,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ipcClient.getProfile(),
           ipcClient.getRelaySettings(),
           ipcClient.getStartupSettings(),
+          ipcClient.getLanguageSettings(),
           ipcClient.getKnownPeers(),
           ipcClient.getGroups(),
           ipcClient.getOnlinePeers(),
@@ -430,12 +435,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       ];
     const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
 
-    const onboardingKey = `${PROFILE_ONBOARDING_KEY_PREFIX}.${profile.deviceId}`;
-    const onboardingDone =
-      typeof window !== 'undefined' && window.localStorage.getItem(onboardingKey) === '1';
-    const profileLooksPristine = profile.updatedAt <= profile.createdAt;
-    const shouldOpenSettings = !onboardingDone || profileLooksPristine;
-
     const selectedAtLoad = get().selectedConversationId;
     const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
 
@@ -443,6 +442,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       profile,
       relaySettings,
       startupSettings,
+      languageSettings,
       peers,
       groups,
       groupMembersById: Object.fromEntries(groupMembersEntries),
@@ -457,7 +457,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         [selectedAtLoad]: null
       },
       conversationPreviewById,
-      settingsOpen: shouldOpenSettings,
+      // Opening settings is always an explicit user action, including for new profiles.
+      settingsOpen: false,
       ready: true,
       loadingConversationId: selectedAtLoad
     });
@@ -1957,10 +1958,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   },
   updateProfile: async (input) => {
     const profile = await ipcClient.updateProfile(input);
-    if (typeof window !== 'undefined') {
-      const onboardingKey = `${PROFILE_ONBOARDING_KEY_PREFIX}.${profile.deviceId}`;
-      window.localStorage.setItem(onboardingKey, '1');
-    }
     set({ profile });
   },
   createGroup: async (input) => {
@@ -2175,6 +2172,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   updateStartupSettings: async (input) => {
     const startupSettings = await ipcClient.updateStartupSettings(input);
     set({ startupSettings });
+  },
+  updateLanguageSettings: async (mode) => {
+    const languageSettings = await ipcClient.updateLanguageSettings(mode);
+    set({ languageSettings });
   },
   addManualPeer: async (address, port) => {
     await ipcClient.addManualPeer(address, port);

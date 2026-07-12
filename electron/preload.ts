@@ -45,6 +45,9 @@ const api = {
     ipcRenderer.invoke('lantern:setGroupMessagePinned', groupId, messageId, pinned),
   getRelaySettings: () => ipcRenderer.invoke('lantern:getRelaySettings'),
   getStartupSettings: () => ipcRenderer.invoke('lantern:getStartupSettings'),
+  getLanguageSettings: () => ipcRenderer.invoke('lantern:getLanguageSettings'),
+  updateLanguageSettings: (mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr') =>
+    ipcRenderer.invoke('lantern:updateLanguageSettings', mode),
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) =>
     ipcRenderer.invoke('lantern:updateRelaySettings', input),
   forceRelayRediscovery: () => ipcRenderer.invoke('lantern:forceRelayRediscovery'),

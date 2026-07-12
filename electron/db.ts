@@ -2582,6 +2582,26 @@ export class DbService {
     return normalized;
   }
 
+  getLanguageMode(): 'auto' | 'pt-BR' | 'en' | 'es' | 'fr' {
+    const value = (this.getAppSetting('ui.language') || 'auto').trim();
+    if (value === 'pt-BR' || value === 'en' || value === 'es' || value === 'fr') {
+      return value;
+    }
+    return 'auto';
+  }
+
+  setLanguageMode(value: string): 'auto' | 'pt-BR' | 'en' | 'es' | 'fr' {
+    const normalized = value === 'pt-BR' || value === 'en' || value === 'es' || value === 'fr'
+      ? value
+      : 'auto';
+    if (normalized === 'auto') {
+      this.deleteAppSetting('ui.language');
+    } else {
+      this.setAppSetting('ui.language', normalized);
+    }
+    return normalized;
+  }
+
   private getAppSetting(key: string): string | null {
     const row = this.db
       .prepare('SELECT value FROM app_settings WHERE key = ? LIMIT 1')

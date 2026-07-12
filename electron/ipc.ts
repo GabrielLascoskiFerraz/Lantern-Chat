@@ -63,6 +63,16 @@ export interface IpcBindings {
     downloadsDir: string;
     doNotDisturbUntil: number;
   };
+  getLanguageSettings: () => {
+    mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr';
+    resolved: 'pt-BR' | 'en' | 'es' | 'fr';
+    systemLocale: string;
+  };
+  updateLanguageSettings: (mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr') => {
+    mode: 'auto' | 'pt-BR' | 'en' | 'es' | 'fr';
+    resolved: 'pt-BR' | 'en' | 'es' | 'fr';
+    systemLocale: string;
+  };
   updateRelaySettings: (input: {
     automatic: boolean;
     host?: string;
@@ -437,6 +447,10 @@ export const registerIpc = (
   );
   ipcMain.handle('lantern:getRelaySettings', () => bindings.getRelaySettings());
   ipcMain.handle('lantern:getStartupSettings', () => bindings.getStartupSettings());
+  ipcMain.handle('lantern:getLanguageSettings', () => bindings.getLanguageSettings());
+  ipcMain.handle('lantern:updateLanguageSettings', (_event, mode) =>
+    bindings.updateLanguageSettings(mode)
+  );
   ipcMain.handle('lantern:updateRelaySettings', (_event, input) =>
     bindings.updateRelaySettings(input)
   );

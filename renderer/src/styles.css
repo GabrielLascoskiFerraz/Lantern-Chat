@@ -3539,6 +3539,22 @@ body {
   word-break: break-word;
 }
 
+.settings-language-select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.settings-language-select:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1);
+  outline-offset: 2px;
+}
+
 .settings-modal .fui-DialogActions {
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--teams-border) 82%, transparent);

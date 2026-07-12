@@ -7,6 +7,7 @@ import { ChatView } from './ChatView';
 import { GroupDetailsModal } from './GroupDetailsModal';
 import { SettingsModal } from './SettingsModal';
 import { Sidebar } from './Sidebar';
+import { localizeRuntimeText, useI18n } from '../i18n';
 
 const ANNOUNCEMENTS_ID = 'announcements';
 
@@ -60,12 +61,14 @@ const PaneLayer = ({
 );
 
 export const Shell = () => {
+  const { locale, t } = useI18n();
   const {
     ready,
     startupError,
     profile,
     relaySettings,
     startupSettings,
+    languageSettings,
     peers,
     groups,
     groupMembersById,
@@ -126,6 +129,7 @@ export const Shell = () => {
     updateRelaySettings,
     forceRelayRediscovery,
     updateStartupSettings,
+    updateLanguageSettings,
     transfers,
     toasts,
     dismissToast,
@@ -184,8 +188,8 @@ export const Shell = () => {
       return (
         <div className="main-pane empty-chat-pane">
           <div className="empty-chat-card">
-            <Text weight="semibold" size={500}>Nenhuma conversa aberta</Text>
-            <Text size={300}>Selecione uma conversa, grupo ou anúncio na sidebar.</Text>
+            <Text weight="semibold" size={500}>{t('No conversation open')}</Text>
+            <Text size={300}>{t('Select a conversation, group, or announcement in the sidebar.')}</Text>
           </div>
         </div>
       );
@@ -408,7 +412,7 @@ export const Shell = () => {
             Não foi possível carregar o Lantern
           </Text>
           <Text size={300}>
-            {startupError || 'O perfil local ainda não está disponível.'}
+            {localizeRuntimeText(startupError || 'O perfil local ainda não está disponível.', locale)}
           </Text>
           <Text size={200} className="startup-error-help">
             A conexão com o Relay não deve bloquear a abertura do app. Tente recarregar o estado local.
@@ -502,12 +506,14 @@ export const Shell = () => {
         profile={profile}
         relaySettings={relaySettings}
         startupSettings={startupSettings}
+        languageSettings={languageSettings}
         onForceRelayRediscovery={forceRelayRediscovery}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
           await updateProfile(payload.profile);
           await updateRelaySettings(payload.relay);
           await updateStartupSettings(payload.startup);
+          await updateLanguageSettings(payload.languageMode);
           setSettingsOpen(false);
         }}
       />
@@ -519,7 +525,7 @@ export const Shell = () => {
             role="status"
             onClick={() => dismissToast(toast.id)}
           >
-            {toast.message}
+            {localizeRuntimeText(toast.message, locale)}
           </div>
         ))}
       </div>
