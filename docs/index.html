@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Lantern is a local-network desktop chat powered by LanternRelay for real-time messaging, groups, announcements, files, and presence.">
+  <meta name="theme-color" content="#080b12">
+  <meta property="og:title" content="Lantern — Local network chat, beautifully simple">
+  <meta property="og:description" content="A desktop chat for trusted local networks, powered by a self-hosted relay.">
+  <meta property="og:type" content="website">
+  <title>Lantern — Local network chat</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header>
+    <a class="brand" href="#top"><span class="logo">L</span><b>Lantern</b></a>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+    <nav id="nav"><a href="#features">Features</a><a href="#workflow">How it works</a><a href="#privacy">Privacy</a><a href="#install">Install</a><a class="pill" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases">Download</a></nav>
+  </header>
+
+  <main id="main">
+    <section id="top" class="hero section">
+      <div class="reveal">
+        <div class="eyebrow"><i></i> Built for your local network</div>
+        <h1>Team chat that stays <em>close to home.</em></h1>
+        <p class="lead">Lantern is a desktop messenger for trusted LANs. Run one LanternRelay, open the client on each computer, and get real-time conversations, groups, announcements, presence, reactions, and file sharing without creating user accounts.</p>
+        <div class="actions"><a class="button primary" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases">Get the latest release</a><a class="button secondary" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat">View on GitHub</a></div>
+        <div class="chips"><span>Electron + React</span><span>Self-hosted relay</span><span>MIT licensed</span></div>
+      </div>
+
+      <div class="window reveal" aria-label="Illustrated Lantern application preview">
+        <div class="titlebar"><i></i><i></i><i></i><b>Lantern</b></div>
+        <div class="app">
+          <aside>
+            <div class="profile"><span class="avatar gold">GL</span><div><b>Gabriel</b><small>Online</small></div></div>
+            <div class="search">Search conversations</div>
+            <small class="label">Messages</small>
+            <div class="contact active"><span class="avatar blue">TM</span><div><b>Team</b><small>Great — sending it now.</small></div><time>10:42</time></div>
+            <div class="contact"><span class="avatar violet">A</span><div><b>Announcements</b><small>Office update</small></div><mark>2</mark></div>
+            <div class="contact"><span class="avatar green">JS</span><div><b>Jordan Silva</b><small>Online</small></div></div>
+          </aside>
+          <div class="chat">
+            <div class="chathead"><div><b>Team</b><small>4 participants</small></div><span>⌕ &nbsp; ···</span></div>
+            <div class="messages">
+              <div class="bubble receive"><small>Jordan</small><p>The updated document is ready.</p><time>10:39</time></div>
+              <div class="bubble send"><p>Perfect. Could you share it here?</p><time>10:40 ✓✓</time></div>
+              <div class="file"><strong>DOC</strong><div><b>Project-notes.docx</b><small>248 KB</small></div><span>↓</span></div>
+              <div class="bubble receive"><small>Jordan</small><p>Great — sending it now.</p><time>10:42</time><mark>👍 2</mark></div>
+            </div>
+            <div class="compose"><span>＋</span><p>Write a message</p><span>☺</span><b>↑</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="trust"><p>Designed for office, lab, classroom, and home networks</p><div><span>Windows</span><span>macOS</span><span>Linux builds</span><span>LAN / Wi-Fi</span></div></div>
+
+    <section id="features" class="section narrow">
+      <div class="heading reveal"><div class="eyebrow">Everything your LAN needs</div><h2>Focused communication, without the cloud-shaped overhead.</h2><p>Lantern combines a native desktop experience with a single relay service that coordinates presence, delivery, and shared group state.</p></div>
+      <div class="grid features">
+        <article class="card reveal"><span>↔</span><h3>Direct and group chat</h3><p>Real-time one-to-one messaging plus groups with names, emoji, colors, descriptions, participants, owners, and administrators.</p></article>
+        <article class="card reveal"><span>◎</span><h3>Rich message controls</h3><p>Reply, react, forward, favorite, pin, search, edit recent sent messages, delete for yourself or everyone, and archive conversations.</p></article>
+        <article class="card reveal"><span>⇩</span><h3>Files and images</h3><p>Share attachments and large files. Group attachments use temporary relay caching for delivery and redownload.</p></article>
+        <article class="card reveal"><span>!</span><h3>Network-wide announcements</h3><p>Publish announcements, review reactions and read confirmations, with relay-side expiration after 24 hours.</p></article>
+        <article class="card reveal"><span>◉</span><h3>Presence and notifications</h3><p>Online status, unread indicators, native notifications, tray behavior, and optional launch at startup.</p></article>
+        <article class="card reveal"><span>GIF</span><h3>Relay-hosted stickers</h3><p>Serve validated GIF sticker collections from the relay, organized by folders and refreshed without restarting it.</p></article>
+        <article class="card reveal"><span>☾</span><h3>Do Not Disturb</h3><p>Silence notifications for 15 minutes, one hour, or until tomorrow.</p></article>
+        <article class="card reveal"><span>⇧</span><h3>Backup and export</h3><p>Back up and restore local data, and export conversations as TXT or HTML.</p></article>
+        <article class="card reveal"><span>▦</span><h3>Relay dashboard</h3><p>Inspect connected clients, uptime, and announcements. Add a token outside a trusted LAN.</p></article>
+      </div>
+    </section>
+
+    <section id="workflow" class="section workflow">
+      <div class="heading reveal"><div class="eyebrow">How it works</div><h2>One relay. Every conversation.</h2></div>
+      <ol>
+        <li class="reveal"><b>01</b><div><h3>Choose the relay machine</h3><p>Run one LanternRelay instance on a computer that stays reachable on the LAN. The default port is <code>43190</code>.</p></div></li>
+        <li class="reveal"><b>02</b><div><h3>Open Lantern on each desktop</h3><p>Each device keeps its own local profile and SQLite database. No account registration is required.</p></div></li>
+        <li class="reveal"><b>03</b><div><h3>Discover automatically</h3><p>Clients find the relay through mDNS, or you can enter the relay host and port manually in Settings.</p></div></li>
+        <li class="reveal"><b>04</b><div><h3>Chat across the LAN</h3><p>The relay coordinates presence, messages, groups, announcements, reactions, synchronization, and attachment delivery.</p></div></li>
+      </ol>
+    </section>
+
+    <section id="privacy" class="section">
+      <div class="privacy reveal">
+        <div class="heading"><div class="eyebrow">Security & privacy</div><h2>Local-first by architecture.</h2><p>Lantern is intended for trusted local networks. Profiles and conversation history are stored locally on client devices, while communication passes through the relay you operate.</p></div>
+        <div class="privacygrid">
+          <div><b>No user accounts</b><span>Identity is a local profile tied to each device.</span></div>
+          <div><b>No third-party sticker provider</b><span>GIF catalogs are served by your relay.</span></div>
+          <div><b>Configurable dashboard access</b><span>An optional token protects the dashboard on untrusted networks.</span></div>
+          <div><b>Clear deployment boundary</b><span>Open the relay port only where required and keep mDNS within the intended network.</span></div>
+        </div>
+        <p class="warning"><b>Important:</b> The current codebase does not claim end-to-end encryption. Use Lantern only on networks whose relay and infrastructure you trust.</p>
+      </div>
+    </section>
+
+    <section class="section narrow">
+      <div class="heading reveal"><div class="eyebrow">Product preview</div><h2>Designed to feel familiar from the first message.</h2><p>The panels below are clearly marked placeholders for additional official screenshots.</p></div>
+      <div class="shots">
+        <figure class="reveal mainshot"><div><span>Official screenshot slot</span><b>Main conversation view</b><small>Replace with a current capture in docs/assets/.</small></div><figcaption>Conversation list, message timeline, reactions, and attachments.</figcaption></figure>
+        <figure class="reveal"><div><span>Screenshot placeholder</span><b>Group details</b></div><figcaption>Participants, roles, identity, and permissions.</figcaption></figure>
+        <figure class="reveal"><div><span>Screenshot placeholder</span><b>Relay dashboard</b></div><figcaption>Connected clients, uptime, and announcements.</figcaption></figure>
+      </div>
+    </section>
+
+    <section class="section platforms">
+      <div class="heading reveal"><div class="eyebrow">Supported platforms</div><h2>Desktop clients and relay builds for major operating systems.</h2></div>
+      <div class="grid three">
+        <article class="platform reveal"><span>⊞</span><h3>Windows</h3><p>Client installer and standalone LanternRelay executable for x64 systems.</p></article>
+        <article class="platform reveal"><span>⌘</span><h3>macOS</h3><p>Universal client distribution and relay binaries for Apple silicon or Intel.</p></article>
+        <article class="platform reveal"><span>◧</span><h3>Linux</h3><p>Build scripts are included for client and relay. Published release availability may vary.</p></article>
+      </div>
+    </section>
+
+    <section id="install" class="section install">
+      <div class="reveal"><div class="eyebrow">Installation</div><h2>Download a release or build from source.</h2><p class="lead">Install the client on each workstation and run exactly one relay instance on the chosen server computer.</p><div class="actions"><a class="button primary" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases">Open Releases</a><a class="link" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat#readme">Full documentation →</a></div></div>
+      <div class="terminal reveal"><div><i></i><i></i><i></i><b>Build from source</b></div><pre><code><span># Node.js 22 LTS and npm 10+</span>
+git clone https://github.com/GabrielLascoskiFerraz/Lantern-Chat.git
+cd Lantern-Chat
+npm install
+
+<span># Client + local relay</span>
+npm run dev
+
+<span># Build for current OS</span>
+npm run build</code></pre></div>
+      <p class="network reveal"><b>Network setup:</b> Allow TCP port <code>43190</code> on the relay machine. Permit mDNS for discovery, or configure the relay IP and port manually.</p>
+    </section>
+
+    <section class="section cta reveal"><span class="logo big">L</span><h2>Light up your local network.</h2><p>Simple desktop messaging, owned and operated by the people using it.</p><div class="actions center"><a class="button primary" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases">Download Lantern</a><a class="button secondary" href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat">Explore the source</a></div></section>
+  </main>
+
+  <footer><div class="brand"><span class="logo">L</span><b>Lantern</b></div><p>Open-source local network chat. MIT License.</p><div><a href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat">Repository</a><a href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/releases">Releases</a><a href="https://github.com/GabrielLascoskiFerraz/Lantern-Chat/issues">Issues</a></div></footer>
+  <script src="./app.js" defer></script>
+</body>
+</html>
