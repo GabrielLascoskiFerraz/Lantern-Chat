@@ -12,15 +12,13 @@ import {
   Switch,
   Text
 } from '@fluentui/react-components';
-import { ipcClient, Profile, RelaySettings, StartupSettings } from '../api/ipcClient';
+import { ipcClient, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 
 interface SettingsModalProps {
   open: boolean;
   profile: Profile;
-  relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
-  onForceRelayRediscovery: () => Promise<void>;
   onClose: () => void;
   onSave: (payload: {
     profile: {
@@ -28,11 +26,6 @@ interface SettingsModalProps {
       avatarEmoji: string;
       avatarBg: string;
       statusMessage: string;
-    };
-    relay: {
-      automatic: boolean;
-      host?: string;
-      port?: number;
     };
     startup: {
       openAtLogin: boolean;
@@ -45,9 +38,7 @@ interface SettingsModalProps {
 export const SettingsModal = ({
   open,
   profile,
-  relaySettings,
   startupSettings,
-  onForceRelayRediscovery,
   onClose,
   onSave
 }: SettingsModalProps) => {
@@ -56,18 +47,11 @@ export const SettingsModal = ({
   const [avatarEmoji, setAvatarEmoji] = useState(profile.avatarEmoji);
   const [customEmoji, setCustomEmoji] = useState(profile.avatarEmoji);
   const [avatarBg, setAvatarBg] = useState(profile.avatarBg);
-  const [relayAutomatic, setRelayAutomatic] = useState(relaySettings?.automatic ?? true);
-  const [relayHost, setRelayHost] = useState(relaySettings?.host || '');
-  const [relayPortDraft, setRelayPortDraft] = useState(String(relaySettings?.port || 43190));
   const [openAtLogin, setOpenAtLogin] = useState(Boolean(startupSettings?.openAtLogin));
   const [downloadsDir, setDownloadsDir] = useState(startupSettings?.downloadsDir || '');
   const [doNotDisturbUntil, setDoNotDisturbUntil] = useState(
     Number(startupSettings?.doNotDisturbUntil || 0)
   );
-  const [backupBusy, setBackupBusy] = useState(false);
-  const [restoreBusy, setRestoreBusy] = useState(false);
-  const [rediscoverBusy, setRediscoverBusy] = useState(false);
-  const [backupFeedback, setBackupFeedback] = useState('');
   const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
   const emojiGroups = {
     rostos: [
@@ -130,16 +114,9 @@ export const SettingsModal = ({
     setCustomEmoji(profile.avatarEmoji);
     setAvatarBg(profile.avatarBg);
     setSelectedGroup('rostos');
-    setRelayAutomatic(relaySettings?.automatic ?? true);
-    setRelayHost(relaySettings?.host || '');
-    setRelayPortDraft(String(relaySettings?.port || 43190));
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
     setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
-    setBackupBusy(false);
-    setRestoreBusy(false);
-    setRediscoverBusy(false);
-    setBackupFeedback('');
   };
   const dialogSurfaceStyle = {
     width: '85vw',
@@ -151,15 +128,8 @@ export const SettingsModal = ({
   useEffect(() => {
     if (!open) return;
     resetDraftFromProps();
-  }, [open, profile, relaySettings, startupSettings]);
+  }, [open, profile, startupSettings]);
 
-  const parsedRelayPort = Number.parseInt(relayPortDraft, 10);
-  const relayPort =
-    Number.isFinite(parsedRelayPort) && parsedRelayPort > 0 && parsedRelayPort <= 65535
-      ? parsedRelayPort
-      : 43190;
-  const relayHostTrimmed = relayHost.trim();
-  const relayConfigValid = relayAutomatic || relayHostTrimmed.length > 0;
   const activeDoNotDisturbUntil =
     doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
   const doNotDisturbLabel = activeDoNotDisturbUntil
@@ -176,56 +146,6 @@ export const SettingsModal = ({
     tomorrow.setDate(tomorrow.getDate() + 1);
     tomorrow.setHours(8, 0, 0, 0);
     setDoNotDisturbUntil(tomorrow.getTime());
-  };
-
-  const handleCreateBackup = async (): Promise<void> => {
-    if (backupBusy || restoreBusy) return;
-    setBackupBusy(true);
-    setBackupFeedback('');
-    try {
-      const result = await ipcClient.createLocalBackup();
-      if (result.canceled) {
-        setBackupFeedback('Backup cancelado.');
-        return;
-      }
-      setBackupFeedback(`Backup criado em: ${result.backupPath || 'pasta selecionada'}`);
-    } catch (error) {
-      setBackupFeedback(
-        error instanceof Error ? error.message : 'Não foi possível criar o backup local.'
-      );
-    } finally {
-      setBackupBusy(false);
-    }
-  };
-
-  const handleRestoreBackup = async (): Promise<void> => {
-    if (backupBusy || restoreBusy) return;
-    setRestoreBusy(true);
-    setBackupFeedback('');
-    try {
-      const result = await ipcClient.restoreLocalBackup();
-      if (result.canceled) {
-        setBackupFeedback('Restauração cancelada.');
-        return;
-      }
-      setBackupFeedback('Restauração preparada. O aplicativo será reiniciado.');
-    } catch (error) {
-      setBackupFeedback(
-        error instanceof Error ? error.message : 'Não foi possível restaurar o backup.'
-      );
-    } finally {
-      setRestoreBusy(false);
-    }
-  };
-
-  const handleForceRediscovery = async (): Promise<void> => {
-    if (rediscoverBusy) return;
-    setRediscoverBusy(true);
-    try {
-      await onForceRelayRediscovery();
-    } finally {
-      setRediscoverBusy(false);
-    }
   };
 
   return (
@@ -346,50 +266,6 @@ export const SettingsModal = ({
                 </div>
               </Field>
 
-              <Field className="settings-field settings-field-relay" label="Conexão com Relay">
-                <div className="settings-relay-toggle-row">
-                  <Switch
-                    label="Automático"
-                    checked={relayAutomatic}
-                    onChange={(_, data) => setRelayAutomatic(Boolean(data.checked))}
-                  />
-                  <Text size={200} className={`relay-connection-badge ${relaySettings?.connected ? 'online' : 'offline'}`}>
-                    {relaySettings?.connected
-                      ? `Conectado${relaySettings.endpoint ? `: ${relaySettings.endpoint}` : ''}`
-                      : 'Desconectado'}
-                  </Text>
-                </div>
-                {!relayAutomatic && (
-                  <div className="settings-relay-manual-grid">
-                    <Input
-                      value={relayHost}
-                      onChange={(_, data) => setRelayHost(data.value)}
-                      placeholder="IP/host do Relay (ex.: 192.168.0.50)"
-                    />
-                    <Input
-                      value={relayPortDraft}
-                      onChange={(_, data) => setRelayPortDraft(data.value)}
-                      placeholder="Porta"
-                      type="number"
-                      min={1}
-                      max={65535}
-                    />
-                  </div>
-                )}
-                <div className="settings-relay-actions">
-                  <Button
-                    appearance="secondary"
-                    disabled={rediscoverBusy}
-                    onClick={() => void handleForceRediscovery()}
-                  >
-                    {rediscoverBusy ? 'Redetectando...' : 'Redetectar agora'}
-                  </Button>
-                </div>
-                <Text size={200} className="settings-relay-help">
-                  Automático usa descoberta na rede local. Manual força um Relay específico.
-                </Text>
-              </Field>
-
               <Field className="settings-field" label="Inicialização">
                 <div className="settings-relay-toggle-row">
                   <Switch
@@ -458,35 +334,6 @@ export const SettingsModal = ({
                 </Text>
               </Field>
 
-              <Field className="settings-field settings-field-backup" label="Backup e restauração local">
-                <div className="settings-backup-actions">
-                  <Button
-                    appearance="secondary"
-                    disabled={backupBusy || restoreBusy}
-                    onClick={() => void handleCreateBackup()}
-                  >
-                    {backupBusy ? 'Gerando backup...' : 'Criar backup'}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={backupBusy || restoreBusy}
-                    onClick={() => void handleRestoreBackup()}
-                  >
-                    {restoreBusy ? 'Preparando restauração...' : 'Restaurar backup'}
-                  </Button>
-                </div>
-                <Text size={200} className="settings-relay-help">
-                  O backup inclui histórico local (SQLite) e anexos do Lantern.
-                </Text>
-                <Text size={200} className="settings-relay-help">
-                  Ao restaurar, o aplicativo reinicia automaticamente para aplicar os dados.
-                </Text>
-                {backupFeedback && (
-                  <Text size={200} className="settings-backup-feedback">
-                    {backupFeedback}
-                  </Text>
-                )}
-              </Field>
             </section>
           </DialogContent>
           <DialogActions>
@@ -494,7 +341,6 @@ export const SettingsModal = ({
             <Button
               className="settings-save-btn"
               appearance="primary"
-              disabled={!relayConfigValid}
               onClick={() =>
                 void onSave({
                   profile: {
@@ -502,11 +348,6 @@ export const SettingsModal = ({
                     avatarEmoji: avatarEmoji.trim() || profile.avatarEmoji,
                     avatarBg: isHexColor.test(avatarBg.trim()) ? avatarBg.trim() : profile.avatarBg,
                     statusMessage: statusMessage.trim() || 'Disponível'
-                  },
-                  relay: {
-                    automatic: relayAutomatic,
-                    host: relayAutomatic ? '' : relayHostTrimmed,
-                    port: relayAutomatic ? 43190 : relayPort
                   },
                   startup: {
                     openAtLogin,

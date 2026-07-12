@@ -4,6 +4,8 @@ export interface Profile {
   avatarEmoji: string;
   avatarBg: string;
   statusMessage: string;
+  username?: string;
+  department?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -14,11 +16,39 @@ export interface Peer {
   avatarEmoji: string;
   avatarBg: string;
   statusMessage: string;
+  username?: string;
+  department?: string;
   address: string;
   port: number;
   appVersion: string;
   lastSeenAt: number;
   source: 'relay' | 'mdns' | 'udp' | 'manual' | 'cache';
+}
+
+export type ClientLocale = 'pt-BR' | 'en' | 'es';
+export type RelayConnectionMode = 'local-auto' | 'local-manual' | 'external-manual';
+export interface ClientRelayConfig {
+  mode: RelayConnectionMode;
+  host: string;
+  port: number;
+  secure: boolean;
+}
+export interface AuthenticatedUser {
+  userId: string;
+  username: string;
+  displayName: string;
+  department: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  statusMessage: string;
+  locale: ClientLocale;
+  role: 'admin' | 'user';
+}
+export interface ClientAuthState {
+  authenticated: boolean;
+  relay: ClientRelayConfig;
+  endpoint: string | null;
+  user: AuthenticatedUser | null;
 }
 
 export interface GroupInfo {
@@ -141,6 +171,7 @@ export interface StartupSettings {
 }
 
 export type AppEvent =
+  | { type: 'auth:changed'; state: ClientAuthState }
   | { type: 'peers:updated'; peers: Peer[] }
   | { type: 'groups:updated'; groups: GroupInfo[] }
   | { type: 'group:members'; groupId: string; members: GroupMember[] }
@@ -191,6 +222,11 @@ interface LanternApi {
     | 'win32'
     | 'cygwin'
     | 'netbsd';
+  getAuthState: () => Promise<ClientAuthState>;
+  discoverRelays: (port?: number) => Promise<Array<{ host: string; port: number; secure: boolean }>>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<ClientAuthState>;
+  register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) => Promise<ClientAuthState>;
+  logout: () => Promise<void>;
   getProfile: () => Promise<Profile>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<Profile>;
   getKnownPeers: () => Promise<Peer[]>;
@@ -301,8 +337,6 @@ interface LanternApi {
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
-  createLocalBackup: () => Promise<{ canceled: boolean; backupPath: string | null }>;
-  restoreLocalBackup: () => Promise<{ canceled: boolean; restartScheduled: boolean }>;
   openExternalUrl: (url: string) => Promise<void>;
   nativePaste: () => Promise<boolean>;
   getFilePreview: (filePath: string) => Promise<string | null>;
@@ -329,6 +363,13 @@ declare global {
 
 export const ipcClient = {
   getPlatform: () => window.lantern.getPlatform(),
+  getAuthState: () => window.lantern.getAuthState(),
+  discoverRelays: (port?: number) => window.lantern.discoverRelays(port),
+  login: (input: { relay: ClientRelayConfig; username: string; password: string }) =>
+    window.lantern.login(input),
+  register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) =>
+    window.lantern.register(input),
+  logout: () => window.lantern.logout(),
   getProfile: () => window.lantern.getProfile(),
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) =>
     window.lantern.updateProfile(input),
@@ -445,8 +486,6 @@ export const ipcClient = {
   pickDirectory: (defaultPath?: string) => window.lantern.pickDirectory(defaultPath),
   openFile: (filePath: string) => window.lantern.openFile(filePath),
   saveFileAs: (filePath: string, fileName?: string) => window.lantern.saveFileAs(filePath, fileName),
-  createLocalBackup: () => window.lantern.createLocalBackup(),
-  restoreLocalBackup: () => window.lantern.restoreLocalBackup(),
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   nativePaste: () => window.lantern.nativePaste(),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),

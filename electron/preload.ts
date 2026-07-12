@@ -1,10 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AppEvent, MessageReplyPayload } from './types';
+import { AppEvent, ClientRelayConfig, MessageReplyPayload } from './types';
 
 type EventCallback = (event: AppEvent) => void;
 
 const api = {
   getPlatform: () => process.platform,
+  getAuthState: () => ipcRenderer.invoke('lantern:getAuthState'),
+  discoverRelays: (port?: number) => ipcRenderer.invoke('lantern:discoverRelays', port),
+  login: (input: { relay: ClientRelayConfig; username: string; password: string }) =>
+    ipcRenderer.invoke('lantern:login', input),
+  register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) =>
+    ipcRenderer.invoke('lantern:register', input),
+  logout: () => ipcRenderer.invoke('lantern:logout'),
   getProfile: () => ipcRenderer.invoke('lantern:getProfile'),
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) =>
     ipcRenderer.invoke('lantern:updateProfile', input),
@@ -134,10 +141,6 @@ const api = {
   openFile: (filePath: string): Promise<void> => ipcRenderer.invoke('lantern:openFile', filePath),
   saveFileAs: (filePath: string, fileName?: string): Promise<void> =>
     ipcRenderer.invoke('lantern:saveFileAs', filePath, fileName),
-  createLocalBackup: (): Promise<{ canceled: boolean; backupPath: string | null }> =>
-    ipcRenderer.invoke('lantern:createLocalBackup'),
-  restoreLocalBackup: (): Promise<{ canceled: boolean; restartScheduled: boolean }> =>
-    ipcRenderer.invoke('lantern:restoreLocalBackup'),
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('lantern:openExternalUrl', url),
   nativePaste: (): Promise<boolean> => ipcRenderer.invoke('lantern:nativePaste'),
   getFilePreview: (filePath: string): Promise<string | null> =>

@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import {
   AnnouncementReadSummary,
   AnnouncementReactionSummary,
+  ClientAuthState,
+  ClientRelayConfig,
   GroupInfo,
   GroupMember,
   ipcClient,
@@ -32,6 +34,7 @@ interface UiToast {
 }
 
 interface LanternState {
+  authState: ClientAuthState | null;
   profile: Profile | null;
   relaySettings: RelaySettings | null;
   startupSettings: StartupSettings | null;
@@ -69,6 +72,9 @@ interface LanternState {
   setThemeMode: (mode: 'system' | 'light' | 'dark') => void;
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<void>;
+  register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<void>;
+  logout: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
   closeConversation: () => Promise<void>;
   loadOlderMessages: (conversationId: string, limit?: number) => Promise<number>;
@@ -334,6 +340,7 @@ const buildConversationIdsForPreview = (state: Pick<
 };
 
 export const useLanternStore = create<LanternState>((set, get) => ({
+  authState: null,
   profile: null,
   relaySettings: null,
   startupSettings: null,
@@ -387,6 +394,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   loadInitial: async () => {
     try {
       set({ startupError: null });
+      const authState = await ipcClient.getAuthState();
+      if (!authState.authenticated) {
+        set({ authState, profile: null, ready: true, loadingConversationId: null });
+        return;
+      }
       const [
         profile,
         relaySettings,
@@ -440,6 +452,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
 
     set({
+      authState,
       profile,
       relaySettings,
       startupSettings,
@@ -601,6 +614,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     };
 
     unsubscribeEvents = ipcClient.onEvent((event) => {
+      if (event.type === 'auth:changed') {
+        set({ authState: event.state });
+        return;
+      }
       if (event.type === 'relay:connection') {
         set((state) => {
           if (!state.relaySettings) {
@@ -1142,6 +1159,43 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           }
       }));
     }
+  },
+  login: async (input) => {
+    set({ ready: false, startupError: null });
+    try {
+      await ipcClient.login(input);
+      await get().loadInitial();
+    } catch (error) {
+      set({ ready: true });
+      throw error;
+    }
+  },
+  register: async (input) => {
+    set({ ready: false, startupError: null });
+    try {
+      await ipcClient.register(input);
+      await get().loadInitial();
+    } catch (error) {
+      set({ ready: true });
+      throw error;
+    }
+  },
+  logout: async () => {
+    await ipcClient.logout();
+    const authState = await ipcClient.getAuthState();
+    set({
+      authState,
+      profile: null,
+      peers: [],
+      groups: [],
+      onlinePeerIds: [],
+      messagesByConversation: {},
+      unreadByConversation: {},
+      conversationPreviewById: {},
+      selectedConversationId: ANNOUNCEMENTS_ID,
+      settingsOpen: false,
+      ready: true
+    });
   },
   selectConversation: async (conversationId) => {
     const preSelectState = get();

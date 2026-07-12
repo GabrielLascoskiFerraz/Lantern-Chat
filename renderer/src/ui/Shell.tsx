@@ -73,6 +73,7 @@ export const Shell = () => {
     onlinePeerIds,
     search,
     setSearch,
+    logout,
     selectedConversationId,
     selectConversation,
     closeConversation,
@@ -123,8 +124,6 @@ export const Shell = () => {
     settingsOpen,
     setSettingsOpen,
     updateProfile,
-    updateRelaySettings,
-    forceRelayRediscovery,
     updateStartupSettings,
     transfers,
     toasts,
@@ -450,6 +449,7 @@ export const Shell = () => {
         onDeleteGroup={deleteGroup}
         onCreateGroup={createGroup}
         onOpenSettings={() => setSettingsOpen(true)}
+        onLogout={logout}
         onQuickStatusChange={async (statusMessage) => {
           await updateProfile({
             displayName: profile.displayName,
@@ -500,13 +500,10 @@ export const Shell = () => {
       <SettingsModal
         open={settingsOpen}
         profile={profile}
-        relaySettings={relaySettings}
         startupSettings={startupSettings}
-        onForceRelayRediscovery={forceRelayRediscovery}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
           await updateProfile(payload.profile);
-          await updateRelaySettings(payload.relay);
           await updateStartupSettings(payload.startup);
           setSettingsOpen(false);
         }}

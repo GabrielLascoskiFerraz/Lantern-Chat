@@ -23,8 +23,39 @@ export interface Profile {
   avatarEmoji: string;
   avatarBg: string;
   statusMessage: string;
+  username?: string;
+  department?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export type ClientLocale = 'pt-BR' | 'en' | 'es';
+export type RelayConnectionMode = 'local-auto' | 'local-manual' | 'external-manual';
+
+export interface ClientRelayConfig {
+  mode: RelayConnectionMode;
+  host: string;
+  port: number;
+  secure: boolean;
+}
+
+export interface AuthenticatedUser {
+  userId: string;
+  username: string;
+  displayName: string;
+  department: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  statusMessage: string;
+  locale: ClientLocale;
+  role: 'admin' | 'user';
+}
+
+export interface ClientAuthState {
+  authenticated: boolean;
+  relay: ClientRelayConfig;
+  endpoint: string | null;
+  user: AuthenticatedUser | null;
 }
 
 export interface Peer {
@@ -33,6 +64,8 @@ export interface Peer {
   avatarEmoji: string;
   avatarBg: string;
   statusMessage: string;
+  username?: string;
+  department?: string;
   address: string;
   port: number;
   appVersion: string;
@@ -359,6 +392,7 @@ export interface AnnouncementReadDetail {
 }
 
 export type AppEvent =
+  | { type: 'auth:changed'; state: ClientAuthState }
   | { type: 'peers:updated'; peers: Peer[] }
   | { type: 'groups:updated'; groups: GroupInfo[] }
   | { type: 'group:members'; groupId: string; members: GroupMember[] }

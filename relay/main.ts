@@ -2,11 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { createSocket, type RemoteInfo, type Socket as UdpSocket } from 'node:dgram';
 import fs from 'node:fs';
 import { createServer, IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, Server as HttpsServer } from 'node:https';
+import { TLSSocket } from 'node:tls';
 import path from 'node:path';
 import BonjourService, { Service } from 'bonjour-service';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { GroupStore } from './groupStore';
 import { RelayGroupEvent, RelayGroupFileChunk } from './groupTypes';
+import { CentralStore } from './centralStore';
+import { RetentionPolicy } from './centralTypes';
 
 const RELAY_VERSION = '1.0.0';
 const RELAY_MDNS_TYPE = 'lanternrelay';
@@ -19,6 +23,8 @@ const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
 const SEND_CALLBACK_TIMEOUT_MS = 10_000;
 const resolveRelayDataDir = (): string => {
+  const configured = String(process.env.LANTERN_RELAY_DATA_DIR || '').trim();
+  if (configured) return path.resolve(configured);
   if ((process as NodeJS.Process & { pkg?: unknown }).pkg) {
     return path.dirname(process.execPath);
   }
@@ -57,6 +63,9 @@ interface RelayConfig {
   peerTimeoutMs: number;
   presenceBroadcastIntervalMs: number;
   maxPayloadBytes: number;
+  tlsCertFile: string | null;
+  tlsKeyFile: string | null;
+  externalMode: boolean;
 }
 
 interface RelayPeerInfo {
@@ -66,6 +75,8 @@ interface RelayPeerInfo {
   avatarBg: string;
   statusMessage: string;
   appVersion: string;
+  department: string;
+  username: string;
   connectedAt: number;
   lastSeenAt: number;
 }
@@ -82,6 +93,7 @@ interface RelayHelloPayload {
   avatarBg: string;
   statusMessage: string;
   appVersion: string;
+  sessionToken: string;
 }
 
 interface RelayTransportFrame {
@@ -115,6 +127,7 @@ interface RelaySession {
   // Downloads stay ordered, but must not block this peer's commands while a
   // potentially large group attachment is being streamed.
   groupFileDownloadQueue: Promise<void>;
+  authToken: string | null;
 }
 
 interface RelayAnnouncementState {
@@ -176,6 +189,14 @@ interface RelayDashboardSnapshot {
   announcementStoreFile: string;
   announcementsActive: number;
   stickersAvailable: number;
+  centralStore: {
+    users: number;
+    sessions: number;
+    frames: number;
+    attachments: number;
+    attachmentBytes: number;
+    retentionPolicy: RetentionPolicy;
+  };
   transferMetrics: {
     uploadAttempts: number;
     uploadsCompleted: number;
@@ -214,7 +235,10 @@ const DEFAULT_CONFIG: RelayConfig = {
   pingIntervalMs: 5_000,
   peerTimeoutMs: 30_000,
   presenceBroadcastIntervalMs: 12_000,
-  maxPayloadBytes: 8 * 1024 * 1024
+  maxPayloadBytes: 8 * 1024 * 1024,
+  tlsCertFile: null,
+  tlsKeyFile: null,
+  externalMode: false
 };
 
 const asRecord = (value: unknown): JsonRecord | null => {
@@ -244,8 +268,9 @@ const normalizeHelloPayload = (value: unknown): RelayHelloPayload | null => {
   const avatarBg = asString(record.avatarBg);
   const statusMessage = asString(record.statusMessage) || 'Disponível';
   const appVersion = asString(record.appVersion) || 'unknown';
+  const sessionToken = asString(record.sessionToken);
 
-  if (!deviceId || !displayName || !avatarEmoji || !avatarBg) {
+  if (!deviceId || !displayName || !avatarEmoji || !avatarBg || !sessionToken) {
     return null;
   }
 
@@ -255,7 +280,8 @@ const normalizeHelloPayload = (value: unknown): RelayHelloPayload | null => {
     avatarEmoji,
     avatarBg,
     statusMessage,
-    appVersion
+    appVersion,
+    sessionToken
   };
 };
 
@@ -799,6 +825,30 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       text-align: center;
     }
 
+    .admin-section { margin-top: 16px; padding: 18px; }
+    .admin-grid { display: grid; grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr); gap: 14px; }
+    .admin-panel { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.2); }
+    .admin-panel h3 { margin: 0 0 12px; font-size: 15px; }
+    .admin-form { display: grid; gap: 9px; }
+    .admin-form.two { grid-template-columns: 1fr 1fr; }
+    .admin-form input, .admin-form select {
+      width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 12px;
+      padding: 0 11px; color: var(--text); background: var(--surface-strong); font: inherit;
+    }
+    .admin-form button, .admin-action {
+      min-height: 38px; border: 1px solid var(--line); border-radius: 12px; padding: 0 13px;
+      color: #fff; background: var(--accent); font: inherit; font-weight: 750; cursor: pointer;
+    }
+    .admin-action.secondary { color: var(--text); background: var(--surface-strong); }
+    .admin-action.danger { color: #fff; background: #c43f3f; }
+    .admin-users { display: grid; gap: 9px; max-height: 430px; overflow: auto; }
+    .admin-user { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--line); border-radius: 15px; }
+    .admin-user-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .admin-user-fields { display: grid; grid-template-columns: minmax(120px,1fr) minmax(140px,1fr) repeat(3,auto); gap: 8px; }
+    .admin-user-fields input { min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 10px; padding: 0 9px; background: var(--surface-strong); color: var(--text); }
+    .admin-feedback { min-height: 18px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .hidden { display: none !important; }
+
     @media (max-width: 880px) {
       .hero {
         align-items: flex-start;
@@ -806,7 +856,10 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       }
 
       .grid,
-      .content {
+      .content,
+      .admin-grid,
+      .admin-form.two,
+      .admin-user-fields {
         grid-template-columns: 1fr;
       }
     }
@@ -887,6 +940,59 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         </div>
         <div id="announcements-list" class="list"></div>
       </article>
+    </section>
+
+    <section class="card admin-section" aria-label="Administração do Relay">
+      <div class="section-header" style="padding:0 0 14px">
+        <div>
+          <h2 class="section-title">Administração</h2>
+          <div class="section-meta">Disponível somente no localhost deste servidor</div>
+        </div>
+        <span id="admin-state" class="section-meta">Autenticação necessária</span>
+      </div>
+
+      <div id="admin-login" class="admin-panel">
+        <form id="admin-login-form" class="admin-form two">
+          <input id="admin-username" autocomplete="username" placeholder="Usuário administrador" value="admin" required>
+          <input id="admin-password" type="password" autocomplete="current-password" placeholder="Senha" required>
+          <button type="submit">Entrar na administração</button>
+        </form>
+      </div>
+
+      <div id="admin-content" class="admin-grid hidden">
+        <div style="display:grid;gap:14px;align-content:start">
+          <div class="admin-panel">
+            <h3>Criar conta</h3>
+            <form id="admin-create-user" class="admin-form">
+              <input id="new-username" placeholder="Usuário (ex.: maria.silva)" required>
+              <input id="new-display-name" placeholder="Nome de exibição" required>
+              <input id="new-department" placeholder="Setor (ex.: Financeiro)">
+              <input id="new-password" type="password" minlength="10" placeholder="Senha inicial (mín. 10 caracteres)" required>
+              <select id="new-locale">
+                <option value="pt-BR">Português</option><option value="en">English</option><option value="es">Español</option>
+              </select>
+              <button type="submit">Criar usuário</button>
+            </form>
+          </div>
+          <div class="admin-panel">
+            <h3>Retenção de mensagens</h3>
+            <form id="retention-form" class="admin-form">
+              <select id="retention-policy">
+                <option value="forever">Manter para sempre</option>
+                <option value="1_month">Excluir após 1 mês</option>
+                <option value="6_months">Excluir após 6 meses</option>
+                <option value="1_year">Excluir após 1 ano</option>
+              </select>
+              <button type="submit">Salvar política</button>
+            </form>
+          </div>
+        </div>
+        <div class="admin-panel">
+          <h3>Contas de usuário</h3>
+          <div id="admin-users" class="admin-users"></div>
+        </div>
+      </div>
+      <div id="admin-feedback" class="admin-feedback"></div>
     </section>
 
     <footer id="store-path" class="footer"></footer>
@@ -1046,6 +1152,130 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       ? '/api/status?token=' + encodeURIComponent(dashboardToken)
       : '/api/status';
 
+    let adminCsrf = sessionStorage.getItem('lantern.admin.csrf') || '';
+    const adminFetch = async (url, options = {}) => {
+      const headers = { 'content-type': 'application/json', ...(options.headers || {}) };
+      if (adminCsrf && options.method && options.method !== 'GET') headers['x-lantern-csrf'] = adminCsrf;
+      return fetch(url, { ...options, headers, credentials: 'same-origin', cache: 'no-store' });
+    };
+
+    const setAdminFeedback = (message) => setText('admin-feedback', message || '');
+
+    const renderAdminUsers = (users) => {
+      const list = $('admin-users');
+      if (!list) return;
+      clear(list);
+      for (const user of users) {
+        const item = make('div', 'admin-user');
+        const head = make('div', 'admin-user-head');
+        const identity = make('div');
+        identity.appendChild(make('div', 'name', (user.avatarEmoji || '🙂') + ' ' + user.displayName));
+        identity.appendChild(make('div', 'status', '@' + user.username + ' · ' + (user.role === 'admin' ? 'Administrador' : 'Usuário')));
+        head.appendChild(identity);
+        head.appendChild(make('span', 'chip', user.disabled ? 'Desativado' : 'Ativo'));
+
+        const fields = make('div', 'admin-user-fields');
+        const department = make('input');
+        department.value = user.department || '';
+        department.placeholder = 'Setor';
+        const password = make('input');
+        password.type = 'password';
+        password.placeholder = 'Nova senha';
+        const save = make('button', 'admin-action secondary', 'Salvar setor');
+        save.addEventListener('click', async () => {
+          const response = await adminFetch('/api/admin/users/' + encodeURIComponent(user.userId), {
+            method: 'PATCH', body: JSON.stringify({ department: department.value })
+          });
+          setAdminFeedback(response.ok ? 'Setor atualizado.' : 'Não foi possível atualizar o setor.');
+          if (response.ok) void loadAdmin();
+        });
+        const reset = make('button', 'admin-action secondary', 'Redefinir senha');
+        reset.addEventListener('click', async () => {
+          if (password.value.length < 10) { setAdminFeedback('A nova senha deve ter ao menos 10 caracteres.'); return; }
+          const response = await adminFetch('/api/admin/users/' + encodeURIComponent(user.userId) + '/password', {
+            method: 'POST', body: JSON.stringify({ password: password.value })
+          });
+          password.value = '';
+          setAdminFeedback(response.ok ? 'Senha redefinida; sessões anteriores foram encerradas.' : 'Falha ao redefinir senha.');
+        });
+        const remove = make('button', 'admin-action danger', 'Excluir');
+        remove.disabled = user.role === 'admin';
+        remove.addEventListener('click', async () => {
+          if (!confirm('Excluir permanentemente a conta de ' + user.displayName + '?')) return;
+          const response = await adminFetch('/api/admin/users/' + encodeURIComponent(user.userId), { method: 'DELETE' });
+          setAdminFeedback(response.ok ? 'Conta excluída.' : 'Não foi possível excluir a conta.');
+          if (response.ok) void loadAdmin();
+        });
+        fields.appendChild(department);
+        fields.appendChild(password);
+        fields.appendChild(save);
+        fields.appendChild(reset);
+        fields.appendChild(remove);
+        item.appendChild(head);
+        item.appendChild(fields);
+        list.appendChild(item);
+      }
+    };
+
+    const loadAdmin = async () => {
+      const usersResponse = await adminFetch('/api/admin/users', { method: 'GET' });
+      if (!usersResponse.ok) {
+        $('admin-login')?.classList.remove('hidden');
+        $('admin-content')?.classList.add('hidden');
+        setText('admin-state', 'Autenticação necessária');
+        return;
+      }
+      const usersBody = await usersResponse.json();
+      const retentionResponse = await adminFetch('/api/admin/retention', { method: 'GET' });
+      const retentionBody = retentionResponse.ok ? await retentionResponse.json() : { policy: 'forever' };
+      $('admin-login')?.classList.add('hidden');
+      $('admin-content')?.classList.remove('hidden');
+      setText('admin-state', 'Sessão administrativa ativa');
+      const retention = $('retention-policy');
+      if (retention) retention.value = retentionBody.policy || 'forever';
+      renderAdminUsers(usersBody.users || []);
+    };
+
+    $('admin-login-form')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const response = await fetch('/api/admin/login', {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: $('admin-username').value, password: $('admin-password').value })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setAdminFeedback(body.message || 'Credenciais inválidas.'); return; }
+      adminCsrf = body.csrfToken || '';
+      sessionStorage.setItem('lantern.admin.csrf', adminCsrf);
+      $('admin-password').value = '';
+      setAdminFeedback('Acesso administrativo liberado.');
+      void loadAdmin();
+    });
+
+    $('admin-create-user')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const response = await adminFetch('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: $('new-username').value,
+          displayName: $('new-display-name').value,
+          department: $('new-department').value,
+          password: $('new-password').value,
+          locale: $('new-locale').value
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      setAdminFeedback(response.ok ? 'Usuário criado.' : (body.message || 'Falha ao criar usuário.'));
+      if (response.ok) { event.target.reset(); void loadAdmin(); }
+    });
+
+    $('retention-form')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const response = await adminFetch('/api/admin/retention', {
+        method: 'PUT', body: JSON.stringify({ policy: $('retention-policy').value })
+      });
+      setAdminFeedback(response.ok ? 'Política de retenção atualizada.' : 'Falha ao atualizar retenção.');
+    });
+
     const load = async () => {
       try {
         const response = await fetch(dashboardApiUrl, { cache: 'no-store' });
@@ -1060,6 +1290,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     };
 
     void load();
+    void loadAdmin();
     setInterval(load, 3000);
   </script>
 </body>
@@ -1067,10 +1298,11 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
 class LanternRelay {
   private readonly config: RelayConfig;
-  private readonly httpServer: HttpServer;
+  private readonly httpServer: HttpServer | HttpsServer;
   private readonly wsServer: WebSocketServer;
   private readonly startedAt = Date.now();
   private readonly groupStore: GroupStore;
+  private readonly centralStore: CentralStore;
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
   private readonly sessionsByDeviceId = new Map<string, RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
@@ -1083,6 +1315,7 @@ class LanternRelay {
   private published: Service | null = null;
   private udpSocket: UdpSocket | null = null;
   private presenceRevision = 0;
+  private readonly loginAttemptsByAddress = new Map<string, { failures: number; blockedUntil: number }>();
   private readonly transferMetrics = {
     uploadAttempts: 0,
     uploadsCompleted: 0,
@@ -1101,12 +1334,46 @@ class LanternRelay {
 
   constructor(config: RelayConfig) {
     this.config = config;
-    this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
+    const tlsEnabled = Boolean(config.tlsCertFile && config.tlsKeyFile);
+    if (config.externalMode && !tlsEnabled) {
+      throw new Error(
+        'LANTERN_RELAY_EXTERNAL=1 exige LANTERN_RELAY_TLS_CERT e LANTERN_RELAY_TLS_KEY.'
+      );
+    }
+    const requestHandler = (req: IncomingMessage, res: ServerResponse) => {
+      void this.handleHttpRequest(req, res).catch((error) => {
+        logRelay('http_handler_failed', {
+          path: req.url || '/',
+          message: error instanceof Error ? error.message : String(error)
+        }, { level: 'warn' });
+        if (!res.headersSent) {
+          this.writeJson(res, req.method || 'GET', { ok: false, error: 'INTERNAL_ERROR' }, 500);
+        } else {
+          res.end();
+        }
+      });
+    };
+    this.httpServer = tlsEnabled
+      ? createHttpsServer(
+          {
+            cert: fs.readFileSync(config.tlsCertFile!),
+            key: fs.readFileSync(config.tlsKeyFile!),
+            minVersion: 'TLSv1.2'
+          },
+          requestHandler
+        )
+      : createServer(requestHandler);
     this.wsServer = new WebSocketServer({
       server: this.httpServer,
       maxPayload: this.config.maxPayloadBytes
     });
-    this.groupStore = new GroupStore(GROUP_STORE_FILE, GROUP_ATTACHMENTS_DIR, logRelay);
+    this.centralStore = new CentralStore(path.join(resolveRelayDataDir(), 'central'), logRelay);
+    this.groupStore = new GroupStore(
+      GROUP_STORE_FILE,
+      GROUP_ATTACHMENTS_DIR,
+      logRelay,
+      this.centralStore.getEncryption()
+    );
     this.wsServer.on('connection', (socket) => this.handleConnection(socket));
     this.ensureStickerDirectory();
     this.loadAnnouncementStore();
@@ -1129,13 +1396,16 @@ class LanternRelay {
     this.startGroupSweepLoop();
 
     logRelay('started', {
-      endpoint: `ws://${this.config.host}:${this.config.port}`,
+      endpoint: `${this.config.tlsCertFile ? 'wss' : 'ws'}://${this.config.host}:${this.config.port}`,
       version: RELAY_VERSION,
+      mode: this.config.externalMode ? 'external' : 'local',
+      tls: Boolean(this.config.tlsCertFile),
       announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
       groupStoreFile: this.groupStore.getStoreFile(),
       groupAttachmentsDir: this.groupStore.getAttachmentsDir(),
       stickersDir: RELAY_STICKERS_DIR,
-      stickersAvailable: this.listStickerCatalog().length
+      stickersAvailable: this.listStickerCatalog().length,
+      centralStore: this.centralStore.getStats()
     });
   }
 
@@ -1163,6 +1433,7 @@ class LanternRelay {
       this.groupSweepTimer = null;
     }
     this.groupStore.close();
+    this.centralStore.close();
     if (this.udpSocket) {
       try {
         this.udpSocket.close();
@@ -1291,6 +1562,7 @@ class LanternRelay {
         type: RELAY_DISCOVERY_UDP_RESPONSE,
         version: RELAY_VERSION,
         port: this.config.port,
+        secure: Boolean(this.config.tlsCertFile),
         serverTime: Date.now()
       })
     );
@@ -1350,16 +1622,20 @@ class LanternRelay {
       if (result.expired || result.completed || result.staleUploads) {
         logRelay('group_attachment_sweep', result, { level: 'info' });
       }
+      const centralResult = this.centralStore.sweepRetention();
+      if (centralResult.framesDeleted || centralResult.attachmentsDeleted) {
+        logRelay('central_retention_sweep', centralResult, { level: 'info' });
+      }
     }, GROUP_SWEEP_INTERVAL_MS);
     this.groupSweepTimer.unref?.();
   }
 
-  private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+  private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method || 'GET';
-    if (method !== 'GET' && method !== 'HEAD') {
+    if (!['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) {
       res.writeHead(405, {
         'content-type': 'application/json; charset=utf-8',
-        allow: 'GET, HEAD'
+        allow: 'GET, HEAD, POST, PATCH, PUT, DELETE'
       });
       res.end(JSON.stringify({ ok: false, error: 'METHOD_NOT_ALLOWED' }));
       return;
@@ -1386,6 +1662,224 @@ class LanternRelay {
         peersOnline: this.sessionsByDeviceId.size
       });
       return;
+    }
+
+    if (requestUrl.pathname === '/api/client/login' && method === 'POST') {
+      if (!this.isClientTransportAllowed(req)) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'TLS_REQUIRED',
+          message: 'Conexões externas exigem HTTPS/WSS.'
+        }, 426);
+        return;
+      }
+      const remoteAddress = this.normalizeRemoteAddress(req.socket.remoteAddress || 'unknown');
+      const attempt = this.loginAttemptsByAddress.get(remoteAddress);
+      if (attempt && attempt.blockedUntil > Date.now()) {
+        this.writeJson(res, method, { ok: false, error: 'TOO_MANY_ATTEMPTS' }, 429);
+        return;
+      }
+      const body = await this.readJsonBody(req);
+      try {
+        const auth = this.centralStore.login(
+          asString(body.username) || '',
+          typeof body.password === 'string' ? body.password : '',
+          asString(body.deviceId) || randomUUID()
+        );
+        this.loginAttemptsByAddress.delete(remoteAddress);
+        this.writeJson(res, method, { ok: true, ...auth });
+      } catch (error) {
+        const failures = (attempt?.failures || 0) + 1;
+        this.loginAttemptsByAddress.set(remoteAddress, {
+          failures,
+          blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0
+        });
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'INVALID_CREDENTIALS',
+          message: error instanceof Error ? error.message : String(error)
+        }, 401);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/register' && method === 'POST') {
+      if (!this.isClientTransportAllowed(req)) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'TLS_REQUIRED',
+          message: 'Conexões externas exigem HTTPS/WSS.'
+        }, 426);
+        return;
+      }
+      const remoteAddress = this.normalizeRemoteAddress(req.socket.remoteAddress || 'unknown');
+      const attempt = this.loginAttemptsByAddress.get(`register:${remoteAddress}`);
+      if (attempt && attempt.blockedUntil > Date.now()) {
+        this.writeJson(res, method, { ok: false, error: 'TOO_MANY_ATTEMPTS' }, 429);
+        return;
+      }
+      const body = await this.readJsonBody(req);
+      try {
+        const user = this.centralStore.createUser({
+          username: asString(body.username) || '',
+          displayName: asString(body.displayName) || asString(body.username) || '',
+          password: typeof body.password === 'string' ? body.password : '',
+          role: 'user',
+          locale: body.locale === 'en' || body.locale === 'es' ? body.locale : 'pt-BR'
+        });
+        this.loginAttemptsByAddress.delete(`register:${remoteAddress}`);
+        logRelay('client_account_created', {
+          userId: user.userId,
+          username: user.username,
+          remoteAddress
+        });
+        this.writeJson(res, method, { ok: true, user }, 201);
+      } catch (error) {
+        const failures = (attempt?.failures || 0) + 1;
+        this.loginAttemptsByAddress.set(`register:${remoteAddress}`, {
+          failures,
+          blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0
+        });
+        const message = error instanceof Error ? error.message : String(error);
+        const conflict = /UNIQUE|já existe|constraint/i.test(message);
+        this.writeJson(res, method, {
+          ok: false,
+          error: conflict ? 'USERNAME_TAKEN' : 'INVALID_ACCOUNT',
+          message: conflict ? 'Este nome de usuário já está em uso.' : message
+        }, conflict ? 409 : 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/session' && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const user = token ? this.centralStore.authenticate(token) : null;
+      this.writeJson(res, method, user ? { ok: true, user } : { ok: false, error: 'UNAUTHORIZED' }, user ? 200 : 401);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/logout' && method === 'POST') {
+      const token = this.getBearerToken(req);
+      if (token) this.centralStore.logout(token);
+      this.writeJson(res, method, { ok: true });
+      return;
+    }
+
+    const isDashboardRoute =
+      requestUrl.pathname === '/' ||
+      requestUrl.pathname.startsWith('/dashboard') ||
+      requestUrl.pathname.startsWith('/api/status') ||
+      requestUrl.pathname.startsWith('/api/admin/');
+    if (isDashboardRoute && !this.isLoopbackRequest(req)) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'LOCALHOST_ONLY',
+        message: 'A administração do Relay só pode ser acessada no próprio servidor.'
+      }, 403);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/admin/login' && method === 'POST') {
+      const body = await this.readJsonBody(req);
+      try {
+        const session = this.centralStore.createAdminSession(
+          asString(body.username) || '',
+          typeof body.password === 'string' ? body.password : ''
+        );
+        res.setHeader(
+          'set-cookie',
+          `lantern_admin=${encodeURIComponent(session.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${this.isTlsRequest(req) ? '; Secure' : ''}`
+        );
+        this.writeJson(res, method, { ok: true, csrfToken: session.csrfToken });
+      } catch (error) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'UNAUTHORIZED',
+          message: error instanceof Error ? error.message : String(error)
+        }, 401);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith('/api/admin/')) {
+      const adminToken = this.getCookie(req, 'lantern_admin');
+      const needsCsrf = method !== 'GET' && method !== 'HEAD';
+      const csrfToken = needsCsrf ? String(req.headers['x-lantern-csrf'] || '') : undefined;
+      if (!this.centralStore.validateAdminSession(adminToken, csrfToken)) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/admin/users' && method === 'GET') {
+        this.writeJson(res, method, { ok: true, users: this.centralStore.listUsers() });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/users' && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        try {
+          const user = this.centralStore.createUser({
+            username: asString(body.username) || '',
+            displayName: asString(body.displayName) || '',
+            department: asString(body.department) || '',
+            password: typeof body.password === 'string' ? body.password : '',
+            role: body.role === 'admin' ? 'admin' : 'user',
+            locale: body.locale === 'en' || body.locale === 'es' ? body.locale : 'pt-BR'
+          });
+          this.writeJson(res, method, { ok: true, user }, 201);
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'INVALID_USER', message: error instanceof Error ? error.message : String(error) }, 400);
+        }
+        return;
+      }
+      const userMatch = requestUrl.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+      if (userMatch && method === 'PATCH') {
+        const body = await this.readJsonBody(req);
+        try {
+          const user = this.centralStore.updateUser(decodeURIComponent(userMatch[1]), {
+            displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
+            department: typeof body.department === 'string' ? body.department : undefined,
+            disabled: typeof body.disabled === 'boolean' ? body.disabled : undefined,
+            locale: body.locale === 'en' || body.locale === 'es' || body.locale === 'pt-BR' ? body.locale : undefined
+          });
+          this.writeJson(res, method, { ok: true, user });
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+        }
+        return;
+      }
+      if (userMatch && method === 'DELETE') {
+        try {
+          this.centralStore.deleteUser(decodeURIComponent(userMatch[1]));
+          this.writeJson(res, method, { ok: true });
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'DELETE_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+        }
+        return;
+      }
+      const resetMatch = requestUrl.pathname.match(/^\/api\/admin\/users\/([^/]+)\/password$/);
+      if (resetMatch && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        try {
+          this.centralStore.resetPassword(
+            decodeURIComponent(resetMatch[1]),
+            typeof body.password === 'string' ? body.password : ''
+          );
+          this.writeJson(res, method, { ok: true });
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'RESET_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+        }
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/retention' && method === 'GET') {
+        this.writeJson(res, method, { ok: true, policy: this.centralStore.getRetentionPolicy() });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/retention' && method === 'PUT') {
+        const body = await this.readJsonBody(req);
+        const policy = this.centralStore.setRetentionPolicy(body.policy as RetentionPolicy);
+        this.writeJson(res, method, { ok: true, policy });
+        return;
+      }
     }
 
     if (requestUrl.pathname === '/api/status') {
@@ -1448,8 +1942,60 @@ class LanternRelay {
     }, 404);
   }
 
+  private async readJsonBody(req: IncomingMessage): Promise<JsonRecord> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const raw of req) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      size += chunk.length;
+      if (size > 1024 * 1024) throw new Error('Corpo da requisição excede 1 MB.');
+      chunks.push(chunk);
+    }
+    if (chunks.length === 0) return {};
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    return asRecord(parsed) || {};
+  }
+
+  private normalizeRemoteAddress(value: string): string {
+    return value.replace(/^::ffff:/, '');
+  }
+
+  private isLoopbackRequest(req: IncomingMessage): boolean {
+    const address = this.normalizeRemoteAddress(req.socket.remoteAddress || '');
+    return address === '127.0.0.1' || address === '::1' || address === 'localhost';
+  }
+
+  private isTlsRequest(req: IncomingMessage): boolean {
+    return Boolean((req.socket as TLSSocket).encrypted);
+  }
+
+  private isClientTransportAllowed(req: IncomingMessage): boolean {
+    if (this.isTlsRequest(req) || this.isLoopbackRequest(req)) return true;
+    const address = this.normalizeRemoteAddress(req.socket.remoteAddress || '');
+    const privateAddress =
+      /^10\./.test(address) ||
+      /^192\.168\./.test(address) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
+      /^fd[0-9a-f]{2}:/i.test(address) ||
+      /^fe80:/i.test(address);
+    return !this.config.externalMode && privateAddress;
+  }
+
+  private getBearerToken(req: IncomingMessage): string {
+    const authorization = String(req.headers.authorization || '');
+    return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  }
+
+  private getCookie(req: IncomingMessage, name: string): string {
+    const cookies = String(req.headers.cookie || '').split(';');
+    for (const cookie of cookies) {
+      const [key, ...rest] = cookie.trim().split('=');
+      if (key === name) return decodeURIComponent(rest.join('='));
+    }
+    return '';
+  }
+
   private isDashboardAuthorized(requestUrl: URL): boolean {
-    // Sem token configurado, o comportamento continua apropriado ao uso local atual.
     return !RELAY_DASHBOARD_TOKEN || requestUrl.searchParams.get('token') === RELAY_DASHBOARD_TOKEN;
   }
 
@@ -1665,6 +2211,7 @@ class LanternRelay {
       announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
       announcementsActive: announcements.length,
       stickersAvailable: this.listStickerCatalog().length,
+      centralStore: this.centralStore.getStats(),
       transferMetrics: {
         uploadAttempts: this.transferMetrics.uploadAttempts,
         uploadsCompleted: this.transferMetrics.uploadsCompleted,
@@ -1758,7 +2305,8 @@ class LanternRelay {
       lastSeenAt: Date.now(),
       isAlive: true,
       messageQueue: Promise.resolve(),
-      groupFileDownloadQueue: Promise.resolve()
+      groupFileDownloadQueue: Promise.resolve(),
+      authToken: null
     };
 
     this.sessionsBySocket.set(socket, session);
@@ -1906,11 +2454,131 @@ class LanternRelay {
       case 'relay:group:file:received':
         this.handleGroupFileReceived(session, envelope.payload);
         return;
+      case 'relay:attachment:init':
+        this.handleCentralAttachmentInit(session, envelope.payload);
+        return;
+      case 'relay:attachment:chunk':
+        this.handleCentralAttachmentChunk(session, envelope.payload);
+        return;
+      case 'relay:attachment:complete':
+        this.handleCentralAttachmentComplete(session, envelope.payload);
+        return;
+      case 'relay:attachment:request':
+        this.handleCentralAttachmentRequest(session, envelope.payload);
+        return;
       case 'relay:send':
         await this.handleRelaySend(session, envelope.payload);
         return;
       default:
         this.sendError(session, 'UNKNOWN_TYPE', `Tipo não suportado: ${envelope.type}`);
+    }
+  }
+
+  private handleCentralAttachmentInit(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Autenticação necessária.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    try {
+      const result = this.centralStore.initAttachment({
+        attachmentId: asString(record?.attachmentId) || '',
+        messageId: asString(record?.messageId) || '',
+        ownerUserId: session.peer.deviceId,
+        conversationId: asString(record?.conversationId) || '',
+        fileName: asString(record?.fileName) || 'arquivo',
+        mimeType: asString(record?.mimeType) || 'application/octet-stream',
+        size: Math.max(0, Math.trunc(asFiniteNumber(record?.size) || 0)),
+        sha256: asString(record?.sha256) || ''
+      });
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:ack',
+        payload: { requestId, action: 'init', ...result }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:error',
+        payload: { requestId, message: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+
+  private handleCentralAttachmentChunk(session: RelaySession, payload: unknown): void {
+    if (!session.peer) return;
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    try {
+      const attachmentId = asString(record?.attachmentId) || '';
+      const index = Math.trunc(asFiniteNumber(record?.index) || 0);
+      const data = Buffer.from(typeof record?.dataBase64 === 'string' ? record.dataBase64 : '', 'base64');
+      this.centralStore.appendAttachmentChunk(attachmentId, session.peer.deviceId, index, data);
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:ack',
+        payload: { requestId, action: 'chunk', attachmentId, index }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:error',
+        payload: { requestId, message: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+
+  private handleCentralAttachmentComplete(session: RelaySession, payload: unknown): void {
+    if (!session.peer) return;
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    try {
+      const attachmentId = asString(record?.attachmentId) || '';
+      this.centralStore.completeAttachment(attachmentId, session.peer.deviceId);
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:ack',
+        payload: { requestId, action: 'complete', attachmentId }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:error',
+        payload: { requestId, message: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+
+  private handleCentralAttachmentRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) return;
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId) || randomUUID();
+    const attachmentId = asString(record?.attachmentId) || '';
+    const startIndex = Math.max(0, Math.trunc(asFiniteNumber(record?.startIndex) || 0));
+    try {
+      const metadata = this.centralStore.getAttachmentMetadata(attachmentId, session.peer.deviceId);
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:start',
+        payload: { requestId, ...metadata, startIndex }
+      });
+      for (let index = startIndex; index < metadata.totalChunks; index += 1) {
+        this.sendEnvelope(session.socket, {
+          type: 'relay:attachment:data',
+          payload: {
+            requestId,
+            attachmentId,
+            index,
+            total: metadata.totalChunks,
+            dataBase64: this.centralStore
+              .readAttachmentChunk(attachmentId, session.peer.deviceId, index)
+              .toString('base64')
+          }
+        });
+      }
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:download:complete',
+        payload: { requestId, attachmentId }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:attachment:error',
+        payload: { requestId, message: error instanceof Error ? error.message : String(error) }
+      });
     }
   }
 
@@ -1921,7 +2589,20 @@ class LanternRelay {
       return;
     }
 
-    const existing = this.sessionsByDeviceId.get(hello.deviceId);
+    const account = this.centralStore.authenticate(hello.sessionToken);
+    if (!account) {
+      this.sendError(session, 'AUTH_REQUIRED', 'Sessão inválida ou expirada.');
+      try {
+        session.socket.close(4001, 'authentication required');
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    session.authToken = hello.sessionToken;
+    const canonicalDeviceId = account.userId;
+
+    const existing = this.sessionsByDeviceId.get(canonicalDeviceId);
     if (existing && existing !== session) {
       this.sendEnvelope(existing.socket, {
         type: 'relay:error',
@@ -1935,18 +2616,56 @@ class LanternRelay {
 
     const now = Date.now();
     session.peer = {
-      ...hello,
+      deviceId: canonicalDeviceId,
+      username: account.username,
+      displayName: account.displayName,
+      department: account.department,
+      avatarEmoji: account.avatarEmoji,
+      avatarBg: account.avatarBg,
+      statusMessage: account.statusMessage,
+      appVersion: hello.appVersion,
       connectedAt: session.peer?.connectedAt || now,
       lastSeenAt: now
     };
     session.lastSeenAt = now;
-    this.sessionsByDeviceId.set(hello.deviceId, session);
+    this.sessionsByDeviceId.set(canonicalDeviceId, session);
 
     this.sendEnvelope(session.socket, {
       type: 'relay:hello:ok',
       payload: {
         sessionId: session.sessionId,
-        serverTime: now
+        serverTime: now,
+        user: account
+      }
+    });
+    this.sendEnvelope(session.socket, {
+      type: 'relay:history:snapshot',
+      payload: {
+        serverTime: now,
+        frames: this.centralStore.listFramesForUser(canonicalDeviceId, 0, 5000).map((frame) => ({
+          type: frame.type,
+          messageId: frame.messageId,
+          from: frame.senderUserId,
+          to: frame.targetUserId,
+          createdAt: frame.createdAt,
+          payload: frame.payload
+        }))
+      }
+    });
+    this.sendEnvelope(session.socket, {
+      type: 'relay:directory',
+      payload: {
+        users: this.centralStore.listUsers()
+          .filter((user) => !user.disabled && user.userId !== canonicalDeviceId)
+          .map((user) => ({
+            deviceId: user.userId,
+            username: user.username,
+            displayName: user.displayName,
+            department: user.department,
+            avatarEmoji: user.avatarEmoji,
+            avatarBg: user.avatarBg,
+            statusMessage: user.statusMessage
+          }))
       }
     });
 
@@ -1960,8 +2679,10 @@ class LanternRelay {
       peer: this.clonePeerWithLiveSeen(session.peer)
     }, 'peer_online');
     logRelay('peer_online', {
-      deviceId: hello.deviceId,
-      displayName: hello.displayName,
+      deviceId: canonicalDeviceId,
+      username: account.username,
+      displayName: account.displayName,
+      department: account.department,
       totalOnline: this.sessionsByDeviceId.size
     });
   }
@@ -1972,18 +2693,21 @@ class LanternRelay {
       return;
     }
 
-    const normalized = normalizeHelloPayload({
-      ...session.peer,
-      ...(asRecord(payload) || {})
+    const record = asRecord(payload) || {};
+    const account = this.centralStore.updateUser(session.peer.deviceId, {
+      displayName: asString(record.displayName) || session.peer.displayName,
+      avatarEmoji: asString(record.avatarEmoji) || session.peer.avatarEmoji,
+      avatarBg: asString(record.avatarBg) || session.peer.avatarBg,
+      statusMessage: asString(record.statusMessage) || ''
     });
-    if (!normalized) {
-      this.sendError(session, 'INVALID_PROFILE', 'Payload relay:updateProfile inválido.');
-      return;
-    }
 
     session.peer = {
       ...session.peer,
-      ...normalized,
+      displayName: account.displayName,
+      department: account.department,
+      avatarEmoji: account.avatarEmoji,
+      avatarBg: account.avatarBg,
+      statusMessage: account.statusMessage,
       lastSeenAt: Date.now()
     };
     this.sessionsByDeviceId.set(session.peer.deviceId, session);
@@ -2532,6 +3256,22 @@ class LanternRelay {
       return;
     }
 
+    if (frame.type !== 'typing' && frame.type !== 'file:chunk' && frame.type !== 'file:complete') {
+      const conversationId =
+        frame.to === null
+          ? 'announcements'
+          : `dm:${[frame.from, frame.to].sort((left, right) => left.localeCompare(right)).join(':')}`;
+      this.centralStore.saveFrame({
+        messageId: frame.messageId,
+        type: frame.type,
+        senderUserId: frame.from,
+        targetUserId: frame.to,
+        conversationId,
+        createdAt: frame.createdAt,
+        payload: frame.payload
+      });
+    }
+
     let outboundFrame = frame;
     if (frame.type === 'announce') {
       this.trackAnnouncement(frame);
@@ -3029,7 +3769,7 @@ class LanternRelay {
         }))
       };
       const tmpFile = `${ANNOUNCEMENT_STORE_FILE}.tmp`;
-      fs.writeFileSync(tmpFile, JSON.stringify(payload));
+      fs.writeFileSync(tmpFile, this.centralStore.protectJson(payload));
       fs.renameSync(tmpFile, ANNOUNCEMENT_STORE_FILE);
     } catch (error) {
       logRelay(
@@ -3050,7 +3790,7 @@ class LanternRelay {
       }
 
       const raw = fs.readFileSync(ANNOUNCEMENT_STORE_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as { announcements?: unknown[] } | null;
+      const parsed = this.centralStore.unprotectJson<{ announcements?: unknown[] } | null>(raw);
       const list = Array.isArray(parsed?.announcements) ? parsed!.announcements : [];
       let loaded = 0;
 
@@ -3340,7 +4080,10 @@ const config: RelayConfig = {
     process.env.LANTERN_RELAY_PRESENCE_BROADCAST_INTERVAL_MS,
     DEFAULT_CONFIG.presenceBroadcastIntervalMs
   ),
-  maxPayloadBytes: parseInteger(process.env.LANTERN_RELAY_MAX_PAYLOAD_BYTES, DEFAULT_CONFIG.maxPayloadBytes)
+  maxPayloadBytes: parseInteger(process.env.LANTERN_RELAY_MAX_PAYLOAD_BYTES, DEFAULT_CONFIG.maxPayloadBytes),
+  tlsCertFile: asString(process.env.LANTERN_RELAY_TLS_CERT),
+  tlsKeyFile: asString(process.env.LANTERN_RELAY_TLS_KEY),
+  externalMode: process.env.LANTERN_RELAY_EXTERNAL === '1'
 };
 
 const relay = new LanternRelay(config);

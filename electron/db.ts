@@ -87,8 +87,46 @@ export class DbService {
     this.db.close();
   }
 
-  async backupDatabaseTo(destinationFile: string): Promise<void> {
-    await this.db.backup(destinationFile);
+  resetCacheForAuthenticatedProfile(profile: Profile): void {
+    const clear = this.db.transaction(() => {
+      this.db.exec(`
+        DELETE FROM message_reactions;
+        DELETE FROM pending_message_reactions;
+        DELETE FROM message_favorites;
+        DELETE FROM hidden_messages;
+        DELETE FROM announcement_reads;
+        DELETE FROM group_attachment_downloads;
+        DELETE FROM group_attachment_uploads;
+        DELETE FROM group_pinned_messages;
+        DELETE FROM group_events_applied;
+        DELETE FROM group_members;
+        DELETE FROM groups;
+        DELETE FROM messages;
+        DELETE FROM conversations;
+        DELETE FROM peers_cache;
+        DELETE FROM pending_peer_operations;
+        DELETE FROM profile;
+      `);
+      this.db.prepare(`
+        INSERT INTO profile(deviceId, displayName, avatarEmoji, avatarBg, statusMessage, createdAt, updatedAt)
+        VALUES (@deviceId, @displayName, @avatarEmoji, @avatarBg, @statusMessage, @createdAt, @updatedAt)
+      `).run(profile);
+      this.ensureAnnouncementsConversation();
+    });
+    clear();
+  }
+
+  clearCachedUserData(): void {
+    const placeholder: Profile = {
+      deviceId: randomUUID(),
+      displayName: 'Lantern',
+      avatarEmoji: '🙂',
+      avatarBg: '#147ad6',
+      statusMessage: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    this.resetCacheForAuthenticatedProfile(placeholder);
   }
 
   getProfile(): Profile {

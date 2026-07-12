@@ -35,6 +35,7 @@ import {
   MailUnread20Regular,
   PeopleTeam20Regular,
   Add20Regular
+  ,SignOut20Regular
 } from '@fluentui/react-icons';
 import { GroupInfo, GroupMember, Peer, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
@@ -71,6 +72,7 @@ interface SidebarProps {
     memberDeviceIds: string[];
   }) => Promise<void>;
   onOpenSettings: () => void;
+  onLogout: () => Promise<void>;
   onQuickStatusChange: (statusMessage: string) => Promise<void>;
   startupSettings: StartupSettings | null;
   onDoNotDisturbUntilChange: (value: number) => Promise<void>;
@@ -120,6 +122,7 @@ export const Sidebar = ({
   onDeleteGroup,
   onCreateGroup,
   onOpenSettings,
+  onLogout,
   onQuickStatusChange,
   startupSettings,
   onDoNotDisturbUntilChange,
@@ -560,7 +563,10 @@ export const Sidebar = ({
             <span className={`presence-dot ${isOnline ? 'online' : 'offline'}`} />
           </div>
           <div className="conversation-text">
-            <Text weight="semibold">{peer.displayName}</Text>
+            <div className="conversation-name-row">
+              <Text weight="semibold">{peer.displayName}</Text>
+              {peer.department && <span className="department-tag">{peer.department}</span>}
+            </div>
             <div className="conversation-submeta">
               <Caption1 className="conversation-status-line">
                 <span className={`conversation-status-pill ${isOnline ? 'online' : 'offline'}`}>
@@ -751,6 +757,7 @@ export const Sidebar = ({
             )}
           </div>
           <Button appearance="subtle" icon={<Settings20Regular />} onClick={onOpenSettings} />
+          <Button appearance="subtle" icon={<SignOut20Regular />} aria-label="Sair da conta" title="Sair da conta" onClick={() => void onLogout()} />
           <Button
             appearance={themeMode === 'system' ? 'primary' : 'subtle'}
             icon={<Desktop20Regular />}

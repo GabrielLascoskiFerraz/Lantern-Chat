@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { app, BrowserWindow, dialog, Menu } from 'electron';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
   APP_ID,
@@ -13,17 +12,20 @@ import {
 import { DbService } from './db';
 import { FileTransferService } from './fileTransfer';
 import { registerIpc } from './ipc';
-import { runMigrations } from './migrations';
 import { NotificationService } from './notifications';
 import { RelayClient, RelayEndpointSettings, RelayPeerSnapshot } from './relayClient';
 import { MessageService } from './services/MessageService';
 import { PresenceService } from './services/PresenceService';
 import { SyncService } from './services/SyncService';
 import { TrayController } from './tray';
+import { AuthService } from './authService';
 import {
   AckPayload,
   AnnouncementPayload,
   AppEvent,
+  AuthenticatedUser,
+  ClientAuthState,
+  ClientRelayConfig,
   ChatTextPayload,
   ClearConversationPayload,
   DeletePayload,
@@ -53,6 +55,8 @@ class LanternApp {
   private mainWindow: BrowserWindow | null = null;
   private quitting = false;
   private db!: DbService;
+  private authService!: AuthService;
+  private authState!: ClientAuthState;
   private profile!: Profile;
   private relay: RelayClient | null = null;
   private relaySettings: RelayEndpointSettings = {
@@ -104,241 +108,6 @@ class LanternApp {
   private readonly directFileRequestAtByMessageId = new Map<string, number>();
   private readonly directFileRequestInFlight = new Set<string>();
   private readonly directFileRequestMinIntervalMs = 5_000;
-
-  private formatBackupTimestamp(value: number): string {
-    const date = new Date(value);
-    const pad = (num: number) => String(num).padStart(2, '0');
-    return [
-      date.getFullYear(),
-      pad(date.getMonth() + 1),
-      pad(date.getDate()),
-      '-',
-      pad(date.getHours()),
-      pad(date.getMinutes()),
-      pad(date.getSeconds())
-    ].join('');
-  }
-
-  private async copyDirectoryRecursive(source: string, target: string): Promise<void> {
-    await fs.promises.mkdir(path.dirname(target), { recursive: true });
-    await fs.promises.cp(source, target, {
-      recursive: true,
-      force: true,
-      errorOnExist: false
-    });
-  }
-
-  private async applyPendingRestoreIfExists(): Promise<void> {
-    const userDataDir = app.getPath('userData');
-    const stagingRoot = path.join(userDataDir, 'restore-pending');
-    const markerPath = path.join(stagingRoot, 'restore.json');
-
-    if (!fs.existsSync(markerPath)) {
-      return;
-    }
-
-    try {
-      const markerRaw = await fs.promises.readFile(markerPath, 'utf8');
-      const marker = JSON.parse(markerRaw) as {
-        targetAttachmentsDir?: string;
-        currentProfile?: Profile;
-        currentRelaySettings?: RelayEndpointSettings;
-      };
-      const stagedDbDir = path.join(stagingRoot, 'db');
-      const stagedDbFile = path.join(stagedDbDir, 'lantern.db');
-      if (!fs.existsSync(stagedDbFile)) {
-        throw new Error('Backup pendente sem banco de dados válido.');
-      }
-
-      await fs.promises.mkdir(userDataDir, { recursive: true });
-      const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
-      for (const fileName of dbFileNames) {
-        const targetPath = path.join(userDataDir, fileName);
-        await fs.promises.rm(targetPath, { force: true }).catch(() => undefined);
-        const stagedPath = path.join(stagedDbDir, fileName);
-        if (!fs.existsSync(stagedPath)) {
-          continue;
-        }
-        await fs.promises.copyFile(stagedPath, targetPath);
-      }
-
-      const restoredDbPath = path.join(userDataDir, 'lantern.db');
-      if (fs.existsSync(restoredDbPath)) {
-        this.sanitizeRestoredDatabase(restoredDbPath, marker);
-      }
-
-      const stagedAttachmentsDir = path.join(stagingRoot, 'attachments');
-      const targetAttachmentsDir = (marker.targetAttachmentsDir || '').trim();
-      if (targetAttachmentsDir && fs.existsSync(stagedAttachmentsDir)) {
-        const targetResolved = path.resolve(targetAttachmentsDir);
-        await fs.promises.rm(targetResolved, { recursive: true, force: true });
-        await this.copyDirectoryRecursive(stagedAttachmentsDir, targetResolved);
-      }
-    } catch (error) {
-      console.error(
-        '[Lantern] Falha ao aplicar restauração pendente:',
-        error instanceof Error ? error.message : String(error)
-      );
-    } finally {
-      await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
-    }
-  }
-
-  private sanitizeRestoredDatabase(
-    dbPath: string,
-    marker: {
-      targetAttachmentsDir?: string;
-      currentProfile?: Profile;
-      currentRelaySettings?: RelayEndpointSettings;
-    }
-  ): void {
-    const currentProfile = marker.currentProfile;
-    const currentRelaySettings = marker.currentRelaySettings;
-    const targetAttachmentsDir = (marker.targetAttachmentsDir || '').trim();
-    const db = new Database(dbPath);
-
-    try {
-      runMigrations(db);
-      const restoredProfile = db
-        .prepare(
-          `SELECT deviceId, displayName, avatarEmoji, avatarBg, statusMessage, createdAt, updatedAt
-           FROM profile
-           LIMIT 1`
-        )
-        .get() as Profile | undefined;
-
-      if (currentProfile?.deviceId && restoredProfile?.deviceId) {
-        const currentDeviceId = currentProfile.deviceId.trim();
-        const restoredDeviceId = restoredProfile.deviceId.trim();
-        if (currentDeviceId && restoredDeviceId && currentDeviceId !== restoredDeviceId) {
-          const removeConversationIds = (conversationIds: string[]) => {
-            const uniqueIds = Array.from(
-              new Set(conversationIds.map((value) => value.trim()).filter(Boolean))
-            );
-            if (uniqueIds.length === 0) return;
-
-            const placeholders = uniqueIds.map(() => '?').join(', ');
-            db.prepare(
-              `DELETE FROM message_reactions
-               WHERE messageId IN (
-                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
-               )`
-            ).run(...uniqueIds);
-            db.prepare(
-              `DELETE FROM pending_message_reactions
-               WHERE messageId IN (
-                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
-               )`
-            ).run(...uniqueIds);
-            db.prepare(
-              `DELETE FROM message_favorites
-               WHERE messageId IN (
-                 SELECT messageId FROM messages WHERE conversationId IN (${placeholders})
-               )`
-            ).run(...uniqueIds);
-            db.prepare(`DELETE FROM messages WHERE conversationId IN (${placeholders})`).run(...uniqueIds);
-            db.prepare(`DELETE FROM conversations WHERE id IN (${placeholders})`).run(...uniqueIds);
-          };
-
-          const tx = db.transaction(() => {
-            const selfConversationRows = db
-              .prepare(
-                `SELECT id
-                 FROM conversations
-                 WHERE kind = 'dm'
-                   AND (
-                     peerDeviceId IN (?, ?)
-                     OR id IN (?, ?)
-                   )`
-              )
-              .all(
-                currentDeviceId,
-                restoredDeviceId,
-                `dm:${currentDeviceId}`,
-                `dm:${restoredDeviceId}`
-              ) as Array<{ id: string }>;
-            removeConversationIds(selfConversationRows.map((row) => row.id));
-
-            db.prepare(
-              `UPDATE profile
-               SET deviceId = ?,
-                   updatedAt = ?
-               WHERE deviceId = ?`
-            ).run(currentDeviceId, Date.now(), restoredDeviceId);
-
-            db.prepare(
-              `UPDATE messages
-               SET senderDeviceId = CASE WHEN senderDeviceId = ? THEN ? ELSE senderDeviceId END,
-                   receiverDeviceId = CASE WHEN receiverDeviceId = ? THEN ? ELSE receiverDeviceId END`
-            ).run(restoredDeviceId, currentDeviceId, restoredDeviceId, currentDeviceId);
-
-            db.prepare(
-              `UPDATE message_reactions
-               SET reactorDeviceId = ?
-               WHERE reactorDeviceId = ?`
-            ).run(currentDeviceId, restoredDeviceId);
-
-            db.prepare(
-              `UPDATE pending_message_reactions
-               SET reactorDeviceId = ?
-               WHERE reactorDeviceId = ?`
-            ).run(currentDeviceId, restoredDeviceId);
-
-            db.prepare(
-              `DELETE FROM peers_cache
-               WHERE deviceId IN (?, ?)`
-            ).run(restoredDeviceId, currentDeviceId);
-
-            db.prepare(`DELETE FROM app_settings WHERE key = 'pending.peerOps'`).run();
-            db.prepare('DELETE FROM pending_peer_operations').run();
-          });
-          tx();
-        } else {
-          db.prepare(
-            `DELETE FROM peers_cache
-             WHERE deviceId = ?`
-          ).run(currentDeviceId);
-        }
-      }
-
-      if (targetAttachmentsDir) {
-        db.prepare(
-          `INSERT INTO app_settings(key, value)
-           VALUES ('attachments.dir', ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-        ).run(path.resolve(targetAttachmentsDir));
-      }
-
-      if (currentRelaySettings) {
-        if (currentRelaySettings.automatic) {
-          db.prepare(`DELETE FROM app_settings WHERE key IN ('relay.host', 'relay.port')`).run();
-          db.prepare(
-            `INSERT INTO app_settings(key, value)
-             VALUES ('relay.mode', 'auto')
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-          ).run();
-        } else {
-          db.prepare(
-            `INSERT INTO app_settings(key, value)
-             VALUES ('relay.mode', 'manual')
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-          ).run();
-          db.prepare(
-            `INSERT INTO app_settings(key, value)
-             VALUES ('relay.host', ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-          ).run(currentRelaySettings.host || '');
-          db.prepare(
-            `INSERT INTO app_settings(key, value)
-             VALUES ('relay.port', ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-          ).run(String(currentRelaySettings.port || 43190));
-        }
-      }
-    } finally {
-      db.close();
-    }
-  }
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -410,154 +179,64 @@ class LanternApp {
     await fs.promises.copyFile(sourcePath, destination);
   }
 
-  private async createLocalBackup(): Promise<{
-    canceled: boolean;
-    backupPath: string | null;
-  }> {
-    const picker = this.mainWindow
-      ? await dialog.showOpenDialog(this.mainWindow, {
-          title: 'Escolher pasta para salvar backup',
-          defaultPath: app.getPath('documents'),
-          properties: ['openDirectory', 'createDirectory']
-        })
-      : await dialog.showOpenDialog({
-          title: 'Escolher pasta para salvar backup',
-          defaultPath: app.getPath('documents'),
-          properties: ['openDirectory', 'createDirectory']
-        });
-
-    if (picker.canceled || picker.filePaths.length === 0) {
-      return { canceled: true, backupPath: null };
-    }
-
-    const targetParent = path.resolve(picker.filePaths[0]);
-    const stamp = this.formatBackupTimestamp(Date.now());
-    const backupRoot = path.join(targetParent, `LanternBackup-${stamp}`);
-    const backupDbDir = path.join(backupRoot, 'db');
-    const backupAttachmentsDir = path.join(backupRoot, 'attachments');
-    const userDataDir = app.getPath('userData');
-    const sourceDbPath = path.join(userDataDir, 'lantern.db');
-
-    if (!fs.existsSync(sourceDbPath)) {
-      throw new Error('Banco de dados local não encontrado para backup.');
-    }
-
-    await fs.promises.mkdir(backupDbDir, { recursive: true });
-    await this.db.backupDatabaseTo(path.join(backupDbDir, 'lantern.db'));
-
-    const attachmentsDir = this.getConfiguredAttachmentsDir();
-    let copiedAttachments = false;
-    if (attachmentsDir && fs.existsSync(attachmentsDir)) {
-      const stat = await fs.promises.stat(attachmentsDir).catch(() => null);
-      if (stat?.isDirectory()) {
-        await this.copyDirectoryRecursive(attachmentsDir, backupAttachmentsDir);
-        copiedAttachments = true;
-      }
-    }
-
-    const manifest = {
-      app: 'Lantern',
-      version: app.getVersion(),
-      createdAt: Date.now(),
-      profileDeviceId: this.profile.deviceId,
-      profileName: this.profile.displayName,
-      includesAttachments: copiedAttachments
+  private profileFromAccount(user: AuthenticatedUser): Profile {
+    const now = Date.now();
+    return {
+      deviceId: user.userId,
+      username: user.username,
+      department: user.department,
+      displayName: user.displayName,
+      avatarEmoji: user.avatarEmoji || '🙂',
+      avatarBg: user.avatarBg || '#147ad6',
+      statusMessage: user.statusMessage || 'Disponível',
+      createdAt: now,
+      updatedAt: now
     };
-    await fs.promises.writeFile(
-      path.join(backupRoot, 'manifest.json'),
-      JSON.stringify(manifest, null, 2),
-      'utf8'
-    );
-
-    return { canceled: false, backupPath: backupRoot };
   }
 
-  private async restoreLocalBackup(): Promise<{
-    canceled: boolean;
-    restartScheduled: boolean;
-  }> {
-    const picker = this.mainWindow
-      ? await dialog.showOpenDialog(this.mainWindow, {
-          title: 'Selecionar pasta do backup',
-          defaultPath: app.getPath('documents'),
-          properties: ['openDirectory']
-        })
-      : await dialog.showOpenDialog({
-          title: 'Selecionar pasta do backup',
-          defaultPath: app.getPath('documents'),
-          properties: ['openDirectory']
-        });
+  private async login(input: {
+    relay: ClientRelayConfig;
+    username: string;
+    password: string;
+  }): Promise<ClientAuthState> {
+    const state = await this.authService.login(input);
+    return this.applyAuthenticatedState(state);
+  }
 
-    if (picker.canceled || picker.filePaths.length === 0) {
-      return { canceled: true, restartScheduled: false };
+  private async applyAuthenticatedState(state: ClientAuthState): Promise<ClientAuthState> {
+    if (!state.user || !state.endpoint || !this.authService.getToken()) {
+      throw new Error('O Relay não retornou uma sessão válida.');
     }
+    const authenticatedProfile = this.profileFromAccount(state.user);
+    this.db.resetCacheForAuthenticatedProfile(authenticatedProfile);
+    Object.assign(this.profile, authenticatedProfile);
+    this.authState = state;
+    this.relay?.stop();
+    this.relay?.setAuthenticatedSession(this.profile, this.authService.getToken()!);
+    this.relay?.setDirectRelayEndpoint(state.endpoint);
+    await this.relay?.start();
+    this.emitEvent({ type: 'auth:changed', state });
+    return state;
+  }
 
-    const backupRoot = path.resolve(picker.filePaths[0]);
-    const backupDbDir = path.join(backupRoot, 'db');
-    const backupDbFile = path.join(backupDbDir, 'lantern.db');
-    if (!fs.existsSync(backupDbFile)) {
-      throw new Error(
-        'Backup inválido: arquivo db/lantern.db não encontrado na pasta selecionada.'
-      );
-    }
-
-    const userDataDir = app.getPath('userData');
-    const stagingRoot = path.join(userDataDir, 'restore-pending');
-    const stagingDbDir = path.join(stagingRoot, 'db');
-    const stagingAttachmentsDir = path.join(stagingRoot, 'attachments');
-    await fs.promises.rm(stagingRoot, { recursive: true, force: true });
-    await fs.promises.mkdir(stagingDbDir, { recursive: true });
-
-    const dbFileNames = ['lantern.db', 'lantern.db-wal', 'lantern.db-shm'] as const;
-    for (const fileName of dbFileNames) {
-      const sourcePath = path.join(backupDbDir, fileName);
-      if (!fs.existsSync(sourcePath)) {
-        continue;
-      }
-      await fs.promises.copyFile(sourcePath, path.join(stagingDbDir, fileName));
-    }
-
-    const backupAttachmentsDir = path.join(backupRoot, 'attachments');
-    const targetAttachmentsDir = this.getConfiguredAttachmentsDir();
-    if (fs.existsSync(backupAttachmentsDir)) {
-      const stat = await fs.promises.stat(backupAttachmentsDir).catch(() => null);
-      if (stat?.isDirectory()) {
-        await this.copyDirectoryRecursive(backupAttachmentsDir, stagingAttachmentsDir);
-      }
-    }
-
-    await fs.promises.writeFile(
-      path.join(stagingRoot, 'restore.json'),
-      JSON.stringify(
-        {
-          createdAt: Date.now(),
-          sourceBackupPath: backupRoot,
-          targetAttachmentsDir,
-          currentProfile: this.profile,
-          currentRelaySettings: this.relaySettings
-        },
-        null,
-        2
-      ),
-      'utf8'
-    );
-
-    this.emitEvent({
-      type: 'ui:toast',
-      level: 'info',
-      message: 'Restauração preparada. O Lantern será reiniciado para aplicar o backup.'
-    });
-
-    setTimeout(() => {
-      app.relaunch();
-      app.exit(0);
-    }, 220);
-
-    return { canceled: false, restartScheduled: true };
+  private async logout(): Promise<void> {
+    this.relay?.stop();
+    await this.authService.logout();
+    this.authState = this.authService.getState();
+    this.db.clearCachedUserData();
+    this.peersById.clear();
+    this.knownOnlinePeerIds.clear();
+    this.presence.clearOnlinePeers();
+    await fs.promises
+      .rm(this.getConfiguredAttachmentsDir(), { recursive: true, force: true })
+      .catch(() => undefined);
+    await fs.promises.mkdir(this.getConfiguredAttachmentsDir(), { recursive: true });
+    this.emitEvent({ type: 'peers:updated', peers: [] });
+    this.emitEvent({ type: 'auth:changed', state: this.authState });
   }
 
   async start(): Promise<void> {
-    app.setName('Lantern');
+    app.setName('Lantern Central');
     app.setAppUserModelId(APP_ID);
     const appIconPath = this.resolveAppIconPath();
     if (process.platform === 'darwin' && appIconPath) {
@@ -568,9 +247,21 @@ class LanternApp {
       }
     }
 
-    await this.applyPendingRestoreIfExists();
     this.db = new DbService(app.getPath('userData'));
-    this.profile = this.db.getProfile();
+    this.authService = new AuthService(app.getPath('userData'));
+    this.authState = await this.authService.restore();
+    const cachedProfile = this.db.getProfile();
+    if (this.authState.user) {
+      const authenticatedProfile = this.profileFromAccount(this.authState.user);
+      if (cachedProfile.deviceId !== authenticatedProfile.deviceId) {
+        this.db.resetCacheForAuthenticatedProfile(authenticatedProfile);
+      } else {
+        this.db.updateProfile(authenticatedProfile);
+      }
+      this.profile = { ...authenticatedProfile };
+    } else {
+      this.profile = cachedProfile;
+    }
     this.relaySettings = this.db.getRelaySettings();
     this.presence = new PresenceService();
     this.syncService = new SyncService(this.db, this.profile);
@@ -584,6 +275,11 @@ class LanternApp {
       onFrame: (frame) => {
         this.enqueueIncomingFrame(frame);
       },
+      onHistorySnapshot: (frames) => {
+        void this.applyCanonicalHistorySnapshot(frames).catch((error) => {
+          console.error('[Lantern][Relay] falha ao aplicar histórico canônico:', error);
+        });
+      },
       onPresence: (peers) => {
         try {
           this.handleRelayPresence(peers);
@@ -593,6 +289,20 @@ class LanternApp {
             error instanceof Error ? error.message : String(error)
           );
         }
+      },
+      onDirectory: (peers) => {
+        for (const peer of peers) {
+          const cached: Peer = {
+            ...peer,
+            address: '',
+            port: 0,
+            source: 'cache',
+            lastSeenAt: peer.lastSeenAt || 0
+          };
+          this.peersById.set(peer.deviceId, cached);
+          this.db.upsertPeerCache(cached);
+        }
+        this.emitEvent({ type: 'peers:updated', peers: this.getKnownPeers() });
       },
       onAnnouncementExpired: (messageIds) => {
         this.handleRelayAnnouncementExpiry(messageIds);
@@ -679,7 +389,7 @@ class LanternApp {
       onWarning: (message) => {
         this.emitEvent({ type: 'ui:toast', level: 'warning', message });
       }
-    });
+    }, this.authService.getToken() || '');
 
     // Importante: inicializar MessageService antes de conectar no relay.
     // O relay pode emitir presença/frames imediatamente após start()
@@ -694,9 +404,30 @@ class LanternApp {
       getOnlinePeers: () => this.presence.getOnlinePeers(),
       onPeerUnreachable: (peerId) => this.markPeerUnreachable(peerId, { force: true }),
       emitEvent: (event) => this.emitEvent(event)
+      ,sendCanonicalFrame: async (frame) => {
+        if (!this.relay?.isConnected()) throw new Error('Relay offline.');
+        await this.relay.sendFrame(frame);
+      },
+      uploadCanonicalAttachment: async ({ message, offer, filePath, onProgress }) => {
+        if (!this.relay) throw new Error('Relay indisponível.');
+        await this.relay.uploadCentralAttachment({
+          attachmentId: offer.fileId,
+          messageId: message.messageId,
+          conversationId: message.conversationId,
+          fileName: offer.filename,
+          size: offer.size,
+          sha256: offer.sha256,
+          chunks: this.fileTransfer.createChunkStream(filePath, offer.fileId),
+          onProgress
+        });
+      }
     });
 
-    this.relay.setEndpointSettings(this.relaySettings);
+    if (this.authState.endpoint) {
+      this.relay.setDirectRelayEndpoint(this.authState.endpoint);
+    } else {
+      this.relay.setEndpointSettings(this.relaySettings);
+    }
 
     this.notifications.setNavigateHandler((conversationId) => {
       this.mainWindow?.show();
@@ -706,7 +437,15 @@ class LanternApp {
     this.notifications.setDoNotDisturbUntil(this.db.getDoNotDisturbUntil());
 
     const ipc = registerIpc(this.mainWindow, {
-      getProfile: () => this.db.getProfile(),
+      getAuthState: () => this.authState,
+      discoverRelays: (port) => this.authService.discover(port),
+      login: (input) => this.login(input),
+      register: async (input) => {
+        const state = await this.authService.register(input);
+        return this.applyAuthenticatedState(state);
+      },
+      logout: () => this.logout(),
+      getProfile: () => this.profile,
       updateProfile: (input) => {
         const updated = this.db.updateProfile(input);
         Object.assign(this.profile, updated);
@@ -807,9 +546,7 @@ class LanternApp {
           }
         }
       },
-      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName),
-      createLocalBackup: () => this.createLocalBackup(),
-      restoreLocalBackup: () => this.restoreLocalBackup()
+      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
     });
 
     this.emitEvent = ipc.emitEvent;
@@ -821,7 +558,7 @@ class LanternApp {
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
     this.reconcileLegacyIncomingFilePaths();
 
-    void this.relay.start().then(() => {
+    if (this.authState.authenticated) void this.relay.start().then(() => {
       this.emitEvent({
         type: 'relay:connection',
         connected: this.relay?.isConnected() || false,
@@ -1259,6 +996,8 @@ class LanternApp {
         avatarEmoji: relayPeer.avatarEmoji || '🙂',
         avatarBg: relayPeer.avatarBg || '#5b5fc7',
         statusMessage: relayPeer.statusMessage || 'Disponível',
+        username: relayPeer.username || '',
+        department: relayPeer.department || '',
         address: '',
         port: 0,
         appVersion: relayPeer.appVersion || 'unknown',
@@ -1448,6 +1187,10 @@ class LanternApp {
   }
 
   private async requestMissingDirectAttachment(message: DbMessage, preferredPeer?: Peer): Promise<void> {
+    if (this.authState?.authenticated && this.relay?.isConnected() && message.fileId) {
+      await this.downloadCanonicalAttachment(message).catch(() => undefined);
+      return;
+    }
     if (
       message.type !== 'file' ||
       message.direction !== 'in' ||
@@ -1498,6 +1241,43 @@ class LanternApp {
       // O próximo snapshot de presença ou sync tentará novamente.
     } finally {
       this.directFileRequestInFlight.delete(requestKey);
+    }
+  }
+
+  private async downloadCanonicalAttachment(message: DbMessage): Promise<void> {
+    if (!this.relay || !message.fileId || !message.fileName || !message.fileSize || !message.fileSha256) {
+      throw new Error('Metadados do anexo incompletos.');
+    }
+    if (this.hasUsableLocalAttachment(message) || this.directFileRequestInFlight.has(message.messageId)) return;
+    this.directFileRequestInFlight.add(message.messageId);
+    const offer: FileOfferPayload = {
+      fileId: message.fileId,
+      messageId: message.messageId,
+      filename: message.fileName,
+      size: message.fileSize,
+      sha256: message.fileSha256
+    };
+    try {
+      this.fileTransfer.startIncoming(offer, message.senderDeviceId);
+      this.emitEvent({
+        type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
+        messageId: message.messageId, peerId: message.senderDeviceId,
+        transferred: 0, total: message.fileSize, stage: 'downloading'
+      });
+      await this.relay.downloadCentralAttachment(message.fileId, {
+        onStart: () => undefined,
+        onChunk: (chunk) => {
+          const progress = this.fileTransfer.onChunk(chunk);
+          this.emitEvent({
+            type: 'transfer:progress', direction: 'receive', fileId: message.fileId!,
+            messageId: message.messageId, peerId: message.senderDeviceId,
+            transferred: progress.transferred, total: progress.total, stage: 'downloading'
+          });
+        }
+      });
+      await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
+    } finally {
+      this.directFileRequestInFlight.delete(message.messageId);
     }
   }
 
@@ -1574,15 +1354,6 @@ class LanternApp {
     });
   }
 
-  private shouldMarkPeerUnreachableOnUndelivered(frame: ProtocolFrame): boolean {
-    return (
-      frame.type === 'chat:text' ||
-      frame.type === 'file:offer' ||
-      frame.type === 'chat:clear' ||
-      frame.type === 'chat:forget'
-    );
-  }
-
   private async sendToPeer(peer: Peer, frame: ProtocolFrame): Promise<void> {
     if (!this.relay || !this.relay.isConnected()) {
       throw new Error('Relay offline.');
@@ -1591,10 +1362,10 @@ class LanternApp {
     const targetDeviceId = frame.to;
     const result = await this.relay.sendFrame(frame);
     if (targetDeviceId && !result.deliveredTo.includes(targetDeviceId)) {
-      if (this.shouldMarkPeerUnreachableOnUndelivered(frame)) {
-        this.markPeerUnreachable(targetDeviceId, { force: true });
-      }
-      throw new Error('Contato offline no relay.');
+      // A confirmação do Relay significa que a operação durável já foi salva.
+      // O destinatário não precisa estar conectado para mensagens, reações,
+      // edições ou exclusões. Typing continua sendo apenas best-effort.
+      if (frame.type === 'typing') return;
     }
   }
 
@@ -3360,6 +3131,16 @@ class LanternApp {
           );
         }
 
+        const storedFile = this.db.getMessageById(payload.messageId);
+        if (shouldReceiveFile && storedFile) {
+          void this.downloadCanonicalAttachment(storedFile).catch((error) => {
+            this.emitEvent({
+              type: 'ui:toast', level: 'warning',
+              message: error instanceof Error ? error.message : 'Não foi possível baixar o anexo do Relay.'
+            });
+          });
+        }
+
         break;
       }
       case 'file:chunk': {
@@ -3397,6 +3178,101 @@ class LanternApp {
         break;
     }
 
+  }
+
+  private async applyCanonicalHistorySnapshot(frames: ProtocolFrame[]): Promise<void> {
+    const ordered = [...frames].sort((left, right) =>
+      left.createdAt !== right.createdAt
+        ? left.createdAt - right.createdAt
+        : left.messageId.localeCompare(right.messageId)
+    );
+    this.beginSyncActivity();
+    try {
+      for (const frame of ordered) {
+        if (frame.from === this.profile.deviceId) {
+          await this.applyOwnCanonicalFrame(frame);
+        } else {
+          await this.handleIncomingFrame(frame, 'sync');
+        }
+      }
+    } finally {
+      this.endSyncActivity();
+    }
+  }
+
+  private async applyOwnCanonicalFrame(frame: ProtocolFrame): Promise<void> {
+    if (frame.type === 'announce') return; // snapshot específico preserva expiração e leituras
+    if (frame.type === 'chat:text' && frame.to) {
+      const payload = frame.payload as ChatTextPayload;
+      const replyTo = this.normalizeReplyPayload(payload.replyTo);
+      const conversationId = this.db.ensureDmConversation(frame.to, this.peersById.get(frame.to)?.displayName || frame.to);
+      const row: DbMessage = {
+        messageId: frame.messageId, conversationId, direction: 'out',
+        senderDeviceId: this.profile.deviceId, receiverDeviceId: frame.to, type: 'text',
+        bodyText: payload.text, fileId: null, fileName: null, fileSize: null,
+        fileSha256: null, filePath: null, status: 'delivered', reaction: null,
+        deletedAt: null, replyToMessageId: replyTo?.messageId || null,
+        replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+        replyToType: replyTo?.type || null, replyToPreviewText: replyTo?.previewText || null,
+        replyToFileName: replyTo?.fileName || null,
+        forwardedFromMessageId: payload.forwardedFromMessageId || null,
+        editedAt: null, createdAt: frame.createdAt
+      };
+      const inserted = this.db.saveMessage(row);
+      this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: this.db.getMessageById(frame.messageId) || row });
+      return;
+    }
+    if (frame.type === 'file:offer' && frame.to) {
+      const payload = frame.payload as FileOfferPayload;
+      const replyTo = this.normalizeReplyPayload(payload.replyTo);
+      const conversationId = this.db.ensureDmConversation(frame.to, this.peersById.get(frame.to)?.displayName || frame.to);
+      const row: DbMessage = {
+        messageId: frame.messageId, conversationId, direction: 'out',
+        senderDeviceId: this.profile.deviceId, receiverDeviceId: frame.to, type: 'file',
+        bodyText: null, fileId: payload.fileId, fileName: payload.filename,
+        fileSize: payload.size, fileSha256: payload.sha256, filePath: null,
+        status: 'delivered', reaction: null, deletedAt: null,
+        replyToMessageId: replyTo?.messageId || null,
+        replyToSenderDeviceId: replyTo?.senderDeviceId || null,
+        replyToType: replyTo?.type || null, replyToPreviewText: replyTo?.previewText || null,
+        replyToFileName: replyTo?.fileName || null,
+        forwardedFromMessageId: payload.forwardedFromMessageId || null,
+        editedAt: null, createdAt: frame.createdAt
+      };
+      const inserted = this.db.saveMessage(row);
+      const stored = this.db.getMessageById(frame.messageId) || row;
+      this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: stored });
+      if (!this.hasUsableLocalAttachment(stored)) void this.downloadCanonicalAttachment(stored).catch(() => undefined);
+      return;
+    }
+    if (frame.type === 'chat:edit') {
+      const payload = frame.payload as EditMessagePayload;
+      const updated = this.db.updateMessageText(payload.targetMessageId, payload.text, payload.editedAt);
+      if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      return;
+    }
+    if (frame.type === 'chat:delete') {
+      const payload = frame.payload as DeletePayload;
+      const deleted = this.db.deleteMessageForEveryone(payload.targetMessageId, frame.createdAt);
+      if (deleted) this.emitEvent({ type: 'message:removed', conversationId: deleted.conversationId, messageId: deleted.messageId });
+      return;
+    }
+    if (frame.type === 'chat:react') {
+      const payload = frame.payload as ReactPayload;
+      const target = this.db.getMessageById(payload.targetMessageId);
+      if (!target) return;
+      const summary = this.db.setMessageReaction(
+        payload.targetMessageId, this.profile.deviceId, payload.reaction,
+        this.profile.deviceId, frame.createdAt
+      );
+      this.emitEvent({ type: 'message:reactions', messageId: payload.targetMessageId, summary });
+      return;
+    }
+    if ((frame.type === 'chat:clear' || frame.type === 'chat:forget') && frame.to) {
+      const conversationId = `dm:${frame.to}`;
+      this.db.clearConversation(conversationId);
+      this.emitEvent({ type: 'conversation:cleared', conversationId });
+    }
   }
 
   private buildTransportPeerFromFrame(

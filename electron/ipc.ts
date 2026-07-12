@@ -8,6 +8,8 @@ import {
   AnnouncementReadDetail,
   AnnouncementReadSummary,
   AppEvent,
+  ClientAuthState,
+  ClientRelayConfig,
   DbMessage,
   GroupInfo,
   GroupMember,
@@ -19,6 +21,11 @@ import {
 } from './types';
 
 export interface IpcBindings {
+  getAuthState: () => ClientAuthState;
+  discoverRelays: (port?: number) => Promise<Array<{ host: string; port: number; secure: boolean }>>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<ClientAuthState>;
+  register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<ClientAuthState>;
+  logout: () => Promise<void>;
   getProfile: () => Profile;
   updateProfile: (input: Pick<Profile, 'displayName' | 'avatarEmoji' | 'avatarBg' | 'statusMessage'>) => Profile;
   getKnownPeers: () => Peer[];
@@ -155,8 +162,6 @@ export interface IpcBindings {
   getArchivedConversationIds: () => string[];
   addManualPeer: (address: string, port: number) => void;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
-  createLocalBackup: () => Promise<{ canceled: boolean; backupPath: string | null }>;
-  restoreLocalBackup: () => Promise<{ canceled: boolean; restartScheduled: boolean }>;
 }
 
 export const registerIpc = (
@@ -166,6 +171,12 @@ export const registerIpc = (
   const CLIPBOARD_TEMP_DIR = path.join(os.tmpdir(), 'lantern-paste');
   const CLIPBOARD_MAX_FILE_AGE_MS = 24 * 60 * 60 * 1000;
   const CLIPBOARD_MAX_FILES = 300;
+
+  ipcMain.handle('lantern:getAuthState', () => bindings.getAuthState());
+  ipcMain.handle('lantern:discoverRelays', (_event, port?: number) => bindings.discoverRelays(port));
+  ipcMain.handle('lantern:login', (_event, input) => bindings.login(input));
+  ipcMain.handle('lantern:register', (_event, input) => bindings.register(input));
+  ipcMain.handle('lantern:logout', () => bindings.logout());
 
   const cleanupClipboardTempDir = async (): Promise<void> => {
     try {
@@ -593,8 +604,6 @@ export const registerIpc = (
   ipcMain.handle('lantern:saveFileAs', (_event, filePath: string, fileName?: string) =>
     bindings.saveFileAs(filePath, fileName)
   );
-  ipcMain.handle('lantern:createLocalBackup', () => bindings.createLocalBackup());
-  ipcMain.handle('lantern:restoreLocalBackup', () => bindings.restoreLocalBackup());
 
   ipcMain.handle('lantern:pickFile', async () => {
     const result = await dialog.showOpenDialog(window, {

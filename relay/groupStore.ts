@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { EncryptedFields } from './security';
 import {
   GroupReactionValue,
   RelayGroup,
@@ -102,7 +103,8 @@ export class GroupStore {
   constructor(
     private readonly storeFile: string,
     private readonly attachmentsDir: string,
-    private readonly log: GroupStoreLog
+    private readonly log: GroupStoreLog,
+    private readonly encrypted?: EncryptedFields
   ) {
     fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
     fs.mkdirSync(this.attachmentsDir, { recursive: true });
@@ -138,7 +140,11 @@ export class GroupStore {
       if (!fs.existsSync(this.storeFile)) {
         return;
       }
-      const parsed = JSON.parse(fs.readFileSync(this.storeFile, 'utf8')) as Partial<PersistedGroupStore>;
+      const stored = fs.readFileSync(this.storeFile, 'utf8');
+      const plain = stored.startsWith('gcm-v1.') && this.encrypted
+        ? this.encrypted.decrypt(stored)
+        : stored;
+      const parsed = JSON.parse(plain) as Partial<PersistedGroupStore>;
       if (parsed.version !== 1) {
         return;
       }
@@ -199,7 +205,8 @@ export class GroupStore {
         attachments: Array.from(this.attachmentsByFileId.values())
       };
       const tempFile = `${this.storeFile}.tmp`;
-      fs.writeFileSync(tempFile, JSON.stringify(body, null, 2));
+      const serialized = JSON.stringify(body);
+      fs.writeFileSync(tempFile, this.encrypted ? this.encrypted.encrypt(serialized) : serialized);
       fs.renameSync(tempFile, this.storeFile);
     } catch (error) {
       this.log(

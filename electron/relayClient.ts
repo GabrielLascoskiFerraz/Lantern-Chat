@@ -7,6 +7,7 @@ import { APP_VERSION } from './config';
 import {
   GroupEvent,
   GroupSnapshot,
+  FileChunkPayload,
   Profile,
   ProtocolFrame
 } from './types';
@@ -17,6 +18,8 @@ interface RelayPeerSnapshot {
   avatarEmoji: string;
   avatarBg: string;
   statusMessage: string;
+  username: string;
+  department: string;
   appVersion: string;
   connectedAt: number;
   lastSeenAt: number;
@@ -83,6 +86,21 @@ interface RelayEnvelope {
   payload?: unknown;
 }
 
+interface PendingCentralAck {
+  resolve: (payload: Record<string, unknown>) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface PendingCentralDownload {
+  onStart: (metadata: Record<string, unknown>) => void | Promise<void>;
+  onChunk: (chunk: FileChunkPayload) => void | Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  chain: Promise<void>;
+  timeout: NodeJS.Timeout;
+}
+
 interface RelaySendResult {
   deliveredTo: string[];
 }
@@ -140,6 +158,8 @@ interface RelayEndpointSettings {
 
 interface RelayClientCallbacks {
   onFrame: (frame: ProtocolFrame) => void;
+  onHistorySnapshot?: (frames: ProtocolFrame[]) => void;
+  onDirectory?: (peers: RelayPeerSnapshot[]) => void;
   onPresence: (peers: RelayPeerSnapshot[]) => void;
   onGroupSnapshot?: (snapshots: GroupSnapshot[]) => void;
   onGroupEvent?: (event: GroupEvent) => void;
@@ -387,6 +407,8 @@ const normalizeRelayPeer = (value: unknown): RelayPeerSnapshot | null => {
   const avatarBg = asString(record.avatarBg);
   const statusMessage = asString(record.statusMessage) || 'Disponível';
   const appVersion = asString(record.appVersion) || APP_VERSION;
+  const username = asString(record.username) || '';
+  const department = asString(record.department) || '';
 
   if (!deviceId || !displayName || !avatarEmoji || !avatarBg) {
     return null;
@@ -398,6 +420,8 @@ const normalizeRelayPeer = (value: unknown): RelayPeerSnapshot | null => {
     avatarEmoji,
     avatarBg,
     statusMessage,
+    username,
+    department,
     appVersion,
     connectedAt:
       typeof record.connectedAt === 'number' && Number.isFinite(record.connectedAt)
@@ -478,6 +502,8 @@ export class RelayClient {
   private readonly pendingAcks = new Map<string, PendingSendAck>();
   private readonly pendingGroupAcks = new Map<string, PendingGroupAck>();
   private readonly pendingGroupChunkAcks = new Map<string, PendingGroupChunkAck>();
+  private readonly pendingCentralAcks = new Map<string, PendingCentralAck>();
+  private readonly pendingCentralDownloads = new Map<string, PendingCentralDownload>();
   private readonly readyWaiters = new Set<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -502,12 +528,14 @@ export class RelayClient {
   private lastDiscoveryRefreshAt = 0;
   private udpProbeInFlight = false;
   private profile: Profile;
+  private sessionToken: string;
   private lastPresenceAt = 0;
   private lastPresenceRevision = -1;
 
-  constructor(profile: Profile, callbacks: RelayClientCallbacks) {
+  constructor(profile: Profile, callbacks: RelayClientCallbacks, sessionToken = '') {
     this.profile = { ...profile };
     this.callbacks = callbacks;
+    this.sessionToken = sessionToken;
     this.explicitRelayUrl = asString(process.env.LANTERN_RELAY_URL);
   }
 
@@ -535,6 +563,16 @@ export class RelayClient {
     this.discoveredEndpoints.clear();
     this.discoveredEndpointByServiceKey.clear();
     this.udpProbeInFlight = false;
+    for (const pending of this.pendingCentralAcks.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Relay desconectado.'));
+    }
+    this.pendingCentralAcks.clear();
+    for (const pending of this.pendingCentralDownloads.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Relay desconectado.'));
+    }
+    this.pendingCentralDownloads.clear();
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -591,12 +629,102 @@ export class RelayClient {
     }
   }
 
+  async uploadCentralAttachment(input: {
+    attachmentId: string;
+    messageId: string;
+    conversationId: string;
+    fileName: string;
+    mimeType?: string;
+    size: number;
+    sha256: string;
+    chunks: AsyncIterable<FileChunkPayload>;
+    onProgress?: (transferred: number) => void;
+  }): Promise<void> {
+    await this.waitUntilReady(8_000);
+    await this.centralRequest('relay:attachment:init', {
+      attachmentId: input.attachmentId,
+      messageId: input.messageId,
+      conversationId: input.conversationId,
+      fileName: input.fileName,
+      mimeType: input.mimeType || 'application/octet-stream',
+      size: input.size,
+      sha256: input.sha256
+    });
+    let transferred = 0;
+    for await (const chunk of input.chunks) {
+      await this.centralRequest('relay:attachment:chunk', {
+        attachmentId: input.attachmentId,
+        index: chunk.index,
+        dataBase64: chunk.dataBase64
+      });
+      transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
+      input.onProgress?.(Math.min(input.size, transferred));
+    }
+    await this.centralRequest('relay:attachment:complete', { attachmentId: input.attachmentId });
+  }
+
+  async downloadCentralAttachment(
+    attachmentId: string,
+    handlers: {
+      onStart: (metadata: Record<string, unknown>) => void | Promise<void>;
+      onChunk: (chunk: FileChunkPayload) => void | Promise<void>;
+    }
+  ): Promise<void> {
+    await this.waitUntilReady(8_000);
+    const requestId = randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingCentralDownloads.delete(requestId);
+        reject(new Error('Timeout ao baixar anexo do Relay.'));
+      }, 120_000);
+      timeout.unref?.();
+      this.pendingCentralDownloads.set(requestId, {
+        ...handlers,
+        resolve,
+        reject,
+        chain: Promise.resolve(),
+        timeout
+      });
+      this.sendEnvelope({
+        type: 'relay:attachment:request',
+        payload: { requestId, attachmentId, startIndex: 0 }
+      });
+    });
+  }
+
+  private centralRequest(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingCentralAcks.delete(requestId);
+        reject(new Error('Timeout aguardando confirmação do anexo pelo Relay.'));
+      }, 20_000);
+      timeout.unref?.();
+      this.pendingCentralAcks.set(requestId, { resolve, reject, timeout });
+      this.sendEnvelope({ type, payload: { ...payload, requestId } });
+    });
+  }
+
   setManualRelayEndpoint(host: string, port: number): void {
     this.setEndpointSettings({
       automatic: false,
       host,
       port
     });
+  }
+
+  setDirectRelayEndpoint(endpoint: string): void {
+    const normalized = endpoint.trim().replace(/\/$/, '');
+    if (!/^wss?:\/\//i.test(normalized)) {
+      throw new Error('Endpoint do Relay inválido.');
+    }
+    this.manualRelayUrl = normalized;
+    this.endpointSettings = {
+      automatic: false,
+      host: normalized,
+      port: Number(new URL(normalized).port || (normalized.startsWith('wss:') ? 443 : 80))
+    };
+    this.selectedEndpoint = normalized;
   }
 
   setEndpointSettings(input: {
@@ -693,6 +821,11 @@ export class RelayClient {
         appVersion: APP_VERSION
       }
     });
+  }
+
+  setAuthenticatedSession(profile: Profile, sessionToken: string): void {
+    this.profile = { ...profile };
+    this.sessionToken = sessionToken.trim();
   }
 
   isConnected(): boolean {
@@ -1111,7 +1244,8 @@ export class RelayClient {
             avatarEmoji: this.profile.avatarEmoji,
             avatarBg: this.profile.avatarBg,
             statusMessage: this.profile.statusMessage,
-            appVersion: APP_VERSION
+            appVersion: APP_VERSION,
+            sessionToken: this.sessionToken
           }
         });
 
@@ -1279,6 +1413,16 @@ export class RelayClient {
         this.schedulePresenceStaleCheck();
         return;
       }
+      case 'relay:history:snapshot': {
+        const payload = asRecord(envelope.payload);
+        const frames = Array.isArray(payload?.frames) ? payload.frames : [];
+        const normalized = frames.filter(
+          (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
+        );
+        if (this.callbacks.onHistorySnapshot) this.callbacks.onHistorySnapshot(normalized);
+        else normalized.forEach((frame) => this.callbacks.onFrame(frame));
+        return;
+      }
       case 'relay:presence': {
         const payload = asRecord(envelope.payload) as RelayPresencePayload | null;
         const revision =
@@ -1302,6 +1446,18 @@ export class RelayClient {
         this.lastPresenceAt = Date.now();
         this.schedulePresenceStaleCheck();
         this.callbacks.onPresence(Array.from(this.relayPeersById.values()));
+        return;
+      }
+      case 'relay:directory': {
+        const payload = asRecord(envelope.payload);
+        const users = Array.isArray(payload?.users) ? payload.users : [];
+        const peers = users.map((value) => normalizeRelayPeer({
+          ...(asRecord(value) || {}),
+          appVersion: 'central',
+          connectedAt: 0,
+          lastSeenAt: 0
+        })).filter((peer): peer is RelayPeerSnapshot => Boolean(peer));
+        this.callbacks.onDirectory?.(peers);
         return;
       }
       case 'relay:presence:delta': {
@@ -1497,6 +1653,74 @@ export class RelayClient {
         const fileId = asString(payload?.fileId);
         if (!requestId || !fileId) return;
         this.callbacks.onGroupFileComplete?.({ requestId, fileId });
+        return;
+      }
+      case 'relay:attachment:ack': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        if (!requestId) return;
+        const pending = this.pendingCentralAcks.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingCentralAcks.delete(requestId);
+        pending.resolve(payload || {});
+        return;
+      }
+      case 'relay:attachment:start': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        if (!requestId) return;
+        const pending = this.pendingCentralDownloads.get(requestId);
+        if (!pending) return;
+        pending.chain = pending.chain.then(() => pending.onStart(payload || {}));
+        return;
+      }
+      case 'relay:attachment:data': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        const attachmentId = asString(payload?.attachmentId);
+        if (!requestId || !attachmentId) return;
+        const pending = this.pendingCentralDownloads.get(requestId);
+        if (!pending) return;
+        pending.chain = pending.chain.then(() => pending.onChunk({
+          fileId: attachmentId,
+          index: Math.max(0, Math.trunc(Number(payload?.index) || 0)),
+          total: Math.max(1, Math.trunc(Number(payload?.total) || 1)),
+          dataBase64: asString(payload?.dataBase64) || ''
+        }));
+        return;
+      }
+      case 'relay:attachment:download:complete': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        if (!requestId) return;
+        const pending = this.pendingCentralDownloads.get(requestId);
+        if (!pending) return;
+        this.pendingCentralDownloads.delete(requestId);
+        clearTimeout(pending.timeout);
+        void pending.chain.then(pending.resolve, pending.reject);
+        return;
+      }
+      case 'relay:attachment:error': {
+        const payload = asRecord(envelope.payload);
+        const requestId = asString(payload?.requestId);
+        const error = new Error(asString(payload?.message) || 'Falha no anexo armazenado pelo Relay.');
+        if (!requestId) {
+          this.callbacks.onWarning?.(error.message);
+          return;
+        }
+        const ack = this.pendingCentralAcks.get(requestId);
+        if (ack) {
+          clearTimeout(ack.timeout);
+          this.pendingCentralAcks.delete(requestId);
+          ack.reject(error);
+        }
+        const download = this.pendingCentralDownloads.get(requestId);
+        if (download) {
+          clearTimeout(download.timeout);
+          this.pendingCentralDownloads.delete(requestId);
+          download.reject(error);
+        }
         return;
       }
       case 'relay:send:ack': {

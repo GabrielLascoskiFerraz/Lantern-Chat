@@ -1,12 +1,14 @@
 import { Component, ErrorInfo, ReactNode, useEffect, useMemo } from 'react';
 import {
   FluentProvider,
+  Spinner,
   createDarkTheme,
   createLightTheme,
   Theme
 } from '@fluentui/react-components';
 import { ipcClient } from './api/ipcClient';
 import { Shell } from './ui/Shell';
+import { LoginView } from './ui/LoginView';
 import { useLanternStore } from './state/store';
 
 const brandPalette = {
@@ -75,6 +77,8 @@ const configureTheme = (theme: Theme): Theme => ({
 export default function App() {
   const loadInitial = useLanternStore((state) => state.loadInitial);
   const resolvedTheme = useLanternStore((state) => state.resolvedTheme);
+  const ready = useLanternStore((state) => state.ready);
+  const authState = useLanternStore((state) => state.authState);
   const setSystemDark = useLanternStore((state) => state.setSystemDark);
   const platform =
     typeof window !== 'undefined' && window.lantern ? ipcClient.getPlatform() : 'linux';
@@ -109,7 +113,7 @@ export default function App() {
   return (
     <FluentProvider theme={theme} className="app-root">
       <AppErrorBoundary>
-        <Shell />
+        {!ready ? <div className="loading-screen"><Spinner /></div> : authState?.authenticated ? <Shell /> : <LoginView />}
       </AppErrorBoundary>
     </FluentProvider>
   );

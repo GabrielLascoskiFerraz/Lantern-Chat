@@ -32,6 +32,13 @@ interface MessageServiceDeps {
   getOnlinePeers: () => Peer[];
   onPeerUnreachable: (peerId: string) => void;
   emitEvent: (event: AppEvent) => void;
+  sendCanonicalFrame?: (frame: ProtocolFrame) => Promise<void>;
+  uploadCanonicalAttachment?: (input: {
+    message: DbMessage;
+    offer: FileOfferPayload;
+    filePath: string;
+    onProgress: (transferred: number) => void;
+  }) => Promise<void>;
 }
 
 export class MessageService {
@@ -44,6 +51,8 @@ export class MessageService {
   private readonly getOnlinePeers: () => Peer[];
   private readonly onPeerUnreachable: (peerId: string) => void;
   private readonly emitEvent: (event: AppEvent) => void;
+  private readonly sendCanonicalFrame?: (frame: ProtocolFrame) => Promise<void>;
+  private readonly uploadCanonicalAttachment?: MessageServiceDeps['uploadCanonicalAttachment'];
   private readonly inFlightFileTransfers = new Set<string>();
 
   constructor(deps: MessageServiceDeps) {
@@ -56,6 +65,8 @@ export class MessageService {
     this.getOnlinePeers = deps.getOnlinePeers;
     this.onPeerUnreachable = deps.onPeerUnreachable;
     this.emitEvent = deps.emitEvent;
+    this.sendCanonicalFrame = deps.sendCanonicalFrame;
+    this.uploadCanonicalAttachment = deps.uploadCanonicalAttachment;
   }
 
   private markUnreachable(peer: Peer): void {
@@ -267,7 +278,13 @@ export class MessageService {
 
     this.db.saveMessage(message);
 
-    if (peer) {
+    if (this.sendCanonicalFrame) {
+      try {
+        await this.sendCanonicalFrame(frame);
+      } catch {
+        // O frame permanece no cache local e será recuperado pelo snapshot do Relay.
+      }
+    } else if (peer) {
       try {
         await this.sendToPeer(peer, frame);
       } catch {
@@ -397,16 +414,35 @@ export class MessageService {
     });
 
     setImmediate(() => {
-      if (!peer) {
+      if (this.uploadCanonicalAttachment && this.sendCanonicalFrame) {
+        const offerWithReply = sanitizedReply ? { ...offer, replyTo: sanitizedReply } : offer;
+        const offerWithMeta = message.forwardedFromMessageId
+          ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
+          : offerWithReply;
+        void this.uploadCanonicalAttachment({
+          message,
+          offer,
+          filePath: managedFilePath,
+          onProgress: (transferred) => this.emitEvent({
+            type: 'transfer:progress', direction: 'send', fileId: offer.fileId,
+            messageId, peerId, transferred, total: offer.size
+          })
+        }).then(() => this.sendCanonicalFrame!(
+          this.fileTransfer.buildOfferFrame(peerId, offerWithMeta, message.createdAt)
+        )).then(() => {
+          this.db.updateMessageStatus(messageId, 'delivered');
+          const updated = this.db.getMessageById(messageId);
+          if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+        }).catch((error) => {
+          this.emitEvent({
+            type: 'ui:toast', level: 'warning',
+            message: error instanceof Error ? error.message : 'Não foi possível armazenar o anexo no Relay.'
+          });
+        });
         return;
       }
-      void this.sendFileFramesInBackground(
-        peer,
-        message,
-        offer,
-        managedFilePath,
-        sanitizedReply
-      );
+      if (!peer) return;
+      void this.sendFileFramesInBackground(peer, message, offer, managedFilePath, sanitizedReply);
     });
 
     return message;

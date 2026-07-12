@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export const APP_ID = 'Lantern';
+export const APP_ID = 'com.lantern.central';
 export const APP_VERSION = '1.0.0';
 export const MDNS_TYPE = 'lanternchat';
 export const MDNS_PROTOCOL = 'tcp';
@@ -19,7 +19,7 @@ export const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 export const ANNOUNCEMENT_PURGE_INTERVAL_MS = 5 * 60 * 1000;
 
 export const getAttachmentsDir = (downloadsPath: string): string =>
-  path.join(downloadsPath, 'Lantern Attachments');
+  path.join(downloadsPath, 'Lantern Central Attachments');
 
 export const sanitizeFileName = (name: string): string => {
   const withoutReserved = name.replace(/[<>:"/\\|?*]/g, '_');
