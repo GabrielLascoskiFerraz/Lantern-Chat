@@ -36,13 +36,11 @@ interface PersistedGroupStore {
 
 interface ActiveUpload {
   metadata: RelayGroupAttachmentMetadata;
-  tempPath: string;
-  finalPath: string;
+  chunksDir: string;
   nextIndex: number;
   totalChunks: number;
   receivedBytes: number;
   hash: ReturnType<typeof createHash>;
-  writeStream: fs.WriteStream;
   startedAt: number;
 }
 
@@ -114,13 +112,6 @@ export class GroupStore {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
-    }
-    for (const upload of this.uploadsByFileId.values()) {
-      try {
-        upload.writeStream.destroy();
-      } catch {
-        // ignore
-      }
     }
     this.uploadsByFileId.clear();
     this.persist();
@@ -805,24 +796,17 @@ export class GroupStore {
 
     const dir = this.attachmentDirectory(metadata.groupId, metadata.fileId);
     fs.mkdirSync(dir, { recursive: true });
-    const tempPath = path.join(dir, 'payload.tmp');
-    const finalPath = path.join(dir, 'payload.bin');
-    try {
-      fs.rmSync(tempPath, { force: true });
-      fs.rmSync(finalPath, { force: true });
-    } catch {
-      // ignore
-    }
+    const chunksDir = path.join(dir, 'chunks');
+    fs.rmSync(chunksDir, { recursive: true, force: true });
+    fs.mkdirSync(chunksDir, { recursive: true });
     const totalChunks = Math.max(1, Math.ceil(metadata.fileSize / GROUP_FILE_CHUNK_SIZE_BYTES));
     const upload: ActiveUpload = {
       metadata,
-      tempPath,
-      finalPath,
+      chunksDir,
       nextIndex: 0,
       totalChunks,
       receivedBytes: 0,
       hash: createHash('sha256'),
-      writeStream: fs.createWriteStream(tempPath, { flags: 'w' }),
       startedAt: Date.now()
     };
     this.uploadsByFileId.set(metadata.fileId, upload);
@@ -847,6 +831,10 @@ export class GroupStore {
     if (upload.metadata.senderDeviceId !== actorDeviceId) {
       throw new Error('Upload de grupo pertence a outro usuário.');
     }
+    const existingChunkPath = path.join(upload.chunksDir, `${chunk.index}.bin`);
+    if (chunk.index < upload.nextIndex && fs.existsSync(existingChunkPath)) {
+      return;
+    }
     if (chunk.index !== upload.nextIndex) {
       throw new Error('Chunk fora de ordem no upload de grupo.');
     }
@@ -854,20 +842,22 @@ export class GroupStore {
       throw new Error('Total de chunks inconsistente.');
     }
     const buffer = Buffer.from(chunk.dataBase64 || '', 'base64');
+    const expectedLength = chunk.index === upload.totalChunks - 1
+      ? upload.metadata.fileSize - chunk.index * GROUP_FILE_CHUNK_SIZE_BYTES
+      : GROUP_FILE_CHUNK_SIZE_BYTES;
+    if (buffer.length !== Math.max(0, expectedLength)) {
+      throw new Error('Tamanho de chunk inconsistente no upload de grupo.');
+    }
     upload.receivedBytes += buffer.length;
     if (upload.receivedBytes > upload.metadata.fileSize) {
-      upload.writeStream.destroy();
       this.cleanupAttachment(upload.metadata, true);
       this.uploadsByFileId.delete(chunk.fileId);
       throw new Error('Upload de grupo excedeu o tamanho esperado.');
     }
     upload.hash.update(buffer);
-    await new Promise<void>((resolve, reject) => {
-      upload.writeStream.write(buffer, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
+    const chunkPath = existingChunkPath;
+    const stored = this.encrypted ? this.encrypted.encryptBytes(buffer) : buffer;
+    await fs.promises.writeFile(chunkPath, stored);
     upload.nextIndex += 1;
   }
 
@@ -886,11 +876,6 @@ export class GroupStore {
     if (upload.nextIndex !== upload.totalChunks) {
       throw new Error('Upload de grupo incompleto.');
     }
-    await new Promise<void>((resolve, reject) => {
-      upload.writeStream.once('finish', () => resolve());
-      upload.writeStream.once('error', reject);
-      upload.writeStream.end();
-    });
     const digest = upload.hash.digest('hex');
     if (digest !== upload.metadata.sha256) {
       this.cleanupAttachment(upload.metadata, true);
@@ -902,7 +887,6 @@ export class GroupStore {
       this.uploadsByFileId.delete(fileId);
       throw new Error('Tamanho inválido no upload de grupo.');
     }
-    fs.renameSync(upload.tempPath, upload.finalPath);
     upload.metadata.uploadedAt = Date.now();
     this.attachmentsByFileId.set(fileId, upload.metadata);
     this.writeAttachmentMetadata(upload.metadata);
@@ -928,35 +912,13 @@ export class GroupStore {
     ) {
       throw new Error('Usuário não é destinatário deste anexo.');
     }
-    const filePath = this.attachmentPayloadPath(metadata.groupId, metadata.fileId);
     const total = Math.max(1, Math.ceil(metadata.fileSize / GROUP_FILE_CHUNK_SIZE_BYTES));
     const normalizedStartIndex = Math.max(0, Math.min(Math.trunc(startIndex || 0), total));
-    let index = normalizedStartIndex;
-    const stream = fs.createReadStream(filePath, {
-      start: normalizedStartIndex * GROUP_FILE_CHUNK_SIZE_BYTES,
-      highWaterMark: GROUP_FILE_CHUNK_SIZE_BYTES
-    });
-    try {
-      for await (const rawChunk of stream) {
-        const buffer = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-        yield {
-          fileId,
-          index,
-          total,
-          dataBase64: buffer.toString('base64')
-        };
-        index += 1;
-      }
-      if (metadata.fileSize === 0 && normalizedStartIndex === 0) {
-        yield {
-          fileId,
-          index: 0,
-          total: 1,
-          dataBase64: ''
-        };
-      }
-    } finally {
-      stream.destroy();
+    const chunksDir = path.join(this.attachmentDirectory(metadata.groupId, metadata.fileId), 'chunks');
+    for (let index = normalizedStartIndex; index < total; index += 1) {
+      const stored = await fs.promises.readFile(path.join(chunksDir, `${index}.bin`));
+      const buffer = this.encrypted ? this.encrypted.decryptBytes(stored) : stored;
+      yield { fileId, index, total, dataBase64: buffer.toString('base64') };
     }
   }
 
@@ -1035,7 +997,23 @@ export class GroupStore {
         expired += 1;
       }
     }
-    if (expired || completed || staleUploads) {
+    let contentRemoved = 0;
+    if (retentionCutoff !== null) {
+      for (const [groupId, events] of this.eventsByGroupId.entries()) {
+        const retained = events.filter((event) => {
+          const isContentEvent =
+            event.type.startsWith('group.message.') ||
+            event.type.startsWith('group.attachment.');
+          if (isContentEvent && event.createdAt < retentionCutoff) {
+            contentRemoved += 1;
+            return false;
+          }
+          return true;
+        });
+        if (retained.length !== events.length) this.eventsByGroupId.set(groupId, retained);
+      }
+    }
+    if (expired || completed || staleUploads || contentRemoved) {
       this.schedulePersist();
     }
     return { expired, completed, staleUploads };
@@ -1053,14 +1031,14 @@ export class GroupStore {
     return path.join(this.attachmentsDir, groupId, fileId);
   }
 
-  private attachmentPayloadPath(groupId: string, fileId: string): string {
-    return path.join(this.attachmentDirectory(groupId, fileId), 'payload.bin');
-  }
-
   private writeAttachmentMetadata(metadata: RelayGroupAttachmentMetadata): void {
     const dir = this.attachmentDirectory(metadata.groupId, metadata.fileId);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify(metadata, null, 2));
+    const serialized = JSON.stringify(metadata);
+    fs.writeFileSync(
+      path.join(dir, 'metadata.json'),
+      this.encrypted ? this.encrypted.encrypt(serialized) : serialized
+    );
   }
 
   private cleanupAttachment(metadata: RelayGroupAttachmentMetadata, removeUpload: boolean): void {
@@ -1068,14 +1046,6 @@ export class GroupStore {
     this.attachmentsByFileId.set(metadata.fileId, metadata);
     const dir = this.attachmentDirectory(metadata.groupId, metadata.fileId);
     if (removeUpload) {
-      const upload = this.uploadsByFileId.get(metadata.fileId);
-      if (upload) {
-        try {
-          upload.writeStream.destroy();
-        } catch {
-          // ignore
-        }
-      }
       this.uploadsByFileId.delete(metadata.fileId);
     }
     fs.rm(dir, { recursive: true, force: true }, () => undefined);

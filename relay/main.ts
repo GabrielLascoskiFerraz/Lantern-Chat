@@ -2642,7 +2642,7 @@ class LanternRelay {
       type: 'relay:history:snapshot',
       payload: {
         serverTime: now,
-        frames: this.centralStore.listFramesForUser(canonicalDeviceId, 0, 5000).map((frame) => ({
+        frames: this.centralStore.listFramesForUser(canonicalDeviceId, 0, 100_000).map((frame) => ({
           type: frame.type,
           messageId: frame.messageId,
           from: frame.senderUserId,

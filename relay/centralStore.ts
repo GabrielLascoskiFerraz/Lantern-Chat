@@ -410,7 +410,7 @@ export class CentralStore {
       WHERE deletedAt IS NULL AND createdAt > ?
         AND (senderUserId = ? OR targetUserId = ? OR targetUserId IS NULL)
       ORDER BY createdAt ASC, messageId ASC LIMIT ?
-    `).all(Math.max(0, after), userId, userId, Math.max(1, Math.min(limit, 5000))) as Array<{
+    `).all(Math.max(0, after), userId, userId, Math.max(1, Math.min(limit, 100_000))) as Array<{
       messageId: string; type: string; senderUserId: string; targetUserId: string | null;
       conversationId: string; payloadCipher: string; createdAt: number;
     }>;

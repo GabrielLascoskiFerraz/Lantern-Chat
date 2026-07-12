@@ -110,6 +110,12 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', resolvedTheme);
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    const locale = authState?.user?.locale || window.localStorage.getItem('lantern.locale') || 'pt-BR';
+    document.documentElement.lang = locale;
+    window.localStorage.setItem('lantern.locale', locale);
+  }, [authState?.user?.locale]);
+
   return (
     <FluentProvider theme={theme} className="app-root">
       <AppErrorBoundary>
