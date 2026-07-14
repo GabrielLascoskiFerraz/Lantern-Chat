@@ -16,6 +16,7 @@ const dictionaries = {
     connectedUsers: 'Usuários conectados', activeAnnouncements: 'Anúncios ativos', retainedAttachments: 'Anexos mantidos', uptime: 'Tempo ativo',
     relaySettings: 'Ajustes do Relay', savedAutomatically: 'Salvo automaticamente', port: 'Porta', announcementExpiration: 'Expiração dos anúncios (horas)',
     applySettings: 'Aplicar ajustes', settingsHelp: 'Alterar a porta reinicia o Relay. Alterar a expiração também atualiza os anúncios ativos.',
+    startWithSystem: 'Iniciar Relay com o sistema', startWithSystemHelp: 'Inicia o Relay automaticamente após o login deste usuário.', startWithSystemUnavailable: 'Disponível apenas no Relay empacotado neste sistema.',
     noUsers: 'Nenhum usuário conectado.', online: 'Online', offline: 'Offline', listening: 'Escutando na porta {port} · {count} conectado(s)',
     relayStopped: 'O Relay está parado. Inicie-o para aceitar clientes Lantern.', noLocalAddress: 'Nenhum endereço IPv4 local encontrado.',
     copyAddress: 'Copiar endereço', unknownUser: 'Usuário desconhecido', available: 'Disponível', onlineFor: 'Online há {duration}',
@@ -27,6 +28,7 @@ const dictionaries = {
     connectedUsers: 'Connected users', activeAnnouncements: 'Active announcements', retainedAttachments: 'Attachments retained', uptime: 'Uptime',
     relaySettings: 'Relay settings', savedAutomatically: 'Saved automatically', port: 'Port', announcementExpiration: 'Announcement expiration (hours)',
     applySettings: 'Apply settings', settingsHelp: 'Changing the port restarts the Relay. Changing expiration updates active announcements too.',
+    startWithSystem: 'Start Relay with the system', startWithSystemHelp: 'Starts the Relay automatically after this user signs in.', startWithSystemUnavailable: 'Available only in the packaged Relay on this system.',
     noUsers: 'No users connected.', online: 'Online', offline: 'Offline', listening: 'Listening on port {port} · {count} connected',
     relayStopped: 'Relay is stopped. Start it to accept Lantern clients.', noLocalAddress: 'No local IPv4 address found.',
     copyAddress: 'Copy address', unknownUser: 'Unknown user', available: 'Available', onlineFor: 'Online for {duration}',
@@ -38,6 +40,7 @@ const dictionaries = {
     connectedUsers: 'Usuarios conectados', activeAnnouncements: 'Anuncios activos', retainedAttachments: 'Archivos adjuntos conservados', uptime: 'Tiempo activo',
     relaySettings: 'Ajustes del Relay', savedAutomatically: 'Guardado automáticamente', port: 'Puerto', announcementExpiration: 'Expiración de anuncios (horas)',
     applySettings: 'Aplicar ajustes', settingsHelp: 'Cambiar el puerto reinicia el Relay. Cambiar la expiración también actualiza los anuncios activos.',
+    startWithSystem: 'Iniciar Relay con el sistema', startWithSystemHelp: 'Inicia el Relay automáticamente después de que este usuario inicie sesión.', startWithSystemUnavailable: 'Disponible solo en el Relay empaquetado en este sistema.',
     noUsers: 'No hay usuarios conectados.', online: 'En línea', offline: 'Sin conexión', listening: 'Escuchando en el puerto {port} · {count} conectado(s)',
     relayStopped: 'El Relay está detenido. Inícialo para aceptar clientes Lantern.', noLocalAddress: 'No se encontró una dirección IPv4 local.',
     copyAddress: 'Copiar dirección', unknownUser: 'Usuario desconocido', available: 'Disponible', onlineFor: 'En línea desde hace {duration}',
@@ -49,6 +52,7 @@ const dictionaries = {
     connectedUsers: 'Utilisateurs connectés', activeAnnouncements: 'Annonces actives', retainedAttachments: 'Pièces jointes conservées', uptime: 'Temps de fonctionnement',
     relaySettings: 'Paramètres du Relay', savedAutomatically: 'Enregistré automatiquement', port: 'Port', announcementExpiration: 'Expiration des annonces (heures)',
     applySettings: 'Appliquer les paramètres', settingsHelp: 'Modifier le port redémarre le Relay. Modifier l’expiration met aussi à jour les annonces actives.',
+    startWithSystem: 'Démarrer le Relay avec le système', startWithSystemHelp: 'Démarre automatiquement le Relay après la connexion de cet utilisateur.', startWithSystemUnavailable: 'Disponible uniquement dans le Relay empaqueté sur ce système.',
     noUsers: 'Aucun utilisateur connecté.', online: 'En ligne', offline: 'Hors ligne', listening: 'Écoute sur le port {port} · {count} connecté(s)',
     relayStopped: 'Le Relay est arrêté. Démarrez-le pour accepter les clients Lantern.', noLocalAddress: 'Aucune adresse IPv4 locale trouvée.',
     copyAddress: 'Copier l’adresse', unknownUser: 'Utilisateur inconnu', available: 'Disponible', onlineFor: 'En ligne depuis {duration}',
@@ -87,6 +91,10 @@ const render = (snapshot) => {
   text('metric-uptime', running ? duration(snapshot.uptimeMs || 0) : '--');
   $('port-input').value = String(snapshot.settings.port || 43190);
   $('ttl-input').value = String(snapshot.settings.announcementTtlHours || 24);
+  const autoStart = snapshot.autoStart || { supported: false, enabled: false };
+  $('auto-start-input').checked = Boolean(autoStart.enabled);
+  $('auto-start-input').disabled = !autoStart.supported;
+  text('auto-start-help', autoStart.supported ? t('startWithSystemHelp') : t('startWithSystemUnavailable'));
   $('start').disabled = running;
   $('restart').disabled = !running;
   $('stop').disabled = !running;
@@ -143,5 +151,6 @@ $('save-settings').onclick = () => request(() => api.updateSettings({
   port: Number($('port-input').value),
   announcementTtlHours: Number($('ttl-input').value)
 }));
+$('auto-start-input').onchange = () => request(() => api.setAutoStart($('auto-start-input').checked));
 const refresh = () => request(api.status);
 refresh(); setInterval(refresh, 2500);

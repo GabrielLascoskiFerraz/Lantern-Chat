@@ -37,6 +37,13 @@
         <label><span data-i18n="port">Port</span> <input id="port-input" type="number" min="1" max="65535" /></label>
         <label><span data-i18n="announcementExpiration">Announcement expiration (hours)</span> <input id="ttl-input" type="number" min="1" max="168" /></label>
         <button id="save-settings" data-i18n="applySettings">Apply settings</button>
+        <label class="autostart-setting">
+          <input id="auto-start-input" type="checkbox" />
+          <span>
+            <strong data-i18n="startWithSystem">Start Relay with the system</strong>
+            <small id="auto-start-help" data-i18n="startWithSystemHelp">Starts the Relay automatically after this user signs in.</small>
+          </span>
+        </label>
         <p class="helper" data-i18n="settingsHelp">Changing the port restarts the Relay. Changing expiration updates active announcements too.</p>
       </section>
       <section class="users-card">
