@@ -69,6 +69,39 @@ export interface ClientAuthState {
   user: AuthenticatedUser | null;
 }
 
+export type ConversationMediaKind = 'media' | 'document';
+
+export interface ConversationMediaCursor {
+  createdAt: number;
+  messageId: string;
+}
+
+export interface ConversationMediaItem {
+  messageId: string;
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  senderUserId: string;
+  createdAt: number;
+  kind: ConversationMediaKind;
+}
+
+export interface ConversationMediaPage {
+  items: ConversationMediaItem[];
+  nextCursor: ConversationMediaCursor | null;
+  hasMore: boolean;
+}
+
+export interface DocumentPreviewResult {
+  kind: 'pdf' | 'text' | 'unsupported';
+  mimeType: string;
+  url: string | null;
+  text: string | null;
+  truncated: boolean;
+  reason?: string | null;
+}
+
 export interface Peer {
   deviceId: string;
   displayName: string;

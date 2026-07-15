@@ -50,6 +50,7 @@ const RELAY_STICKERS_DIR = process.env.LANTERN_RELAY_STICKERS_DIR
 const RELAY_STICKER_CATEGORY_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 const RELAY_STICKER_FILE_NAME_RE = /^[a-z0-9][a-z0-9._ -]*\.gif$/i;
 const RELAY_STICKER_MAX_BYTES = 20 * 1024 * 1024;
+const RELAY_STICKER_PREVIEW_MAX_BYTES = 4 * 1024 * 1024;
 
 const OPEN_READY_STATE = 1;
 const GROUP_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -246,6 +247,16 @@ interface RelayStickerItem {
   updatedAt: number;
 }
 
+export interface ManagedStickerUpdate {
+  label: string;
+  category: string;
+}
+
+export interface ManagedStickerImportResult {
+  added: RelayStickerItem[];
+  replaced: RelayStickerItem[];
+}
+
 const DEFAULT_CONFIG: RelayConfig = {
   host: '0.0.0.0',
   port: 43190,
@@ -367,6 +378,36 @@ const normalizeStickerRelativePath = (value: string): string | null => {
     return `${segments[0]}/${segments[1]}`;
   }
   return null;
+};
+
+const normalizeStickerCategory = (value: string): string => {
+  const normalized = value.trim().toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  if (!normalized || normalized === 'geral') return '';
+  if (!RELAY_STICKER_CATEGORY_RE.test(normalized)) {
+    throw new Error('A categoria da GIF é inválida.');
+  }
+  return normalized;
+};
+
+const normalizeStickerFileName = (value: string): string => {
+  const rawBase = value.replace(/\.gif$/i, '').trim();
+  const base = rawBase
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9._ -]+/gi, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^[. _-]+|[. _-]+$/g, '')
+    .slice(0, 96);
+  const fileName = `${base || 'gif'}.gif`;
+  if (!RELAY_STICKER_FILE_NAME_RE.test(fileName)) {
+    throw new Error('O nome da GIF é inválido.');
+  }
+  return fileName;
 };
 
 const ALLOWED_ANNOUNCEMENT_REACTIONS = new Set<AnnouncementReactionValue>([
@@ -1755,8 +1796,111 @@ export class LanternRelay {
       passwordResetRequests: this.centralStore.listPasswordResetRequests(),
       announcementTtlMs: this.centralStore.getAnnouncementTtlMs(),
       announcements: this.listDashboardAnnouncements(this.listDashboardPeers(Date.now()), Date.now()),
-      calendarAutomation: this.getCalendarAutomationSettings()
+      calendarAutomation: this.getCalendarAutomationSettings(),
+      stickers: this.listStickerCatalog()
     };
+  }
+
+  addManagedStickers(input: { sourcePaths: string[]; category?: string; replaceExisting?: boolean }): ManagedStickerImportResult {
+    const sourcePaths = Array.isArray(input?.sourcePaths)
+      ? [...new Set(input.sourcePaths.map((value) => String(value || '').trim()).filter(Boolean))]
+      : [];
+    if (sourcePaths.length === 0) throw new Error('Selecione pelo menos uma GIF.');
+    if (sourcePaths.length > 100) throw new Error('Importe no máximo 100 GIFs por vez.');
+    const category = normalizeStickerCategory(String(input?.category || ''));
+    const targetDir = category ? path.join(RELAY_STICKERS_DIR, category) : RELAY_STICKERS_DIR;
+    fs.mkdirSync(targetDir, { recursive: true });
+    const addedPaths = new Set<string>();
+    const replacedPaths = new Set<string>();
+    const imports = sourcePaths.map((sourcePath) => {
+      if (!fs.existsSync(sourcePath)) throw new Error(`Arquivo não encontrado: ${path.basename(sourcePath)}`);
+      const stat = fs.statSync(sourcePath);
+      if (!stat.isFile() || !this.isValidStickerFile(sourcePath, stat.size)) {
+        throw new Error(`${path.basename(sourcePath)} não é uma GIF válida ou excede 20 MB.`);
+      }
+      const fileName = normalizeStickerFileName(path.basename(sourcePath));
+      const relativePath = category ? `${category}/${fileName}` : fileName;
+      const targetPath = path.join(targetDir, fileName);
+      const exists = fs.existsSync(targetPath);
+      if (exists && !input.replaceExisting) {
+        throw new Error(`${fileName} já existe em ${category || 'Geral'}. Marque a opção de substituir para continuar.`);
+      }
+      return { sourcePath, fileName, relativePath, targetPath, exists };
+    });
+    const uniqueTargets = new Set(imports.map((item) => item.targetPath.toLocaleLowerCase('pt-BR')));
+    if (uniqueTargets.size !== imports.length) {
+      throw new Error('A seleção contém GIFs diferentes que resultam no mesmo nome. Importe-as separadamente.');
+    }
+
+    for (const { sourcePath, fileName, relativePath, targetPath, exists } of imports) {
+      const temporaryPath = path.join(targetDir, `.${fileName}.${randomUUID()}.tmp`);
+      try {
+        fs.copyFileSync(sourcePath, temporaryPath);
+        if (!this.isValidStickerFile(temporaryPath, fs.statSync(temporaryPath).size)) {
+          throw new Error(`${fileName} não pôde ser validada depois da cópia.`);
+        }
+        fs.copyFileSync(temporaryPath, targetPath);
+      } finally {
+        try { fs.unlinkSync(temporaryPath); } catch { /* arquivo temporário já removido */ }
+      }
+      (exists ? replacedPaths : addedPaths).add(relativePath);
+    }
+
+    const catalog = this.listStickerCatalog();
+    return {
+      added: catalog.filter((item) => addedPaths.has(item.relativePath)),
+      replaced: catalog.filter((item) => replacedPaths.has(item.relativePath))
+    };
+  }
+
+  updateManagedSticker(relativePathValue: string, input: ManagedStickerUpdate): RelayStickerItem {
+    const relativePath = normalizeStickerRelativePath(String(relativePathValue || ''));
+    if (!relativePath) throw new Error('GIF inválida.');
+    const sourcePath = path.join(RELAY_STICKERS_DIR, ...relativePath.split('/'));
+    if (!fs.existsSync(sourcePath)) throw new Error('GIF não encontrada no Relay.');
+    const category = normalizeStickerCategory(String(input?.category || ''));
+    const fileName = normalizeStickerFileName(String(input?.label || ''));
+    const nextRelativePath = category ? `${category}/${fileName}` : fileName;
+    const targetPath = path.join(RELAY_STICKERS_DIR, ...nextRelativePath.split('/'));
+    if (path.resolve(sourcePath) !== path.resolve(targetPath) && fs.existsSync(targetPath)) {
+      throw new Error('Já existe uma GIF com esse nome na categoria escolhida.');
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    if (path.resolve(sourcePath) !== path.resolve(targetPath)) {
+      fs.renameSync(sourcePath, targetPath);
+      const previousCategoryDir = path.dirname(sourcePath);
+      if (previousCategoryDir !== RELAY_STICKERS_DIR) {
+        try { if (fs.readdirSync(previousCategoryDir).length === 0) fs.rmdirSync(previousCategoryDir); } catch { /* mantém a pasta */ }
+      }
+    }
+    const updated = this.listStickerCatalog().find((item) => item.relativePath === nextRelativePath);
+    if (!updated) throw new Error('A GIF foi movida, mas não pôde ser validada no catálogo.');
+    return updated;
+  }
+
+  removeManagedSticker(relativePathValue: string): { relativePath: string } {
+    const relativePath = normalizeStickerRelativePath(String(relativePathValue || ''));
+    if (!relativePath) throw new Error('GIF inválida.');
+    const filePath = path.join(RELAY_STICKERS_DIR, ...relativePath.split('/'));
+    if (!fs.existsSync(filePath)) throw new Error('GIF não encontrada no Relay.');
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) throw new Error('O item selecionado não é uma GIF.');
+    fs.unlinkSync(filePath);
+    const categoryDir = path.dirname(filePath);
+    if (categoryDir !== RELAY_STICKERS_DIR) {
+      try { if (fs.readdirSync(categoryDir).length === 0) fs.rmdirSync(categoryDir); } catch { /* mantém a pasta */ }
+    }
+    return { relativePath };
+  }
+
+  getManagedStickerPreview(relativePathValue: string): string | null {
+    const relativePath = normalizeStickerRelativePath(String(relativePathValue || ''));
+    if (!relativePath) return null;
+    const filePath = path.join(RELAY_STICKERS_DIR, ...relativePath.split('/'));
+    if (!fs.existsSync(filePath)) return null;
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > RELAY_STICKER_PREVIEW_MAX_BYTES || !this.isValidStickerFile(filePath, stat.size)) return null;
+    return `data:image/gif;base64,${fs.readFileSync(filePath).toString('base64')}`;
   }
 
   createManagedUser(input: { username: string; displayName: string; department?: string; password: string; role?: 'admin' | 'user' }) {
@@ -1766,12 +1910,7 @@ export class LanternRelay {
   }
 
   updateManagedUser(userId: string, input: { displayName?: string; department?: string; disabled?: boolean; role?: 'admin' | 'user' }) {
-    let user = this.centralStore.updateUser(userId, {
-      displayName: input.displayName,
-      department: input.department,
-      disabled: input.disabled
-    }, 'relay-ui');
-    if (input.role) user = this.centralStore.setUserRole(userId, input.role, 'relay-ui');
+    const user = this.centralStore.updateManagedUserAtomic(userId, input, 'relay-ui');
     if (user.disabled) this.disconnectDisabledUser(userId);
     this.broadcastDirectory();
     this.bumpPresenceRevision('relay_ui_user_updated');
@@ -3034,7 +3173,7 @@ export class LanternRelay {
       'content-type': contentTypes[extension] || 'application/octet-stream',
       'content-length': String(stat.size),
       'cache-control': extension === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
-      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; frame-src 'self' data: blob:; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer'
     });
@@ -3328,6 +3467,9 @@ export class LanternRelay {
       case 'relay:search:request':
         this.handleCanonicalSearchRequest(session, envelope.payload);
         return;
+      case 'relay:media:list:request':
+        this.handleCanonicalMediaListRequest(session, envelope.payload);
+        return;
       case 'relay:groups:sync':
         this.handleGroupSyncRequest(session, envelope.payload);
         return;
@@ -3444,6 +3586,46 @@ export class LanternRelay {
       type: 'relay:search:results',
       payload: { requestId, messageIds }
     });
+  }
+
+  private handleCanonicalMediaListRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Autenticação necessária.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const peerUserId = asString(record?.peerUserId);
+    const kind = record?.kind === 'media' ? 'media' : record?.kind === 'document' ? 'document' : null;
+    const rawCursor = asRecord(record?.cursor);
+    if (!requestId || !peerUserId || !kind) {
+      this.sendError(session, 'INVALID_MEDIA_REQUEST', 'Consulta de mídia inválida.');
+      return;
+    }
+    try {
+      const page = this.centralStore.listConversationMedia(
+        session.peer.deviceId,
+        peerUserId,
+        kind,
+        rawCursor && typeof rawCursor.createdAt === 'number' && typeof rawCursor.messageId === 'string'
+          ? { createdAt: rawCursor.createdAt, messageId: rawCursor.messageId }
+          : null,
+        asFiniteNumber(record?.limit) || 40
+      );
+      this.sendEnvelope(session.socket, {
+        type: 'relay:media:list:results',
+        payload: { requestId, ...page }
+      });
+    } catch (error) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:media:list:results',
+        payload: {
+          requestId,
+          ok: false,
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
   }
 
   private handleCentralAttachmentInit(session: RelaySession, payload: unknown): void {
@@ -3857,6 +4039,30 @@ export class LanternRelay {
               asString(data.query) || '',
               asFiniteNumber(data.limit) || 500,
               asFiniteNumber(data.offset) || 0
+            )
+          };
+          break;
+        }
+        case 'media': {
+          const groupId = asString(data.groupId) || '';
+          const kind = data.kind === 'media' ? 'media' : data.kind === 'document' ? 'document' : null;
+          if (!kind) throw new Error('Tipo de mídia inválido.');
+          const rawCursor = asRecord(data.cursor);
+          const hiddenMessageIds = new Set(
+            this.centralStore.getUserPreferences(session.peer.deviceId).messages
+              .filter((item) => item.hidden)
+              .map((item) => item.messageId)
+          );
+          response = {
+            ...this.groupStore.listMediaForDevice(
+              groupId,
+              session.peer.deviceId,
+              kind,
+              rawCursor && typeof rawCursor.createdAt === 'number' && typeof rawCursor.messageId === 'string'
+                ? { createdAt: rawCursor.createdAt, messageId: rawCursor.messageId }
+                : null,
+              asFiniteNumber(data.limit) || 40,
+              hiddenMessageIds
             )
           };
           break;

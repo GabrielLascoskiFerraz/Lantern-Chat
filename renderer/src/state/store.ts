@@ -790,10 +790,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               ...state.messagesByConversation,
               [event.message.conversationId]: normalizeMessageOrder([...existing, event.message])
             },
-            conversationPreviewById: {
-              ...state.conversationPreviewById,
-              [event.message.conversationId]: previewFromMessage(event.message)
-            },
+            ...(state.loadingConversationId === event.message.conversationId
+              ? {}
+              : {
+                  conversationPreviewById: {
+                    ...state.conversationPreviewById,
+                    [event.message.conversationId]: previewFromMessage(event.message)
+                  }
+                }),
             unreadByConversation:
               selectedAtReceive === event.message.conversationId
                 ? {
@@ -896,10 +900,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
                 [conversationId]: nextRows
               },
               favoriteByMessageId: nextFavorites,
-              conversationPreviewById: {
-                ...state.conversationPreviewById,
-                [conversationId]: last ? previewFromMessage(last) : ''
-              }
+              ...(state.loadingConversationId === conversationId
+                ? {}
+                : {
+                    conversationPreviewById: {
+                      ...state.conversationPreviewById,
+                      [conversationId]: last ? previewFromMessage(last) : ''
+                    }
+                  })
             };
           }
 
@@ -921,10 +929,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               ...state.messagesByConversation,
               [conversationId]: orderedRows
             },
-            conversationPreviewById: {
-              ...state.conversationPreviewById,
-              [conversationId]: last ? previewFromMessage(last) : ''
-            }
+            ...(state.loadingConversationId === conversationId
+              ? {}
+              : {
+                  conversationPreviewById: {
+                    ...state.conversationPreviewById,
+                    [conversationId]: last ? previewFromMessage(last) : ''
+                  }
+                })
           };
         });
         return;

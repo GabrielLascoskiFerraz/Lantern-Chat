@@ -10,6 +10,9 @@ import {
   AppEvent,
   ClientAuthState,
   ClientRelayConfig,
+  ConversationMediaCursor,
+  ConversationMediaKind,
+  ConversationMediaPage,
   DbMessage,
   GroupInfo,
   GroupMember,
@@ -19,6 +22,7 @@ import {
   Profile,
   StickerCatalogItem
 } from './types';
+import { createDocumentPreview } from './documentPreview';
 
 export interface IpcBindings {
   getAuthState: () => ClientAuthState;
@@ -147,7 +151,13 @@ export interface IpcBindings {
     limit: number,
     before?: number
   ) => Promise<DbMessage[]> | DbMessage[];
-  getMessagesByIds: (messageIds: string[]) => DbMessage[];
+  getMessagesByIds: (messageIds: string[]) => Promise<DbMessage[]> | DbMessage[];
+  listConversationMedia: (
+    conversationId: string,
+    kind: ConversationMediaKind,
+    cursor?: ConversationMediaCursor | null,
+    limit?: number
+  ) => Promise<ConversationMediaPage>;
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
@@ -564,6 +574,11 @@ export const registerIpc = (
     bindings.getMessagesByIds(messageIds)
   );
   ipcMain.handle(
+    'lantern:listConversationMedia',
+    (_event, conversationId: string, kind: ConversationMediaKind, cursor?: ConversationMediaCursor | null, limit?: number) =>
+      bindings.listConversationMedia(conversationId, kind, cursor, limit)
+  );
+  ipcMain.handle(
     'lantern:searchConversationMessageIds',
     (_event, conversationId: string, query: string, limit?: number, offset?: number) =>
       bindings.searchConversationMessageIds(conversationId, query, limit, offset)
@@ -767,6 +782,10 @@ export const registerIpc = (
     } catch {
       return null;
     }
+  });
+
+  ipcMain.handle('lantern:getDocumentPreview', async (_event, filePath: string, fileName?: string | null) => {
+    return createDocumentPreview(filePath, fileName);
   });
 
   ipcMain.handle('lantern:getFileInfo', async (_event, filePath: string) => {

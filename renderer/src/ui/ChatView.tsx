@@ -34,6 +34,7 @@ import {
   DocumentSave20Regular,
   DocumentText20Regular,
   Dismiss20Regular,
+  ImageMultiple20Regular,
   MoreHorizontal20Regular,
   Search20Regular,
   Star20Filled,
@@ -53,6 +54,7 @@ import {
 } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ConversationMediaDialog } from './ConversationMediaDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
 import {
@@ -356,6 +358,7 @@ export const ChatView = ({
   });
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [mediaDialogOpen, setMediaDialogOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchClosing, setSearchClosing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -597,6 +600,14 @@ export const ChatView = ({
     },
     [isGroup, localProfile.deviceId, peer?.displayName, senderProfilesById]
   );
+
+  const mediaSenderNamesById = useMemo(() => ({
+    ...Object.fromEntries(
+      Object.entries(senderProfilesById).map(([deviceId, sender]) => [deviceId, sender.displayName])
+    ),
+    [localProfile.deviceId]: 'Você',
+    ...(peer && !isGroup ? { [peer.deviceId]: peer.displayName } : {})
+  }), [isGroup, localProfile.deviceId, peer, senderProfilesById]);
 
   const focusComposerInput = useCallback(() => {
     const tryFocus = () => {
@@ -1517,6 +1528,8 @@ export const ChatView = ({
             <Button
               appearance="subtle"
               icon={searchOpen ? <Dismiss20Regular /> : <Search20Regular />}
+              title={searchOpen ? 'Fechar busca' : 'Buscar nesta conversa'}
+              aria-label={searchOpen ? 'Fechar busca' : 'Buscar nesta conversa'}
               disabled={favoritesOnly || pinnedOnly}
               onClick={toggleSearchPanel}
             />
@@ -1548,10 +1561,20 @@ export const ChatView = ({
               onClick={() => onOpenGroupDetails()}
             />
           )}
+          <Button
+            appearance="subtle"
+            icon={<ImageMultiple20Regular />}
+            title="Mídias e arquivos"
+            aria-label="Mídias e arquivos"
+            disabled={!relayConnected}
+            onClick={() => setMediaDialogOpen(true)}
+          />
           <div className="header-menu-wrap" ref={headerMenuRef}>
             <Button
               appearance="subtle"
               icon={<MoreHorizontal20Regular />}
+              title="Mais opções"
+              aria-label="Mais opções"
               onClick={() => setHeaderMenuOpen((open) => !open)}
             />
             {headerMenuOpen && (
@@ -1960,6 +1983,25 @@ export const ChatView = ({
           );
         })}
       </div>
+
+      <ConversationMediaDialog
+        open={mediaDialogOpen}
+        conversationId={conversationId}
+        conversationTitle={peer?.displayName || 'Conversa'}
+        senderNamesById={mediaSenderNamesById}
+        onClose={() => setMediaDialogOpen(false)}
+        onOpenFile={onOpenFile}
+        onSaveFileAs={onSaveFileAs}
+        onLocateMessage={async (messageId) => {
+          setFavoritesOnly(false);
+          setPinnedOnly(false);
+          closeSearchAnimated();
+          await new Promise<void>((resolve) => {
+            window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+          });
+          await jumpToReferencedMessage(messageId);
+        }}
+      />
 
       {(!relayConnected || (!isGroup && !peerOnline)) && (
         <div className="chat-offline-hint">

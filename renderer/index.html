@@ -12,7 +12,9 @@
         img-src 'self' data: blob: file:;
         connect-src 'self' ws: wss: http://localhost:5173;
         font-src 'self' data:;
-        media-src 'self' blob: file:
+        media-src 'self' blob: file:;
+        frame-src 'self' data: blob:;
+        object-src 'none'
       "
     />
     <title>Lantern</title>

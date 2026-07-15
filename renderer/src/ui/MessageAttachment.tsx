@@ -1,8 +1,15 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Caption1, ProgressBar, Spinner } from '@fluentui/react-components';
-import { Clock20Regular } from '@fluentui/react-icons';
+import { Clock20Regular, Eye20Regular } from '@fluentui/react-icons';
 import { MessageRow } from '../api/ipcClient';
 import { ipcClient } from '../api/ipcClient';
+import {
+  canPreviewDocumentName,
+  DocumentPreviewDialog,
+  documentExtensionLabel,
+  DocumentTypeIcon
+} from './DocumentPreviewDialog';
+import { ImagePreviewDialog } from './ImagePreviewDialog';
 
 export interface AttachmentTransferState {
   transferred: number;
@@ -53,10 +60,10 @@ const transferStageLabel = (
   }
   if (progress?.stage === 'pending') return { label: progress.detail || 'Aguardando o Relay', tone: 'neutral' };
   if (progress?.stage === 'failed') return { label: progress.detail || 'Falha definitiva', tone: 'error' };
-  if (progress?.stage === 'complete' || progressPercent === 100) return { label: 'Anexo disponível', tone: 'done' };
+  if (progress?.stage === 'complete' || progressPercent === 100) return { label: '', tone: 'done' };
   if (progressPercent !== null) return { label: `Transferindo · ${progressPercent}%`, tone: 'active' };
   if (message.status === 'sent' || message.status === null) return { label: 'Aguardando o Relay', tone: 'neutral' };
-  return { label: 'Anexo disponível', tone: 'done' };
+  return { label: '', tone: 'done' };
 };
 
 export const MessageAttachment = ({
@@ -70,8 +77,11 @@ export const MessageAttachment = ({
 }: MessageAttachmentProps) => {
   const hydrationSentinelRef = useRef<HTMLSpanElement | null>(null);
   const hydrationRequestedRef = useRef(false);
+  const [documentPreviewOpen, setDocumentPreviewOpen] = useState(false);
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
   const isImageFile = isImageAttachmentName(message.fileName);
   const isStickerFile = isStickerAttachmentName(message.fileName);
+  const isDocumentFile = !isImageFile && !isStickerFile;
   const progressPercent = transfer && transfer.total > 0
     ? Math.min(100, Math.floor((transfer.transferred / transfer.total) * 100))
     : null;
@@ -121,12 +131,17 @@ export const MessageAttachment = ({
   return (
     <>
       <span ref={hydrationSentinelRef} className="attachment-hydration-sentinel" aria-hidden />
-      {!isStickerFile && <div className="message-file-title">📎 {message.fileName}</div>}
+      {!isStickerFile && (isDocumentFile ? (
+        <div className="message-document-card">
+          <span className="message-document-icon"><DocumentTypeIcon fileName={message.fileName} /><small>{documentExtensionLabel(message.fileName)}</small></span>
+          <span className="message-document-copy"><strong>{message.fileName || 'Arquivo'}</strong><small>Documento {documentExtensionLabel(message.fileName)}</small></span>
+        </div>
+      ) : <div className="message-file-title">📎 {message.fileName}</div>)}
       {isImageFile && Boolean(message.filePath) && (
         <button
           type="button"
           className={`message-image-preview-btn ${isStickerFile ? 'sticker-preview' : ''} ${previewDataUrl ? 'is-ready' : ''} ${previewVisible ? 'is-media-visible' : ''}`}
-          onClick={() => void onOpenFile(message.filePath!)}
+          onClick={() => setImagePreviewOpen(true)}
           disabled={!previewVisible}
         >
           {previewDataUrl && <img src={previewDataUrl} alt={message.fileName || 'Imagem'} className="message-image-preview" />}
@@ -137,10 +152,10 @@ export const MessageAttachment = ({
       )}
       {!isStickerFile && (
         <div className="message-file-meta">
-          {formatBytes(message.fileSize)} · SHA-256 {message.fileSha256?.slice(0, 10)}...
+          {formatBytes(message.fileSize)}
         </div>
       )}
-      {progressPercent !== null && !isStickerFile && (
+      {progressPercent !== null && transferStage.tone !== 'done' && !isStickerFile && (
         <div className="message-file-progress-wrap">
           <ProgressBar value={progressPercent / 100} thickness="medium" />
           <div className="message-file-progress">
@@ -148,12 +163,18 @@ export const MessageAttachment = ({
           </div>
         </div>
       )}
-      {(!isStickerFile || transferStage.tone !== 'done') && (
+      {transferStage.tone !== 'done' && (
         <div className={`transfer-stage-pill ${transferStage.tone}`}>{transferStage.label}</div>
       )}
       {message.filePath && message.status !== 'failed' ? (
         isStickerFile ? null : (
           <div className="message-file-actions">
+            {isImageFile && (
+              <Button size="small" appearance="secondary" icon={<Eye20Regular />} disabled={!previewDataUrl} onClick={() => setImagePreviewOpen(true)}>Prévia</Button>
+            )}
+            {isDocumentFile && canPreviewDocumentName(message.fileName) && (
+              <Button size="small" appearance="secondary" icon={<Eye20Regular />} onClick={() => setDocumentPreviewOpen(true)}>Prévia</Button>
+            )}
             <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>Abrir</Button>
             <Button size="small" appearance="secondary" onClick={() => void onSaveFileAs(message.filePath!, message.fileName)}>
               Salvar como
@@ -171,6 +192,24 @@ export const MessageAttachment = ({
       ) : (
         <div className="inline-status"><Spinner size="tiny" /><Caption1>Aguardando arquivo completo...</Caption1></div>
       )}
+      <DocumentPreviewDialog
+        open={documentPreviewOpen}
+        filePath={message.filePath}
+        fileName={message.fileName}
+        onClose={() => setDocumentPreviewOpen(false)}
+        onOpenFile={onOpenFile}
+        onSaveFileAs={onSaveFileAs}
+      />
+      <ImagePreviewDialog
+        open={imagePreviewOpen && Boolean(previewDataUrl)}
+        src={previewDataUrl}
+        filePath={message.filePath}
+        fileName={message.fileName}
+        onClose={() => setImagePreviewOpen(false)}
+        onOpenFile={onOpenFile}
+        onSaveFileAs={onSaveFileAs}
+        showFileActions={!isStickerFile}
+      />
     </>
   );
 };

@@ -6,6 +6,10 @@ import {
   AuthenticatedUser,
   ClientAuthState,
   ClientRelayConfig,
+  ConversationMediaCursor,
+  ConversationMediaKind,
+  ConversationMediaPage,
+  DocumentPreviewResult,
   GroupInfo,
   GroupMember,
   LanternApi,
@@ -614,8 +618,9 @@ class WebLanternBridge {
         return;
       case 'relay:history:page':
       case 'relay:search:results':
+      case 'relay:media:list:results':
       case 'relay:attachment:ack':
-        this.settle(payload);
+        this.settle(payload, payload.ok === false ? String(payload.message || 'Falha na consulta ao Relay.') : undefined);
         return;
       case 'relay:send:ack':
         {
@@ -1024,6 +1029,27 @@ class WebLanternBridge {
           ? this.downloadAttachment(row).catch(() => row)
           : row));
       },
+      listConversationMedia: async (
+        conversationId: string,
+        kind: ConversationMediaKind,
+        cursor?: ConversationMediaCursor | null,
+        limit = 40
+      ): Promise<ConversationMediaPage> => {
+        const result = conversationId.startsWith('group:')
+          ? await this.groupAction('media', {
+              groupId: conversationId.slice(6), kind, cursor: cursor || null, limit
+            })
+          : await this.request('relay:media:list:request', {
+              peerUserId: conversationId.slice(3), kind, cursor: cursor || null, limit
+            });
+        return {
+          items: Array.isArray(result.items) ? result.items : [],
+          nextCursor: result.nextCursor && typeof result.nextCursor === 'object'
+            ? result.nextCursor as ConversationMediaCursor
+            : null,
+          hasMore: result.hasMore === true
+        };
+      },
       searchConversationMessageIds: async (conversationId, query, limit = 500, offset = 0) => { const result = conversationId.startsWith('group:') ? await this.groupAction('search', { groupId: conversationId.slice(6), query, limit, offset }) : await this.request('relay:search:request', { peerUserId: conversationId.slice(3), query, limit, offset }); return Array.isArray(result.messageIds) ? result.messageIds : []; },
       getConversationPreviews: async (ids) => Object.fromEntries(ids.map((id) => { const last = (this.messages.get(id) || []).at(-1); return [id, last?.type === 'file' ? `📎 ${last.fileName || 'Arquivo'}` : last?.bodyText || '']; })),
       getMessageReactions: async (ids) => Object.fromEntries(ids.map((id) => [id, this.reactions.get(id) || { counts: {}, myReaction: null }])),
@@ -1051,6 +1077,28 @@ class WebLanternBridge {
       openExternalUrl: async (url) => { window.open(url, '_blank', 'noopener,noreferrer'); },
       nativePaste: async () => false,
       getFilePreview: async (key) => { const web = this.files.get(key); if (web) return web.url || (web.url = URL.createObjectURL(web.file)); return key.startsWith('blob:') ? key : null; },
+      getDocumentPreview: async (key, fileName): Promise<DocumentPreviewResult> => {
+        const web = this.files.get(key);
+        if (!web) return { kind: 'unsupported', mimeType: 'application/octet-stream', url: null, text: null, truncated: false, reason: 'Arquivo indisponível.' };
+        const effectiveName = (fileName || web.file.name || '').toLowerCase();
+        const extension = effectiveName.includes('.') ? `.${effectiveName.split('.').pop()}` : '';
+        if (extension === '.pdf' || web.file.type === 'application/pdf') {
+          if (web.file.size > 20 * 1024 * 1024) return { kind: 'unsupported', mimeType: 'application/pdf', url: null, text: null, truncated: false, reason: 'Este PDF é grande demais para a prévia. Use Abrir para visualizá-lo.' };
+          return { kind: 'pdf', mimeType: 'application/pdf', url: web.url || (web.url = URL.createObjectURL(web.file)), text: null, truncated: false, reason: null };
+        }
+        const textMimeByExt: Record<string, string> = {
+          '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown', '.csv': 'text/csv',
+          '.tsv': 'text/tab-separated-values', '.json': 'application/json', '.xml': 'application/xml',
+          '.yaml': 'application/yaml', '.yml': 'application/yaml', '.log': 'text/plain', '.ini': 'text/plain',
+          '.conf': 'text/plain', '.rtf': 'application/rtf'
+        };
+        const mimeType = textMimeByExt[extension];
+        if (!mimeType) return { kind: 'unsupported', mimeType: web.file.type || 'application/octet-stream', url: null, text: null, truncated: false, reason: 'Este formato não possui prévia segura no Lantern.' };
+        const maxBytes = 512 * 1024;
+        const text = await web.file.slice(0, maxBytes).text();
+        if (text.includes('\0')) return { kind: 'unsupported', mimeType, url: null, text: null, truncated: false, reason: 'O conteúdo deste arquivo não é texto legível.' };
+        return { kind: 'text', mimeType, url: null, text, truncated: web.file.size > maxBytes, reason: null };
+      },
       getFileInfo: async (key) => { const file = this.files.get(key)?.file; if (!file) return null; const ext = file.name.includes('.') ? file.name.split('.').pop() || '' : ''; return { name: file.name, size: file.size, ext, isImage: file.type.startsWith('image/') }; },
       getClipboardFilePaths: async () => [],
       clipboardHasFileLikeData: async () => false,

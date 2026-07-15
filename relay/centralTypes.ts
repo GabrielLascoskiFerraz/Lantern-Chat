@@ -89,3 +89,27 @@ export interface AttachmentRecord {
   encryptedPath: string;
   createdAt: number;
 }
+
+export type ConversationMediaKind = 'media' | 'document';
+
+export interface ConversationMediaCursor {
+  createdAt: number;
+  messageId: string;
+}
+
+export interface ConversationMediaItem {
+  messageId: string;
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  senderUserId: string;
+  createdAt: number;
+  kind: ConversationMediaKind;
+}
+
+export interface ConversationMediaPage {
+  items: ConversationMediaItem[];
+  nextCursor: ConversationMediaCursor | null;
+  hasMore: boolean;
+}

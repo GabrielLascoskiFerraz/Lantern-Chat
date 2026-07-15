@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld('relayUi', {
   setAnnouncementExpiry: (messageId: string, expiresAt: number) => ipcRenderer.invoke('relay-ui:setAnnouncementExpiry', messageId, expiresAt),
   configureCalendar: (input: unknown) => ipcRenderer.invoke('relay-ui:configureCalendar', input),
   refreshCalendar: () => ipcRenderer.invoke('relay-ui:refreshCalendar'),
+  importStickers: (input: { category?: string; replaceExisting?: boolean }) => ipcRenderer.invoke('relay-ui:importStickers', input),
+  updateSticker: (relativePath: string, input: { label: string; category: string }) => ipcRenderer.invoke('relay-ui:updateSticker', relativePath, input),
+  removeSticker: (relativePath: string) => ipcRenderer.invoke('relay-ui:removeSticker', relativePath),
+  stickerPreview: (relativePath: string) => ipcRenderer.invoke('relay-ui:stickerPreview', relativePath),
   openDashboard: () => ipcRenderer.invoke('relay-ui:openDashboard'),
   updateSettings: (input: { port?: number; tlsCertFile?: string; tlsKeyFile?: string; startAtLogin?: boolean; startRelayOnLaunch?: boolean }) =>
     ipcRenderer.invoke('relay-ui:updateSettings', input),

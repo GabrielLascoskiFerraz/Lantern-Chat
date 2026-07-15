@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AppEvent, ClientRelayConfig, MessageReplyPayload } from './types';
+import { AppEvent, ClientRelayConfig, DocumentPreviewResult, MessageReplyPayload } from './types';
 
 type EventCallback = (event: AppEvent) => void;
 
@@ -106,6 +106,12 @@ const api = {
     ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getMessagesByIds', messageIds),
+  listConversationMedia: (
+    conversationId: string,
+    kind: 'media' | 'document',
+    cursor?: { createdAt: number; messageId: string } | null,
+    limit?: number
+  ) => ipcRenderer.invoke('lantern:listConversationMedia', conversationId, kind, cursor, limit),
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
@@ -156,6 +162,8 @@ const api = {
   nativePaste: (): Promise<boolean> => ipcRenderer.invoke('lantern:nativePaste'),
   getFilePreview: (filePath: string): Promise<string | null> =>
     ipcRenderer.invoke('lantern:getFilePreview', filePath),
+  getDocumentPreview: (filePath: string, fileName?: string | null): Promise<DocumentPreviewResult> =>
+    ipcRenderer.invoke('lantern:getDocumentPreview', filePath, fileName),
   getFileInfo: (filePath: string): Promise<{
     name: string;
     size: number;

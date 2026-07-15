@@ -5,10 +5,15 @@ const api = window.relayUi;
 let latestState = null;
 let settingsDirty = false;
 let actionInFlight = false;
+let managementActionInFlight = false;
 let feedbackTimer = null;
+const accountDrafts = new Map();
+const stickerPreviewCache = new Map();
+const STICKER_PREVIEW_LIMIT_BYTES = 4 * 1024 * 1024;
+let stickerCatalog = [];
 
 const cleanError = (error) => String(error?.message || error || 'Não foi possível concluir a operação.')
-  .replace(/^Error invoking remote method '[^']+': Error: /, '');
+  .replace(/^(?:Error invoking remote method '[^']+': )?(?:Error: )+/, '');
 
 const duration = (ms) => {
   const totalMinutes = Math.floor(Math.max(0, Number(ms) || 0) / 60_000);
@@ -162,16 +167,123 @@ const renderAddresses = (state) => {
 
 const managementEmpty = (title, detail) => emptyState('○', title, detail);
 
+const loadStickerPreview = async (sticker, image, fallback) => {
+  if (Number(sticker.size) > STICKER_PREVIEW_LIMIT_BYTES) {
+    fallback.textContent = 'Arquivo grande · prévia não carregada';
+    return;
+  }
+  const cacheKey = `${sticker.relativePath}:${sticker.updatedAt}`;
+  let preview = stickerPreviewCache.get(cacheKey);
+  if (preview === undefined) {
+    preview = api.stickerPreview(sticker.relativePath).catch(() => null);
+    stickerPreviewCache.set(cacheKey, preview);
+  }
+  const dataUrl = await preview;
+  if (!image.isConnected) return;
+  if (dataUrl) {
+    image.src = dataUrl;
+    image.hidden = false;
+    fallback.hidden = true;
+  } else {
+    fallback.textContent = 'Prévia indisponível';
+  }
+};
+
+const renderStickerCatalog = (stickers) => {
+  stickerCatalog = Array.isArray(stickers) ? stickers : [];
+  $('relay-gifs-count').textContent = number(stickerCatalog.length);
+  const categories = [...new Set(stickerCatalog.map((item) => item.category || 'geral'))]
+    .sort((left, right) => left.localeCompare(right, 'pt-BR', { sensitivity: 'base' }));
+  const datalist = $('sticker-categories');
+  datalist.replaceChildren();
+  for (const category of categories) {
+    const option = document.createElement('option');
+    option.value = category === 'geral' ? 'Geral' : category;
+    datalist.append(option);
+  }
+
+  const query = $('sticker-search').value.trim().toLocaleLowerCase('pt-BR');
+  const visible = query
+    ? stickerCatalog.filter((item) => `${item.label} ${item.category}`.toLocaleLowerCase('pt-BR').includes(query))
+    : stickerCatalog;
+  const list = $('relay-gifs-list');
+  list.replaceChildren();
+  if (visible.length === 0) {
+    list.append(managementEmpty(
+      stickerCatalog.length ? 'Nenhuma GIF encontrada' : 'Nenhuma GIF no Relay',
+      stickerCatalog.length ? 'Tente buscar por outro nome ou categoria.' : 'Adicione arquivos para disponibilizá-los aos clientes.'
+    ));
+    return;
+  }
+
+  for (const sticker of visible) {
+    const card = document.createElement('article'); card.className = 'sticker-management-item';
+    const preview = document.createElement('div'); preview.className = 'sticker-management-preview';
+    const image = document.createElement('img'); image.alt = sticker.label; image.hidden = true;
+    const fallback = document.createElement('span'); fallback.textContent = 'Carregando prévia…';
+    preview.append(image, fallback);
+    void loadStickerPreview(sticker, image, fallback);
+
+    const body = document.createElement('div'); body.className = 'sticker-management-body';
+    const fields = document.createElement('div'); fields.className = 'sticker-edit-fields';
+    const labelField = document.createElement('label'); labelField.className = 'field';
+    const labelCaption = document.createElement('span'); labelCaption.textContent = 'Nome';
+    const labelInput = document.createElement('input'); labelInput.value = sticker.label; labelInput.maxLength = 96; labelInput.setAttribute('aria-label', `Nome de ${sticker.label}`);
+    labelField.append(labelCaption, labelInput);
+    const categoryField = document.createElement('label'); categoryField.className = 'field';
+    const categoryCaption = document.createElement('span'); categoryCaption.textContent = 'Categoria';
+    const categoryInput = document.createElement('input'); categoryInput.value = sticker.category === 'geral' ? 'Geral' : sticker.category; categoryInput.maxLength = 48; categoryInput.setAttribute('list', 'sticker-categories'); categoryInput.setAttribute('aria-label', `Categoria de ${sticker.label}`);
+    categoryField.append(categoryCaption, categoryInput);
+    fields.append(labelField, categoryField);
+
+    const meta = document.createElement('span'); meta.className = 'sticker-management-meta';
+    meta.textContent = `${bytes(sticker.size)} · atualizada em ${new Date(sticker.updatedAt).toLocaleString('pt-BR')}`;
+    const actions = document.createElement('div'); actions.className = 'sticker-management-actions';
+    const save = document.createElement('button'); save.type = 'button'; save.className = 'button'; save.textContent = 'Salvar alterações'; save.disabled = true;
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger'; remove.textContent = 'Remover';
+    const updateDirtyState = () => {
+      const nextCategory = categoryInput.value.trim().toLocaleLowerCase('pt-BR') || 'geral';
+      save.disabled = managementActionInFlight || (
+        labelInput.value.trim() === sticker.label && nextCategory === (sticker.category || 'geral').toLocaleLowerCase('pt-BR')
+      );
+    };
+    labelInput.addEventListener('input', updateDirtyState);
+    categoryInput.addEventListener('input', updateDirtyState);
+    save.addEventListener('click', () => {
+      if (!labelInput.value.trim()) return showFeedback('Informe um nome para a GIF.', 'error');
+      void runManagementAction(
+        () => api.updateSticker(sticker.relativePath, { label: labelInput.value, category: categoryInput.value }),
+        'GIF atualizada no catálogo.'
+      );
+    });
+    remove.addEventListener('click', () => {
+      if (!window.confirm(`Remover “${sticker.label}” do catálogo do Relay?`)) return;
+      void runManagementAction(() => api.removeSticker(sticker.relativePath), 'GIF removida do Relay.');
+    });
+    actions.append(save, remove);
+    body.append(fields, meta, actions);
+    card.append(preview, body);
+    list.append(card);
+  }
+};
+
 const renderManagement = (state) => {
   const users = Array.isArray(state.users) ? state.users : [];
   const requests = Array.isArray(state.passwordResetRequests) ? state.passwordResetRequests : [];
   const announcements = Array.isArray(state.announcements) ? state.announcements : [];
+  renderStickerCatalog(state.stickers);
   $('accounts-count').textContent = number(users.length);
   $('password-resets-count').textContent = number(requests.length);
   const accounts = $('accounts-list');
   accounts.replaceChildren();
   if (!users.length) accounts.append(managementEmpty('Nenhuma conta', 'Crie a primeira conta para começar.'));
   for (const user of users) {
+    const persistedDraft = accountDrafts.get(user.userId);
+    const draft = persistedDraft || {
+      department: user.department || '',
+      admin: user.role === 'admin',
+      dirty: false
+    };
     const row = document.createElement('article'); row.className = 'management-row';
     const head = document.createElement('div'); head.className = 'management-row-head';
     const identity = document.createElement('div'); identity.className = 'account-identity';
@@ -183,23 +295,57 @@ const renderManagement = (state) => {
     const status = document.createElement('span'); status.className = `state-badge${user.disabled ? ' disabled' : ''}`; status.textContent = user.disabled ? 'Desativada' : 'Ativa';
     head.append(identity, status);
     const controls = document.createElement('div'); controls.className = 'management-controls';
-    const department = document.createElement('input'); department.value = user.department || ''; department.placeholder = 'Setor'; department.setAttribute('aria-label', `Setor de ${user.displayName}`);
+    const department = document.createElement('input'); department.value = draft.department; department.placeholder = 'Setor'; department.setAttribute('aria-label', `Setor de ${user.displayName}`);
     const adminLabel = document.createElement('label'); adminLabel.className = 'check-field compact';
-    const admin = document.createElement('input'); admin.type = 'checkbox'; admin.checked = user.role === 'admin';
+    const admin = document.createElement('input'); admin.type = 'checkbox'; admin.checked = draft.admin;
     const adminText = document.createElement('span'); adminText.textContent = 'Acesso à dashboard'; adminLabel.append(admin, adminText);
     const save = document.createElement('button'); save.className = 'button'; save.type = 'button'; save.textContent = 'Salvar';
-    save.addEventListener('click', () => runManagementAction(() => api.updateUser(user.userId, { department: department.value, role: admin.checked ? 'admin' : 'user' }), 'Conta atualizada.'));
+    const pending = document.createElement('span'); pending.className = `management-save-state${draft.dirty ? ' dirty' : ''}`; pending.textContent = draft.dirty ? 'Alterações não salvas' : 'Tudo salvo';
+    save.disabled = !draft.dirty || managementActionInFlight;
+    const updateDraft = () => {
+      const next = {
+        department: department.value,
+        admin: admin.checked,
+        dirty: department.value.trim() !== (user.department || '') || admin.checked !== (user.role === 'admin')
+      };
+      accountDrafts.set(user.userId, next);
+      save.disabled = !next.dirty || managementActionInFlight;
+      pending.className = `management-save-state${next.dirty ? ' dirty' : ''}`;
+      pending.textContent = next.dirty ? 'Alterações não salvas' : 'Tudo salvo';
+    };
+    department.addEventListener('input', updateDraft);
+    admin.addEventListener('change', updateDraft);
+    save.addEventListener('click', () => {
+      const requestedDepartment = department.value.trim();
+      const requestedRole = admin.checked ? 'admin' : 'user';
+      void runManagementAction(async () => {
+        pending.className = 'management-save-state saving'; pending.textContent = 'Salvando…';
+        const result = await api.updateUser(user.userId, { department: requestedDepartment, role: requestedRole });
+        if (!result || result.department !== requestedDepartment || result.role !== requestedRole) {
+          throw new Error('O Relay não confirmou os valores salvos.');
+        }
+        accountDrafts.delete(user.userId);
+        return result;
+      }, 'Conta atualizada e persistida.');
+    });
     const password = document.createElement('input'); password.type = 'password'; password.placeholder = 'Nova senha'; password.autocomplete = 'new-password';
     const reset = document.createElement('button'); reset.className = 'button'; reset.type = 'button'; reset.textContent = 'Redefinir senha';
     reset.addEventListener('click', () => {
       if (password.value.length < 10) return showFeedback('A senha deve ter pelo menos 10 caracteres.', 'error');
-      void runManagementAction(() => api.resetPassword(user.userId, password.value), 'Senha redefinida e sessões encerradas.');
+      void runManagementAction(async () => { await api.resetPassword(user.userId, password.value); password.value = ''; }, 'Senha redefinida e sessões encerradas.');
     });
     const toggle = document.createElement('button'); toggle.className = user.disabled ? 'button' : 'button danger'; toggle.type = 'button'; toggle.textContent = user.disabled ? 'Reativar' : 'Desativar';
-    toggle.addEventListener('click', () => runManagementAction(() => api.updateUser(user.userId, { disabled: !user.disabled }), user.disabled ? 'Conta reativada.' : 'Conta desativada.'));
+    toggle.addEventListener('click', () => runManagementAction(async () => {
+      const result = await api.updateUser(user.userId, { disabled: !user.disabled });
+      if (!result || result.disabled !== !user.disabled) throw new Error('O Relay não confirmou o estado da conta.');
+      return result;
+    }, user.disabled ? 'Conta reativada.' : 'Conta desativada.'));
     const remove = document.createElement('button'); remove.className = 'button danger'; remove.type = 'button'; remove.textContent = 'Excluir';
     remove.addEventListener('click', () => { if (window.confirm(`Excluir a conta de ${user.displayName}? O histórico será preservado.`)) void runManagementAction(() => api.deleteUser(user.userId), 'Conta excluída.'); });
-    controls.append(department, adminLabel, save, password, reset, toggle, remove);
+    const profileControls = document.createElement('div'); profileControls.className = 'management-control-group profile-controls'; profileControls.append(department, adminLabel, save, pending);
+    const passwordControls = document.createElement('div'); passwordControls.className = 'management-control-group password-controls'; passwordControls.append(password, reset);
+    const accountActions = document.createElement('div'); accountActions.className = 'management-control-group account-actions'; accountActions.append(toggle, remove);
+    controls.append(profileControls, passwordControls, accountActions);
     row.append(head, controls); accounts.append(row);
   }
 
@@ -256,8 +402,20 @@ const refreshManagement = async () => {
 };
 
 const runManagementAction = async (action, successMessage) => {
-  try { await action(); await refreshManagement(); await refresh(); showFeedback(successMessage); }
-  catch (error) { showFeedback(cleanError(error), 'error'); }
+  if (managementActionInFlight) return;
+  managementActionInFlight = true;
+  try {
+    const result = await action();
+    await refreshManagement();
+    await refresh();
+    showFeedback(successMessage);
+    return result;
+  } catch (error) {
+    showFeedback(cleanError(error), 'error');
+  } finally {
+    managementActionInFlight = false;
+    if (latestState?.running) await refreshManagement().catch(() => undefined);
+  }
 };
 
 const setButtons = (state) => {
@@ -440,6 +598,30 @@ $('announcement-ttl-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const ttlMs = Number($('announcement-ttl-value').value) * Number($('announcement-ttl-unit').value);
   void runManagementAction(() => api.setAnnouncementTtl(ttlMs), 'Tempo padrão dos anúncios atualizado.');
+});
+
+$('sticker-search').addEventListener('input', () => renderStickerCatalog(stickerCatalog));
+$('import-stickers').addEventListener('click', async () => {
+  if (managementActionInFlight) return;
+  managementActionInFlight = true;
+  $('import-stickers').disabled = true;
+  try {
+    const result = await api.importStickers({
+      category: $('sticker-import-category').value,
+      replaceExisting: $('sticker-replace-existing').checked
+    });
+    if (result?.canceled) return;
+    await refreshManagement();
+    await refresh();
+    const added = Number(result?.added?.length || 0);
+    const replaced = Number(result?.replaced?.length || 0);
+    showFeedback(`${number(added)} GIF(s) adicionada(s)${replaced ? ` · ${number(replaced)} substituída(s)` : ''}.`);
+  } catch (error) {
+    showFeedback(cleanError(error), 'error');
+  } finally {
+    managementActionInFlight = false;
+    $('import-stickers').disabled = false;
+  }
 });
 
 $('calendar-automation-form').addEventListener('submit', (event) => {

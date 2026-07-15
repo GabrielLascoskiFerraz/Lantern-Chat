@@ -275,6 +275,11 @@ export const SettingsModal = ({
                       <Text weight="semibold" size={500}>{displayName.trim() || profile.displayName}</Text>
                       <Text size={300}>{statusMessage.trim() || 'Disponível'}</Text>
                       <Text size={200} className="settings-profile-id">ID {profile.deviceId.slice(0, 12)}</Text>
+                      {profile.username?.trim() && (
+                        <Text size={200} className="settings-profile-username">
+                          @{profile.username.trim().replace(/^@+/, '')}
+                        </Text>
+                      )}
                     </aside>
 
                     <div className="settings-profile-form">

@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EncryptedFields } from './security';
 import { EncryptedChunkStore } from './encryptedChunkStore';
+import type {
+  ConversationMediaCursor,
+  ConversationMediaKind,
+  ConversationMediaPage
+} from './centralTypes';
 import {
   GroupReactionValue,
   RelayGroup,
@@ -20,6 +25,21 @@ const GROUP_UPLOAD_STALE_MS = 2 * 60 * 60 * 1000;
 const GROUP_FILE_CHUNK_SIZE_BYTES = 64 * 1024;
 const GROUP_FILE_MAX_BYTES = 200 * 1024 * 1024;
 const GROUP_MESSAGE_EDIT_WINDOW_MS = 10 * 60 * 1000;
+const GROUP_IMAGE_FILE_RE = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/i;
+
+const groupMediaType = (fileName: string): { kind: ConversationMediaKind; mimeType: string } => {
+  const extension = fileName.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+  const mimeByExtension: Record<string, string> = {
+    avif: 'image/avif', bmp: 'image/bmp', gif: 'image/gif', heic: 'image/heic',
+    heif: 'image/heif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png',
+    svg: 'image/svg+xml', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp',
+    pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', zip: 'application/zip'
+  };
+  return {
+    kind: GROUP_IMAGE_FILE_RE.test(fileName) ? 'media' : 'document',
+    mimeType: mimeByExtension[extension] || 'application/octet-stream'
+  };
+};
 
 type GroupStoreLog = (
   event: string,
@@ -530,6 +550,59 @@ export class GroupStore {
       return typeof metadata.messageId === 'string' && messageIds.has(metadata.messageId);
     });
     return { events, hasMore };
+  }
+
+  listMediaForDevice(
+    groupId: string,
+    deviceId: string,
+    kind: ConversationMediaKind,
+    cursor: ConversationMediaCursor | null = null,
+    limit = 40,
+    hiddenMessageIds: ReadonlySet<string> = new Set()
+  ): ConversationMediaPage {
+    const group = this.getRequiredGroup(groupId);
+    this.assertActiveMember(group, deviceId);
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 40, 100));
+    const deletedMessageIds = new Set<string>();
+    for (const event of this.eventsByGroupId.get(group.groupId) || []) {
+      if (event.type !== 'group.message.deletedForEveryone') continue;
+      const payload = event.payload && typeof event.payload === 'object'
+        ? event.payload as Record<string, unknown>
+        : {};
+      if (typeof payload.targetMessageId === 'string') deletedMessageIds.add(payload.targetMessageId);
+    }
+    const beforeCreatedAt = cursor?.createdAt && Number.isFinite(cursor.createdAt)
+      ? Math.max(1, Math.trunc(cursor.createdAt))
+      : Number.MAX_SAFE_INTEGER;
+    const beforeMessageId = cursor?.messageId?.trim() || '\uffff';
+    const matching = Array.from(this.attachmentsByFileId.values())
+      .filter((metadata) => metadata.groupId === group.groupId)
+      .filter((metadata) => metadata.uploadedAt !== null && metadata.deletedAt === null)
+      .filter((metadata) => !deletedMessageIds.has(metadata.messageId) && !hiddenMessageIds.has(metadata.messageId))
+      .filter((metadata) => metadata.createdAt < beforeCreatedAt ||
+        (metadata.createdAt === beforeCreatedAt && metadata.messageId < beforeMessageId))
+      .map((metadata) => {
+        const type = groupMediaType(metadata.fileName);
+        return {
+          messageId: metadata.messageId,
+          fileId: metadata.fileId,
+          fileName: metadata.fileName,
+          fileSize: metadata.fileSize,
+          mimeType: type.mimeType,
+          senderUserId: metadata.senderDeviceId,
+          createdAt: metadata.createdAt,
+          kind: type.kind
+        };
+      })
+      .filter((item) => item.kind === kind)
+      .sort((left, right) => right.createdAt - left.createdAt || right.messageId.localeCompare(left.messageId));
+    const items = matching.slice(0, safeLimit);
+    const last = items[items.length - 1];
+    return {
+      items,
+      hasMore: matching.length > safeLimit,
+      nextCursor: last ? { createdAt: last.createdAt, messageId: last.messageId } : null
+    };
   }
 
   exportMessagesForDevice(groupId: string, deviceId: string): Array<{

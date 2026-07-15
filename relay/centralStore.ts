@@ -7,6 +7,9 @@ import {
   CanonicalFrame,
   CanonicalExportMessage,
   CentralUser,
+  ConversationMediaCursor,
+  ConversationMediaKind,
+  ConversationMediaPage,
   PasswordResetRequest,
   RetentionPolicy,
   SupportedLocale
@@ -27,6 +30,10 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ATTACHMENT_CHUNK_BYTES = 64 * 1024;
 const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
 const PASSWORD_RESET_APPROVAL_TTL_MS = 30 * 60 * 1000;
+const IMAGE_FILE_RE = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/i;
+
+const mediaKindFor = (mimeType: string, fileName: string): ConversationMediaKind =>
+  mimeType.toLowerCase().startsWith('image/') || IMAGE_FILE_RE.test(fileName) ? 'media' : 'document';
 
 interface UserRow {
   userId: string;
@@ -612,6 +619,48 @@ export class CentralStore {
       locale: updated.locale
     });
     return this.toUser(updated);
+  }
+
+  updateManagedUserAtomic(
+    userId: string,
+    input: { displayName?: string; department?: string; disabled?: boolean; role?: 'admin' | 'user' },
+    actor = 'relay-ui'
+  ): CentralUser {
+    return this.db.transaction(() => {
+      const current = this.db.prepare('SELECT * FROM users WHERE userId = ?').get(userId) as UserRow | undefined;
+      if (!current) throw new Error('Usuário não encontrado.');
+      const displayName = input.displayName === undefined ? current.displayName : input.displayName.trim().slice(0, 80);
+      if (!displayName) throw new Error('Nome de exibição obrigatório.');
+      const updated: UserRow = {
+        ...current,
+        displayName,
+        department: input.department === undefined ? current.department : input.department.trim().slice(0, 80),
+        disabled: input.disabled === undefined ? current.disabled : input.disabled ? 1 : 0,
+        role: input.role === undefined ? current.role : input.role,
+        updatedAt: Date.now()
+      };
+      const result = this.db.prepare(`
+        UPDATE users SET displayName=@displayName, department=@department, disabled=@disabled,
+          role=@role, updatedAt=@updatedAt WHERE userId=@userId
+      `).run(updated);
+      if (result.changes !== 1) throw new Error('A conta não pôde ser atualizada.');
+      if (updated.disabled) this.revokeUserSessions(userId);
+      if (updated.disabled || updated.role !== 'admin') {
+        this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(userId);
+      }
+      this.appendAudit('user.management_updated', actor, userId, {
+        displayName: updated.displayName,
+        department: updated.department,
+        disabled: Boolean(updated.disabled),
+        role: updated.role
+      });
+      const persisted = this.db.prepare('SELECT * FROM users WHERE userId = ?').get(userId) as UserRow | undefined;
+      if (!persisted || persisted.displayName !== updated.displayName || persisted.department !== updated.department ||
+          persisted.disabled !== updated.disabled || persisted.role !== updated.role) {
+        throw new Error('O Relay não confirmou a persistência das alterações.');
+      }
+      return this.toUser(persisted);
+    })();
   }
 
   setUserRole(userId: string, role: 'admin' | 'user', actor = 'relay-ui'): CentralUser {
@@ -1361,6 +1410,87 @@ export class CentralStore {
       size: row.size,
       sha256: row.sha256,
       totalChunks: row.totalChunks
+    };
+  }
+
+  listConversationMedia(
+    userId: string,
+    peerUserId: string,
+    kind: ConversationMediaKind,
+    cursor: ConversationMediaCursor | null = null,
+    limit = 40
+  ): ConversationMediaPage {
+    if (!this.getUser(userId) || !this.getUser(peerUserId)) {
+      throw new Error('Conversa canônica inválida.');
+    }
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 40, 100));
+    const result: ConversationMediaPage['items'] = [];
+    let beforeCreatedAt = cursor?.createdAt && Number.isFinite(cursor.createdAt)
+      ? Math.max(1, Math.trunc(cursor.createdAt))
+      : Number.MAX_SAFE_INTEGER;
+    let beforeMessageId = cursor?.messageId?.trim() || '\uffff';
+    let exhausted = false;
+
+    while (result.length <= safeLimit && !exhausted) {
+      const rows = this.db.prepare(`
+        SELECT attachment.attachmentId, attachment.messageId, attachment.fileNameCipher,
+          attachment.mimeType, attachment.size, frame.senderUserId, frame.createdAt
+        FROM attachments attachment
+        JOIN canonical_frames frame ON frame.messageId = attachment.messageId
+        LEFT JOIN user_conversation_state state
+          ON state.userId = ? AND state.peerUserId = ?
+        LEFT JOIN user_message_preferences preference
+          ON preference.userId = ? AND preference.messageId = frame.messageId
+        WHERE attachment.complete = 1
+          AND frame.deletedAt IS NULL
+          AND frame.type = 'file:offer'
+          AND frame.createdAt > COALESCE(state.clearedAt, 0)
+          AND COALESCE(preference.hidden, 0) = 0
+          AND ((frame.senderUserId = ? AND frame.targetUserId = ?)
+            OR (frame.senderUserId = ? AND frame.targetUserId = ?))
+          AND (frame.createdAt < ? OR (frame.createdAt = ? AND frame.messageId < ?))
+        ORDER BY frame.createdAt DESC, frame.messageId DESC
+        LIMIT 200
+      `).all(
+        userId, peerUserId, userId,
+        userId, peerUserId, peerUserId, userId,
+        beforeCreatedAt, beforeCreatedAt, beforeMessageId
+      ) as Array<{
+        attachmentId: string; messageId: string; fileNameCipher: string; mimeType: string;
+        size: number; senderUserId: string; createdAt: number;
+      }>;
+      exhausted = rows.length < 200;
+      if (rows.length === 0) {
+        exhausted = true;
+        break;
+      }
+      const oldest = rows[rows.length - 1];
+      beforeCreatedAt = oldest.createdAt;
+      beforeMessageId = oldest.messageId;
+      for (const row of rows) {
+        const fileName = this.encrypted.decrypt(row.fileNameCipher);
+        const itemKind = mediaKindFor(row.mimeType, fileName);
+        if (itemKind !== kind) continue;
+        result.push({
+          messageId: row.messageId,
+          fileId: row.attachmentId,
+          fileName,
+          fileSize: row.size,
+          mimeType: row.mimeType,
+          senderUserId: row.senderUserId,
+          createdAt: row.createdAt,
+          kind: itemKind
+        });
+        if (result.length > safeLimit) break;
+      }
+    }
+
+    const items = result.slice(0, safeLimit);
+    const last = items[items.length - 1];
+    return {
+      items,
+      hasMore: result.length > safeLimit || !exhausted,
+      nextCursor: last ? { createdAt: last.createdAt, messageId: last.messageId } : null
     };
   }
 

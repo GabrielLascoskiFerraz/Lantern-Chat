@@ -561,7 +561,11 @@ class LanternApp {
       resyncConversation: (conversationId) => this.resyncConversation(conversationId),
       getMessages: (conversationId, limit, before) =>
         this.getMessagesAndRecoverMissingAttachments(conversationId, limit, before),
-      getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
+      getMessagesByIds: (messageIds) => this.getMessagesByIdsAndRecoverAttachments(messageIds),
+      listConversationMedia: (conversationId, kind, cursor, limit) => {
+        if (!this.relay?.isConnected()) throw new Error('Conecte ao Relay para consultar mídias e arquivos.');
+        return this.relay.listConversationMedia(conversationId, kind, cursor || null, limit);
+      },
       searchConversationMessageIds: (conversationId, query, limit, offset) =>
         this.relay?.isConnected()
           ? this.relay.searchConversationMessageIds(conversationId, query, limit, offset)
@@ -1214,6 +1218,34 @@ class LanternApp {
 
     this.queueMissingAttachmentsForRecovery(conversationId, messages);
     return messages;
+  }
+
+  private async getMessagesByIdsAndRecoverAttachments(messageIds: string[]): Promise<DbMessage[]> {
+    const rows = this.db.getMessagesByIds(messageIds)
+      .filter((message) => !this.canonicalHiddenMessageIds.has(message.messageId));
+    if (!this.relay?.isConnected()) return rows;
+    await Promise.all(rows.map(async (message) => {
+      if (message.type !== 'file' || !message.fileId || this.hasUsableLocalAttachment(message)) return;
+      const groupId = this.groupIdFromConversationId(message.conversationId);
+      if (groupId) {
+        await this.requestGroupAttachmentIfNeeded({
+          fileId: message.fileId,
+          groupId,
+          messageId: message.messageId,
+          senderDeviceId: message.senderDeviceId,
+          fileSize: message.fileSize || 0
+        });
+        return;
+      }
+      if (
+        message.conversationId.startsWith('dm:') ||
+        message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID
+      ) {
+        await this.downloadMissingCanonicalAttachment(message);
+      }
+    }));
+    return this.db.getMessagesByIds(messageIds)
+      .filter((message) => !this.canonicalHiddenMessageIds.has(message.messageId));
   }
 
   private async downloadMissingCanonicalAttachment(message: DbMessage): Promise<void> {

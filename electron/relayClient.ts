@@ -5,6 +5,9 @@ import { createSocket } from 'node:dgram';
 import os from 'node:os';
 import { APP_VERSION } from './config';
 import {
+  ConversationMediaCursor,
+  ConversationMediaKind,
+  ConversationMediaPage,
   GroupEvent,
   GroupSnapshot,
   FileChunkPayload,
@@ -729,6 +732,31 @@ export class RelayClient {
     return Array.isArray(result.messageIds)
       ? result.messageIds.filter((value): value is string => typeof value === 'string')
       : [];
+  }
+
+  async listConversationMedia(
+    conversationId: string,
+    kind: ConversationMediaKind,
+    cursor: ConversationMediaCursor | null = null,
+    limit = 40
+  ): Promise<ConversationMediaPage> {
+    const result = conversationId.startsWith('group:')
+      ? await this.sendGroupAction('media', {
+          groupId: conversationId.slice('group:'.length), kind, cursor, limit
+        })
+      : await this.centralRequest('relay:media:list:request', {
+          peerUserId: conversationId.replace(/^dm:/, ''), kind, cursor, limit
+        });
+    return {
+      items: Array.isArray(result.items)
+        ? result.items.filter((item): item is ConversationMediaPage['items'][number] =>
+            Boolean(item && typeof item === 'object'))
+        : [],
+      nextCursor: result.nextCursor && typeof result.nextCursor === 'object'
+        ? result.nextCursor as ConversationMediaCursor
+        : null,
+      hasMore: result.hasMore === true
+    };
   }
 
   private centralRequest(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1466,7 +1494,8 @@ export class RelayClient {
         return;
       }
       case 'relay:history:page':
-      case 'relay:search:results': {
+      case 'relay:search:results':
+      case 'relay:media:list:results': {
         const payload = asRecord(envelope.payload);
         const requestId = asString(payload?.requestId);
         if (!requestId) return;
@@ -1474,7 +1503,11 @@ export class RelayClient {
         if (!pending) return;
         clearTimeout(pending.timeout);
         this.pendingCentralAcks.delete(requestId);
-        pending.resolve(payload || {});
+        if (payload?.ok === false) {
+          pending.reject(new Error(asString(payload.message) || 'Falha na consulta ao Relay.'));
+        } else {
+          pending.resolve(payload || {});
+        }
         return;
       }
       case 'relay:presence': {

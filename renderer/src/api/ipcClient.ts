@@ -125,6 +125,39 @@ export interface MessageRow {
   localOnly?: boolean;
 }
 
+export type ConversationMediaKind = 'media' | 'document';
+
+export interface ConversationMediaCursor {
+  createdAt: number;
+  messageId: string;
+}
+
+export interface ConversationMediaItem {
+  messageId: string;
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  senderUserId: string;
+  createdAt: number;
+  kind: ConversationMediaKind;
+}
+
+export interface ConversationMediaPage {
+  items: ConversationMediaItem[];
+  nextCursor: ConversationMediaCursor | null;
+  hasMore: boolean;
+}
+
+export interface DocumentPreviewResult {
+  kind: 'pdf' | 'text' | 'unsupported';
+  mimeType: string;
+  url: string | null;
+  text: string | null;
+  truncated: boolean;
+  reason?: string | null;
+}
+
 export interface MessageReplyReference {
   messageId: string;
   senderDeviceId: string;
@@ -322,6 +355,12 @@ export interface LanternApi {
   resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => Promise<MessageRow[]>;
   getMessagesByIds: (messageIds: string[]) => Promise<MessageRow[]>;
+  listConversationMedia: (
+    conversationId: string,
+    kind: ConversationMediaKind,
+    cursor?: ConversationMediaCursor | null,
+    limit?: number
+  ) => Promise<ConversationMediaPage>;
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
@@ -354,6 +393,7 @@ export interface LanternApi {
   openExternalUrl: (url: string) => Promise<void>;
   nativePaste: () => Promise<boolean>;
   getFilePreview: (filePath: string) => Promise<string | null>;
+  getDocumentPreview: (filePath: string, fileName?: string | null) => Promise<DocumentPreviewResult>;
   getFileInfo: (filePath: string) => Promise<{
     name: string;
     size: number;
@@ -470,6 +510,13 @@ export const ipcClient = {
   getMessages: (conversationId: string, limit: number, before?: number) =>
     window.lantern.getMessages(conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) => window.lantern.getMessagesByIds(messageIds),
+  listConversationMedia: (
+    conversationId: string,
+    kind: ConversationMediaKind,
+    cursor?: ConversationMediaCursor | null,
+    limit?: number
+  ) =>
+    window.lantern.listConversationMedia(conversationId, kind, cursor, limit),
   searchConversationMessageIds: (
     conversationId: string,
     query: string,
@@ -511,6 +558,8 @@ export const ipcClient = {
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   nativePaste: () => window.lantern.nativePaste(),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),
+  getDocumentPreview: (filePath: string, fileName?: string | null) =>
+    window.lantern.getDocumentPreview(filePath, fileName),
   getFileInfo: (filePath: string) => window.lantern.getFileInfo(filePath),
   getClipboardFilePaths: () => window.lantern.getClipboardFilePaths(),
   clipboardHasFileLikeData: () => window.lantern.clipboardHasFileLikeData(),

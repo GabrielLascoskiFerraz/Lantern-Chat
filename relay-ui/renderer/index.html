@@ -40,6 +40,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5V10Zm7 3v4"/></svg>
             <span>Redefinições</span>
           </a>
+          <a class="nav-link" href="#relay-gifs" data-section="relay-gifs">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4V5Zm3 10 3-3 2 2 2-2 3 3M8 9h.01"/></svg>
+            <span>GIFs</span>
+          </a>
           <a class="nav-link" href="#announcement-settings" data-section="announcement-settings">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h3l8-3v18l-8-3H5V6Zm3 3v6"/></svg>
             <span>Anúncios</span>
@@ -198,6 +202,29 @@
       <section id="password-resets" class="page-section" aria-labelledby="password-resets-title">
         <div class="section-heading"><div><span class="section-kicker">Acesso</span><h2 id="password-resets-title">Solicitações de redefinição</h2></div><span id="password-resets-count" class="count-badge">0</span></div>
         <article class="card management-card"><div id="password-resets-list" class="management-list"></div></article>
+      </section>
+
+      <section id="relay-gifs" class="page-section" aria-labelledby="relay-gifs-title">
+        <div class="section-heading">
+          <div><span class="section-kicker">Catálogo compartilhado</span><h2 id="relay-gifs-title">GIFs do Relay</h2></div>
+          <span id="relay-gifs-count" class="count-badge">0</span>
+        </div>
+        <article class="card sticker-management-card">
+          <div class="card-header">
+            <div><h3>Biblioteca de GIFs</h3><p>Disponível para todos os clientes. Arquivos devem ser GIF válidas de até 20 MB.</p></div>
+            <button id="import-stickers" class="button primary" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              Adicionar GIFs
+            </button>
+          </div>
+          <div class="sticker-toolbar">
+            <label class="field sticker-category-field"><span>Categoria para novas GIFs</span><input id="sticker-import-category" list="sticker-categories" placeholder="Geral" maxlength="48" autocomplete="off"></label>
+            <label class="check-field"><input id="sticker-replace-existing" type="checkbox"><span>Substituir arquivos com o mesmo nome</span></label>
+            <label class="field sticker-search-field"><span>Buscar no catálogo</span><input id="sticker-search" type="search" placeholder="Nome ou categoria" autocomplete="off"></label>
+          </div>
+          <datalist id="sticker-categories"></datalist>
+          <div id="relay-gifs-list" class="sticker-management-grid"></div>
+        </article>
       </section>
 
       <section id="announcement-settings" class="page-section" aria-labelledby="announcement-settings-title">

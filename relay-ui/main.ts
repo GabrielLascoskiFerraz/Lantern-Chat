@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type OpenDialogOptions } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -119,7 +119,22 @@ const requireRelay = (): LanternRelay => {
 };
 ipcMain.handle('relay-ui:management', () => requireRelay().getManagementSnapshot());
 ipcMain.handle('relay-ui:createUser', (_event, input) => requireRelay().createManagedUser(input));
-ipcMain.handle('relay-ui:updateUser', (_event, userId, input) => requireRelay().updateManagedUser(String(userId), input));
+ipcMain.handle('relay-ui:updateUser', (_event, userId, rawInput) => {
+  const source = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {};
+  const input: { displayName?: string; department?: string; disabled?: boolean; role?: 'admin' | 'user' } = {};
+  if ('displayName' in source) input.displayName = String(source.displayName ?? '');
+  if ('department' in source) input.department = String(source.department ?? '');
+  if ('disabled' in source) {
+    if (typeof source.disabled !== 'boolean') throw new Error('Estado da conta inválido.');
+    input.disabled = source.disabled;
+  }
+  if ('role' in source) {
+    if (source.role !== 'admin' && source.role !== 'user') throw new Error('Permissão da conta inválida.');
+    input.role = source.role;
+  }
+  if (Object.keys(input).length === 0) throw new Error('Nenhuma alteração válida foi informada.');
+  return requireRelay().updateManagedUser(String(userId), input);
+});
 ipcMain.handle('relay-ui:resetPassword', (_event, userId, password) => requireRelay().resetManagedUserPassword(String(userId), String(password)));
 ipcMain.handle('relay-ui:deleteUser', (_event, userId) => requireRelay().deleteManagedUser(String(userId)));
 ipcMain.handle('relay-ui:reviewPasswordReset', (_event, requestId, approve) => requireRelay().reviewManagedPasswordReset(String(requestId), Boolean(approve)));
@@ -127,6 +142,32 @@ ipcMain.handle('relay-ui:setAnnouncementTtl', (_event, ttlMs) => requireRelay().
 ipcMain.handle('relay-ui:setAnnouncementExpiry', (_event, messageId, expiresAt) => requireRelay().setActiveAnnouncementExpiry(String(messageId), Number(expiresAt)));
 ipcMain.handle('relay-ui:configureCalendar', (_event, input) => requireRelay().configureCalendarAutomation(input));
 ipcMain.handle('relay-ui:refreshCalendar', () => requireRelay().runCalendarAutomationNow());
+ipcMain.handle('relay-ui:importStickers', async (_event, rawInput) => {
+  const source = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {};
+  const options: OpenDialogOptions = {
+    title: 'Adicionar GIFs ao Relay',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Imagens GIF', extensions: ['gif'] }]
+  };
+  const selected = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  if (selected.canceled || selected.filePaths.length === 0) return { canceled: true, added: [], replaced: [] };
+  return {
+    canceled: false,
+    ...requireRelay().addManagedStickers({
+      sourcePaths: selected.filePaths,
+      category: String(source.category || ''),
+      replaceExisting: source.replaceExisting === true
+    })
+  };
+});
+ipcMain.handle('relay-ui:updateSticker', (_event, relativePath, input) =>
+  requireRelay().updateManagedSticker(String(relativePath), input));
+ipcMain.handle('relay-ui:removeSticker', (_event, relativePath) =>
+  requireRelay().removeManagedSticker(String(relativePath)));
+ipcMain.handle('relay-ui:stickerPreview', (_event, relativePath) =>
+  requireRelay().getManagedStickerPreview(String(relativePath)));
 ipcMain.handle('relay-ui:openDashboard', async () => {
   if (!relay) throw new Error('Inicie o Relay antes de abrir a administração.');
   const settings = loadSettings();
