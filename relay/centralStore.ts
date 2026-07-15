@@ -106,7 +106,6 @@ export class CentralStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
     this.migrate();
-    this.ensureBootstrapAdmin();
   }
 
   close(): void {
@@ -484,39 +483,6 @@ export class CentralStore {
     return false;
   }
 
-  private ensureBootstrapAdmin(): void {
-    const count = this.db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
-    const configured = (process.env.LANTERN_RELAY_ADMIN_PASSWORD || '').trim();
-    const password = configured || 'root';
-    const migrationKey = 'auth.bootstrap-admin-default-v2';
-
-    if (count.count === 0) {
-      this.createUser({
-        username: 'admin',
-        displayName: 'Administrador',
-        department: 'Administração',
-        password,
-        role: 'admin',
-        locale: 'pt-BR',
-        allowBootstrapPassword: !configured
-      });
-      this.log('bootstrap_admin_created', {
-        username: 'admin',
-        password: configured ? '(definida por LANTERN_RELAY_ADMIN_PASSWORD)' : 'root',
-        warning: configured ? undefined : 'Troque esta senha após o primeiro acesso.'
-      });
-    } else if (!configured && this.getSetting(migrationKey) !== 'applied') {
-      const admin = this.db.prepare("SELECT userId FROM users WHERE username = 'admin' AND role = 'admin'").get() as { userId: string } | undefined;
-      if (admin) {
-        this.db.prepare('UPDATE users SET passwordHash = ?, updatedAt = ? WHERE userId = ?')
-          .run(hashPassword('root', true), Date.now(), admin.userId);
-        this.db.prepare('DELETE FROM sessions WHERE userId = ?').run(admin.userId);
-        this.log('bootstrap_admin_password_migrated', { username: 'admin' });
-      }
-    }
-    this.setSetting(migrationKey, 'applied');
-  }
-
   private toUser(row: UserRow): CentralUser {
     return {
       userId: row.userId,
@@ -636,13 +602,42 @@ export class CentralStore {
         avatarBg=@avatarBg, statusMessage=@statusMessage, locale=@locale, disabled=@disabled,
         updatedAt=@updatedAt WHERE userId=@userId
     `).run(updated);
-    if (updated.disabled) this.revokeUserSessions(userId);
+    if (updated.disabled) {
+      this.revokeUserSessions(userId);
+      this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(userId);
+    }
     this.appendAudit('user.updated', actor, userId, {
       disabled: Boolean(updated.disabled),
       department: updated.department,
       locale: updated.locale
     });
     return this.toUser(updated);
+  }
+
+  setUserRole(userId: string, role: 'admin' | 'user', actor = 'relay-ui'): CentralUser {
+    const result = this.db.prepare('UPDATE users SET role = ?, updatedAt = ? WHERE userId = ?')
+      .run(role, Date.now(), userId);
+    if (result.changes === 0) throw new Error('Usuário não encontrado.');
+    if (role !== 'admin') this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(userId);
+    this.appendAudit('user.role_changed', actor, userId, { role });
+    return this.getUser(userId)!;
+  }
+
+  getAnnouncementTtlMs(): number {
+    const configured = Number(this.getSetting('announcements.ttl_ms'));
+    return Number.isFinite(configured) && configured >= 60_000
+      ? Math.min(Math.trunc(configured), 365 * 24 * 60 * 60 * 1000)
+      : 24 * 60 * 60 * 1000;
+  }
+
+  setAnnouncementTtlMs(ttlMs: number, actor = 'relay-ui'): number {
+    const normalized = Math.trunc(Number(ttlMs));
+    if (!Number.isFinite(normalized) || normalized < 60_000 || normalized > 365 * 24 * 60 * 60 * 1000) {
+      throw new Error('A expiração deve ficar entre 1 minuto e 365 dias.');
+    }
+    this.setSetting('announcements.ttl_ms', String(normalized));
+    this.appendAudit('announcements.ttl_changed', actor, null, { ttlMs: normalized });
+    return normalized;
   }
 
   completeProfileSetup(userId: string, input: { avatarEmoji: string; avatarBg: string }): CentralUser {
@@ -784,6 +779,7 @@ export class CentralStore {
       .run(hashPassword(password), Date.now(), userId);
     if (result.changes === 0) throw new Error('Usuário não encontrado.');
     this.revokeUserSessions(userId);
+    this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(userId);
     this.appendAudit('user.password_reset', actor, userId);
   }
 
@@ -903,10 +899,6 @@ export class CentralStore {
   deleteUser(userId: string, actor = 'admin'): void {
     const user = this.getUser(userId);
     if (!user) return;
-    if (user.role === 'admin') {
-      const admins = this.listUsers().filter((entry) => entry.role === 'admin' && !entry.disabled);
-      if (admins.length <= 1) throw new Error('Não é possível excluir o último administrador.');
-    }
     // Preserva a integridade referencial do histórico, mas remove definitivamente
     // a capacidade de autenticação e os dados pessoais exibidos da conta.
     const now = Date.now();
@@ -918,6 +910,7 @@ export class CentralStore {
       WHERE userId = ?
     `).run(`deleted-${userId}`, 'Usuário excluído', hashPassword(createSessionToken()), now, userId);
     this.revokeUserSessions(userId);
+    this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(userId);
     this.appendAudit('user.deleted', actor, userId, { previousUsername: user.username });
   }
 

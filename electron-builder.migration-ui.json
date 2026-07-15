@@ -1,0 +1,12 @@
+{
+  "appId": "com.lantern.migration",
+  "productName": "Lantern Migration",
+  "directories": { "output": "dist-migration-ui-installers", "buildResources": "assets" },
+  "extraMetadata": { "main": "dist-migration-ui/migration-ui/main.js" },
+  "files": ["dist-migration-ui/**/*", "migration-ui/renderer/**/*", "dist-relay/**/*", "assets/**/*", "package.json", "node_modules/better-sqlite3/**/*", "node_modules/bindings/**/*", "node_modules/file-uri-to-path/**/*"],
+  "asar": true,
+  "asarUnpack": ["node_modules/better-sqlite3/**/*"],
+  "win": { "icon": "assets/icon.ico", "target": ["nsis"], "artifactName": "LanternMigration-Setup-${version}.${ext}" },
+  "mac": { "icon": "assets/icon.icns", "target": ["dmg", "zip"], "artifactName": "LanternMigration-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false }
+}

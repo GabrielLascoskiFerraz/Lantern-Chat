@@ -74,11 +74,12 @@ const waitFor = async (predicate, timeoutMs = 5_000) => {
 test('um usuário mantém múltiplos dispositivos e recebe em todas as sessões', async () => {
   const port = await getFreePort();
   const store = new CentralStore(path.join(root, 'central'), () => undefined);
+  store.createUser({ username: 'sender', displayName: 'Sender', password: 'sender-password' });
   const recipient = store.createUser({
     username: 'recipient', displayName: 'Recipient', password: 'recipient-password'
   });
-  const senderAuth = store.login('admin', 'admin-test-password', 'sender-device');
-  const senderAuthB = store.login('admin', 'admin-test-password', 'sender-device-b');
+  const senderAuth = store.login('sender', 'sender-password', 'sender-device');
+  const senderAuthB = store.login('sender', 'sender-password', 'sender-device-b');
   const recipientAuthA = store.login('recipient', 'recipient-password', 'recipient-a');
   const recipientAuthB = store.login('recipient', 'recipient-password', 'recipient-b');
   store.close();

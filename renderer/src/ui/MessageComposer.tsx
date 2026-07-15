@@ -5,6 +5,7 @@ import {
   Textarea
 } from '@fluentui/react-components';
 import {
+  AnimalCat20Regular,
   ArrowReply20Regular,
   Attach20Regular,
   ClipboardEdit20Regular,
@@ -14,8 +15,19 @@ import {
   Dismiss12Regular,
   Delete16Regular,
   Emoji20Regular,
+  Flag20Regular,
+  Food20Regular,
+  Games20Regular,
   Gif20Regular,
-  Send20Filled
+  HandWave20Regular,
+  Heart20Regular,
+  History20Regular,
+  LeafTwo20Regular,
+  People20Regular,
+  Search20Regular,
+  Send20Filled,
+  Toolbox20Regular,
+  VehicleCar20Regular
 } from '@fluentui/react-icons';
 import { ipcClient, MessageReplyReference, StickerCatalogItem } from '../api/ipcClient';
 
@@ -71,11 +83,37 @@ type EmojiCategory =
   | 'viagens'
   | 'bandeiras'
   | 'simbolos';
+type EmojiPickerCategory = 'recentes' | EmojiCategory;
 
 interface EmojiItem {
   emoji: string;
   search: string;
 }
+
+const CHAT_RECENT_EMOJIS_KEY = 'lantern.chat.recent-emojis.v1';
+const MAX_CHAT_RECENT_EMOJIS = 24;
+const SKIN_TONES = ['🏻', '🏼', '🏽', '🏾', '🏿'];
+const SKIN_TONE_EMOJIS = new Set([
+  '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙',
+  '👈', '👉', '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '🫶',
+  '👐', '🤲', '🤝', '🙏', '✍️', '💅', '🤳', '💪', '🦵', '🦶', '👂', '🦻', '👃'
+]);
+
+const expandSkinTones = (emojis: string[]): string[] =>
+  emojis.flatMap((emoji) => SKIN_TONE_EMOJIS.has(emoji)
+    ? [emoji, ...SKIN_TONES.map((tone) => `${emoji.replace(/\uFE0F$/u, '')}${tone}`)]
+    : [emoji]);
+
+const readRecentChatEmojis = (): string[] => {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CHAT_RECENT_EMOJIS_KEY) || '[]') as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string').slice(0, MAX_CHAT_RECENT_EMOJIS)
+      : [];
+  } catch {
+    return [];
+  }
+};
 
 const normalizeSearchTerm = (value: string): string =>
   value
@@ -327,7 +365,7 @@ const createEmojiItems = (category: EmojiCategory, emojis: string[]): EmojiItem[
 
 const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem[] }> = {
   rostos: {
-    label: '😀 Rostos',
+    label: 'Rostos',
     emojis: createEmojiItems('rostos', [
       '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩',
       '😘', '😗', '☺️', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🫢', '🫣',
@@ -340,16 +378,16 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   gestos: {
-    label: '👋 Gestos',
-    emojis: createEmojiItems('gestos', [
+    label: 'Gestos',
+    emojis: createEmojiItems('gestos', expandSkinTones([
       '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙', '👈', '👉',
       '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '🫶', '👐', '🤲', '🤝',
       '🙏', '✍️', '💅', '🤳', '💪', '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷',
       '🦴', '👀', '👁️', '👅', '👄', '🫦'
-    ])
+    ]))
   },
   pessoas: {
-    label: '🧑 Pessoas',
+    label: 'Pessoas',
     emojis: createEmojiItems('pessoas', [
       '👶', '🧒', '👦', '👧', '🧑', '👨', '👩', '🧔', '🧔‍♂️', '🧔‍♀️', '🧑‍🦰', '🧑‍🦱', '🧑‍🦳', '🧑‍🦲',
       '👱', '👱‍♂️', '👱‍♀️', '🧓', '👴', '👵', '🙍', '🙍‍♂️', '🙍‍♀️', '🙎', '🙎‍♂️', '🙎‍♀️', '🙅', '🙅‍♂️',
@@ -365,7 +403,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   animais: {
-    label: '🐶 Animais',
+    label: 'Animais',
     emojis: createEmojiItems('animais', [
       '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈', '🐈‍⬛', '🦁', '🐯', '🐅', '🐆', '🐴',
       '🫎', '🫏', '🐎', '🦄', '🦓', '🦌', '🦬', '🐮', '🐂', '🐃', '🐄', '🐷', '🐖', '🐗', '🐽', '🐏',
@@ -378,7 +416,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   comida: {
-    label: '🍕 Comidas',
+    label: 'Comidas',
     emojis: createEmojiItems('comida', [
       '🍏', '🍎', '🍐', '🍊', '🍋', '🍋‍🟩', '🍌', '🍉', '🍇', '🍓', '🫐', '🍈', '🍒', '🍑', '🥭', '🍍',
       '🥥', '🥝', '🍅', '🍆', '🥑', '🥦', '🫛', '🥬', '🥒', '🌶️', '🫑', '🌽', '🥕', '🫒', '🧄', '🧅',
@@ -391,7 +429,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   objetos: {
-    label: '💡 Objetos',
+    label: 'Objetos',
     emojis: createEmojiItems('objetos', [
       '⌚', '📱', '📲', '💻', '⌨️', '🖥️', '🖨️', '🖱️', '🖲️', '🕹️', '💽', '💾', '💿', '📀', '🧮', '🎥',
       '🎞️', '📷', '📸', '📹', '📼', '🔍', '🔎', '💡', '🔦', '🏮', '🪔', '📔', '📕', '📖', '📗', '📘',
@@ -407,7 +445,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   natureza: {
-    label: '🌿 Natureza',
+    label: 'Natureza',
     emojis: createEmojiItems('natureza', [
       '🌍', '🌎', '🌏', '🌐', '🗺️', '🗾', '🧭', '🏔️', '⛰️', '🌋', '🗻', '🏕️', '🏞️', '🏜️', '🏝️', '🏖️',
       '🏛️', '🏟️', '🏞️', '🌅', '🌄', '🌠', '🎑', '🌇', '🌆', '🏙️', '🌃', '🌌', '🌉', '🌁', '🧱', '🌳',
@@ -419,7 +457,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   atividades: {
-    label: '⚽ Atividades',
+    label: 'Atividades',
     emojis: createEmojiItems('atividades', [
       '⚽', '🏀', '🏈', '⚾', '🥎', '🎾', '🏐', '🏉', '🥏', '🎱', '🪀', '🏓', '🏸', '🏒', '🏑', '🥍',
       '🏏', '🪃', '🥅', '⛳', '🪁', '🏹', '🎣', '🤿', '🥊', '🥋', '🎽', '🛹', '🛼', '🛷', '⛸️', '🥌',
@@ -431,7 +469,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   viagens: {
-    label: '🚗 Viagens',
+    label: 'Viagens',
     emojis: createEmojiItems('viagens', [
       '🚗', '🚕', '🚙', '🚌', '🚎', '🏎️', '🚓', '🚑', '🚒', '🚐', '🛻', '🚚', '🚛', '🚜', '🦯',
       '🦽', '🦼', '🛴', '🚲', '🛵', '🏍️', '🛺', '🚨', '🚔', '🚍', '🚘', '🚖', '🛞', '🚡', '🚠',
@@ -444,7 +482,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   bandeiras: {
-    label: '🏳️ Bandeiras',
+    label: 'Bandeiras',
     emojis: createEmojiItems('bandeiras', [
       '🏁', '🚩', '🎌', '🏴', '🏳️', '🏳️‍🌈', '🏳️‍⚧️', '🏴‍☠️',
       '🇧🇷', '🇦🇷', '🇺🇾', '🇵🇾', '🇨🇱', '🇧🇴', '🇵🇪', '🇨🇴', '🇻🇪', '🇪🇨', '🇲🇽', '🇵🇦', '🇨🇷', '🇨🇺',
@@ -457,7 +495,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   simbolos: {
-    label: '❤️ Símbolos',
+    label: 'Símbolos',
     emojis: createEmojiItems('simbolos', [
       '❤️', '🩷', '🧡', '💛', '💚', '💙', '🩵', '💜', '🤎', '🖤', '🩶', '🤍', '💔', '❣️', '💕', '💞',
       '💓', '💗', '💖', '💘', '💝', '💟', '☮️', '✝️', '☪️', '🕉️', '☸️', '✡️', '🔯', '🕎', '☯️', '☦️',
@@ -491,6 +529,21 @@ const EMOJI_CATEGORY_ORDER: EmojiCategory[] = [
   'bandeiras',
   'simbolos'
 ];
+
+const EMOJI_CATEGORY_PRESENTATION = {
+  recentes: { label: 'Recentes', icon: History20Regular },
+  rostos: { label: 'Rostos', icon: Emoji20Regular },
+  gestos: { label: 'Gestos', icon: HandWave20Regular },
+  pessoas: { label: 'Pessoas', icon: People20Regular },
+  animais: { label: 'Animais', icon: AnimalCat20Regular },
+  comida: { label: 'Comidas', icon: Food20Regular },
+  objetos: { label: 'Objetos', icon: Toolbox20Regular },
+  natureza: { label: 'Natureza', icon: LeafTwo20Regular },
+  atividades: { label: 'Atividades', icon: Games20Regular },
+  viagens: { label: 'Viagens', icon: VehicleCar20Regular },
+  bandeiras: { label: 'Bandeiras', icon: Flag20Regular },
+  simbolos: { label: 'Símbolos', icon: Heart20Regular }
+} satisfies Record<EmojiPickerCategory, { label: string; icon: typeof Emoji20Regular }>;
 
 export const MessageComposer = ({
   disabled,
@@ -532,8 +585,9 @@ export const MessageComposer = ({
     y: number;
     hasSelection: boolean;
   } | null>(null);
-  const [emojiCategory, setEmojiCategory] = useState<EmojiCategory>('rostos');
+  const [emojiCategory, setEmojiCategory] = useState<EmojiPickerCategory>('rostos');
   const [emojiSearch, setEmojiSearch] = useState('');
+  const [recentEmojis, setRecentEmojis] = useState<string[]>(readRecentChatEmojis);
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
   const stickerPickerRef = useRef<HTMLDivElement | null>(null);
   const composerRootRef = useRef<HTMLDivElement | null>(null);
@@ -655,8 +709,13 @@ export const MessageComposer = ({
   );
   const normalizedEmojiSearch = useMemo(() => normalizeSearchTerm(emojiSearch), [emojiSearch]);
   const isEmojiSearching = normalizedEmojiSearch.length > 0;
+  const recentEmojiItems = useMemo<EmojiItem[]>(
+    () => recentEmojis.map((emoji) => ({ emoji, search: normalizeSearchTerm(`${emoji} ${EMOJI_SEARCH_ALIAS_MAP[emoji]?.join(' ') || ''}`) })),
+    [recentEmojis]
+  );
   const emojiItems = useMemo(() => {
     if (!normalizedEmojiSearch) {
+      if (emojiCategory === 'recentes') return recentEmojiItems;
       return EMOJI_CATEGORIES[emojiCategory].emojis;
     }
     const found: EmojiItem[] = [];
@@ -692,7 +751,20 @@ export const MessageComposer = ({
       }
     }
     return categoryFallback;
-  }, [emojiCategory, normalizedEmojiSearch]);
+  }, [emojiCategory, normalizedEmojiSearch, recentEmojiItems]);
+
+  const chooseChatEmoji = useCallback((emoji: string): void => {
+    setText((current) => `${current}${emoji}`);
+    setRecentEmojis((current) => {
+      const next = [emoji, ...current.filter((item) => item !== emoji)].slice(0, MAX_CHAT_RECENT_EMOJIS);
+      try {
+        window.localStorage.setItem(CHAT_RECENT_EMOJIS_KEY, JSON.stringify(next));
+      } catch {
+        // O seletor continua funcional quando o armazenamento local está indisponível.
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -1614,46 +1686,67 @@ export const MessageComposer = ({
               aria-label="Emojis"
             />
             <div className={`emoji-picker ${emojiOpen ? 'is-open' : 'is-closed'}`} aria-hidden={!emojiOpen}>
+              <div className="emoji-picker-header">
+                <div>
+                  <strong>Emojis</strong>
+                  <span>Escolha um emoji para adicionar à mensagem.</span>
+                </div>
+              </div>
               <div className="emoji-picker-search">
                 <Input
                   size="small"
+                  contentBefore={<Search20Regular aria-hidden="true" />}
                   value={emojiSearch}
-                  placeholder="Buscar emoji (ex.: coração, pizza, gato...)"
+                  placeholder="Buscar por coração, pizza, gato..."
                   onChange={(_, data) => setEmojiSearch(data.value)}
                   className="emoji-search-input"
+                  aria-label="Buscar emoji"
                 />
               </div>
               <div className="emoji-picker-content">
-                <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`}>
-                  {EMOJI_CATEGORY_ORDER.map((category) => (
-                    <button
-                      key={category}
-                      type="button"
-                      className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
-                      onClick={() => setEmojiCategory(category)}
-                      title={EMOJI_CATEGORIES[category].label.replace(/^\S+\s/, '')}
-                    >
-                      {EMOJI_CATEGORIES[category].label}
-                    </button>
-                  ))}
+                <div className={`emoji-picker-categories ${isEmojiSearching ? 'is-hidden' : 'is-visible'}`} role="tablist" aria-label="Categorias de emoji">
+                  {(['recentes', ...EMOJI_CATEGORY_ORDER] as EmojiPickerCategory[])
+                    .filter((category) => category !== 'recentes' || recentEmojis.length > 0)
+                    .map((category) => {
+                      const presentation = EMOJI_CATEGORY_PRESENTATION[category];
+                      const Icon = presentation.icon;
+                      return (
+                        <button
+                          key={category}
+                          type="button"
+                          role="tab"
+                          aria-selected={emojiCategory === category}
+                          className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
+                          onClick={() => setEmojiCategory(category)}
+                          title={presentation.label}
+                        >
+                          <Icon aria-hidden="true" />
+                          <span>{presentation.label}</span>
+                        </button>
+                      );
+                    })}
                 </div>
-                <div className="emoji-picker-grid">
+                <div className="emoji-picker-grid" role="listbox" aria-label={isEmojiSearching ? 'Resultados da busca' : EMOJI_CATEGORY_PRESENTATION[emojiCategory].label}>
                   {emojiItems.map((item) => (
                     <button
                       type="button"
                       key={item.emoji}
                       className="emoji-btn"
-                      onClick={() => {
-                        setText((current) => `${current}${item.emoji}`);
-                      }}
+                      role="option"
+                      aria-selected="false"
+                      aria-label={`Adicionar ${item.emoji}`}
+                      title={`Adicionar ${item.emoji}`}
+                      onClick={() => chooseChatEmoji(item.emoji)}
                     >
-                      {item.emoji}
+                      <span aria-hidden="true">{item.emoji}</span>
                     </button>
                   ))}
                 </div>
                 {emojiItems.length === 0 && (
                   <div className="emoji-picker-empty">
-                    Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;
+                    {emojiCategory === 'recentes' && !isEmojiSearching
+                      ? 'Seus emojis usados recentemente aparecerão aqui.'
+                      : <>Nenhum emoji encontrado para &quot;{emojiSearch.trim()}&quot;.</>}
                   </div>
                 )}
               </div>

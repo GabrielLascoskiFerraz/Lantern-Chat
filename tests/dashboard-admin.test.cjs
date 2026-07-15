@@ -36,7 +36,7 @@ const login = async (baseUrl) => {
   const response = await fetch(`${baseUrl}/api/admin/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'dashboard-test-password' })
+    body: JSON.stringify({ username: 'dashboard-admin', password: 'dashboard-test-password' })
   });
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -49,6 +49,9 @@ const login = async (baseUrl) => {
 test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () => {
   const port = await getFreePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const bootstrap = new CentralStore(path.join(root, 'central'), () => undefined);
+  bootstrap.createUser({ username: 'dashboard-admin', displayName: 'Dashboard Admin', password: 'dashboard-test-password', role: 'admin' });
+  bootstrap.close();
   const relay = new LanternRelay(relayConfig(port));
   try {
     await relay.start();
@@ -59,6 +62,7 @@ test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () =
     assert.ok(script.length > 0);
     assert.doesNotMatch(script, /\?\./, 'dashboard não deve exigir optional chaining no Safari');
     assert.doesNotThrow(() => new Function(script));
+    assert.equal((await fetch(`${baseUrl}/api/status`)).status, 401);
 
     const firstTab = await login(baseUrl);
     const secondTab = await login(baseUrl);
@@ -67,7 +71,7 @@ test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () =
     });
     assert.equal(usersResponse.status, 200);
     const users = (await usersResponse.json()).users;
-    const admin = users.find((user) => user.username === 'admin');
+    const admin = users.find((user) => user.username === 'dashboard-admin');
     assert.ok(admin);
 
     const staleCsrfResponse = await fetch(`${baseUrl}/api/admin/users/${admin.userId}`, {

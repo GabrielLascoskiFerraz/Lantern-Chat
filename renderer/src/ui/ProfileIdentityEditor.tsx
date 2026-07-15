@@ -39,6 +39,9 @@ interface ProfileIdentityEditorProps {
   onColorChange: (color: string) => void;
   compact?: boolean;
   section?: 'all' | 'emoji' | 'color';
+  ariaLabel?: string;
+  emojiDescription?: string;
+  colorDescription?: string;
 }
 
 const normalizeSearch = (value: string): string =>
@@ -82,7 +85,10 @@ export const ProfileIdentityEditor = ({
   onEmojiChange,
   onColorChange,
   compact = false,
-  section = 'all'
+  section = 'all',
+  ariaLabel = 'Identidade visual',
+  emojiDescription = 'Escolha como você aparece nas conversas.',
+  colorDescription = 'A cor é aplicada ao fundo do seu avatar.'
 }: ProfileIdentityEditorProps) => {
   const [query, setQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<CategoryId>('expressions');
@@ -150,12 +156,12 @@ export const ProfileIdentityEditor = ({
   );
 
   return (
-    <section className={`profile-identity-editor${compact ? ' compact' : ''} ${section}-only`} aria-label="Identidade visual">
+    <section className={`profile-identity-editor${compact ? ' compact' : ''} ${section}-only`} aria-label={ariaLabel}>
       {section !== 'color' && <div className="identity-editor-section identity-emoji-section">
         <header className="identity-section-header">
           <div>
             <h3>Emoji</h3>
-            <Text size={200}>Escolha como você aparece nas conversas.</Text>
+            <Text size={200}>{emojiDescription}</Text>
           </div>
         </header>
 
@@ -243,7 +249,7 @@ export const ProfileIdentityEditor = ({
         <header className="identity-section-header">
           <div>
             <h3>Cor de fundo</h3>
-            <Text size={200}>A cor é aplicada ao fundo do seu avatar.</Text>
+            <Text size={200}>{colorDescription}</Text>
           </div>
         </header>
         <div className="identity-color-grid" role="listbox" aria-label="Cores do perfil">

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lantern Migration</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+  <main class="shell">
+    <header class="hero"><img src="../../assets/icon.png" alt=""><div><p class="eyebrow">LANTERN MIGRATION</p><h1>Migrar backups locais</h1><p>Consolide contas, conversas, grupos e anexos em um Relay canônico com análise e rollback.</p></div></header>
+    <nav class="steps" aria-label="Etapas"><span class="active">1 · Origem</span><span>2 · Análise</span><span>3 · Migração</span></nav>
+    <section class="card">
+      <h2>Arquivos da migração</h2><p class="muted">Mantenha o Lantern Relay encerrado durante a aplicação. A análise não modifica nenhum dado.</p>
+      <div class="field"><label for="backups">Pasta com todos os backups</label><div class="picker"><input id="backups" readonly placeholder="Selecione a pasta que contém LanternBackup-*"><button data-pick="backups">Procurar</button></div></div>
+      <div class="field"><label for="destination">Pasta de dados do Relay</label><div class="picker"><input id="destination" readonly placeholder="Selecione relay-data"><button data-pick="destination">Procurar</button></div></div>
+      <div class="field"><label for="mapping">Mapeamento de contas <small>opcional</small></label><div class="picker"><input id="mapping" readonly placeholder="Usuários, senhas temporárias, setores e funções"><button data-pick="mapping">Procurar</button><button class="icon" data-clear="mapping" title="Limpar">×</button></div></div>
+      <div class="field"><label for="report">Relatório JSON</label><div class="picker"><input id="report" readonly placeholder="Será salvo em Documentos se não for escolhido"><button data-pick="report">Escolher</button></div></div>
+      <details><summary>Opções de contingência</summary><div class="warnings"><label><input id="missing-users" type="checkbox"> Ignorar dados de participantes sem backup</label><label><input id="missing-attachments" type="checkbox"> Ignorar anexos ausentes ou inválidos</label><p>Estas opções podem descartar dados. Use somente depois de revisar os erros da análise.</p></div></details>
+      <div class="actions"><span id="state" class="state">Pronto para analisar.</span><button id="analyze" class="primary">Analisar backups</button></div>
+    </section>
+    <section id="results" class="card hidden" aria-live="polite">
+      <div class="section-head"><div><h2>Resultado da análise</h2><p id="result-summary" class="muted"></p></div><button id="open-report" class="secondary hidden">Abrir relatório</button></div>
+      <div id="metrics" class="metrics"></div><div id="issues"></div>
+      <div class="apply-panel"><div><h3>Aplicar no Relay</h3><p>A pasta atual será preservada como rollback. Confirme que o Relay está encerrado.</p></div><button id="apply" class="danger" disabled>Aplicar migração</button></div>
+    </section>
+    <section class="card log-card"><div class="section-head"><h2>Detalhes técnicos</h2><button id="clear-log" class="secondary">Limpar</button></div><pre id="log">Aguardando análise…</pre></section>
+  </main><script src="app.js"></script>
+</body></html>

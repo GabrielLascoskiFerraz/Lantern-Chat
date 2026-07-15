@@ -13,13 +13,13 @@ import { RelayGroupEvent, RelayGroupFileChunk } from './groupTypes';
 import { CentralStore } from './centralStore';
 import { RetentionPolicy } from './centralTypes';
 import { createSessionToken, hashToken } from './security';
+import { CalendarAutomationEvent, fetchCalendarEventsForDay } from './calendarAutomation';
 
 const RELAY_VERSION = '1.0.0';
 const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
 const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
 const RELAY_DISCOVERY_UDP_RESPONSE = 'lantern:relay:announce';
-const ANNOUNCEMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const ANNOUNCEMENT_EDIT_WINDOW_MS = 10 * 60 * 1000;
 const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
@@ -47,8 +47,6 @@ const GROUP_ATTACHMENTS_DIR = process.env.LANTERN_RELAY_GROUP_ATTACHMENTS_DIR
 const RELAY_STICKERS_DIR = process.env.LANTERN_RELAY_STICKERS_DIR
   ? path.resolve(process.env.LANTERN_RELAY_STICKERS_DIR)
   : path.join(resolveRelayDataDir(), 'stickers');
-// Optional protection for the browser dashboard when the Relay is exposed outside a trusted LAN.
-const RELAY_DASHBOARD_TOKEN = String(process.env.LANTERN_RELAY_DASHBOARD_TOKEN || '').trim();
 const RELAY_STICKER_CATEGORY_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 const RELAY_STICKER_FILE_NAME_RE = /^[a-z0-9][a-z0-9._ -]*\.gif$/i;
 const RELAY_STICKER_MAX_BYTES = 20 * 1024 * 1024;
@@ -115,6 +113,17 @@ type AnnouncementReactionValue = '👍' | '👎' | '❤️' | '😢' | '😊' | 
 interface RelayReactPayload {
   targetMessageId: string;
   reaction: AnnouncementReactionValue | null;
+}
+
+interface CalendarAutomationState {
+  version: 1;
+  enabled: boolean;
+  url: string;
+  updateTime: string;
+  lastRunDate: string;
+  lastRunAt: number;
+  lastError: string;
+  seenEventIds: Record<string, number>;
 }
 
 interface RelayAnnouncementEditPayload {
@@ -903,6 +912,11 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .admin-audit { display:grid; gap:7px; max-height:220px; overflow:auto; margin-top:10px; }
     .admin-audit-row { display:grid; gap:2px; padding:8px 9px; border-bottom:1px solid var(--line); font-size:11px; }
     .admin-audit-row span { color:var(--muted); }
+    .dashboard-shell.auth-locked { display:block; min-height:100vh; }
+    .dashboard-shell.auth-locked .dashboard-nav,
+    .dashboard-shell.auth-locked .topbar,
+    .dashboard-shell.auth-locked .page-section:not(#administration) { display:none; }
+    .dashboard-shell.auth-locked #administration { width:min(720px, calc(100vw - 32px)); margin:48px auto 0; }
     .hidden { display: none !important; }
 
     @media (max-width: 880px) {
@@ -944,7 +958,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
   </style>
 </head>
 <body>
-  <div class="dashboard-shell">
+  <div id="dashboard-shell" class="dashboard-shell auth-locked">
     <aside class="dashboard-nav" aria-label="Navegação administrativa">
       <div class="nav-brand">
         <img class="nav-logo" src="/lantern-icon.png" alt="">
@@ -1052,7 +1066,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
       <div id="admin-login" class="admin-panel">
         <form id="admin-login-form" class="admin-form two">
-          <input id="admin-username" autocomplete="username" placeholder="Usuário administrador" value="admin" required>
+          <input id="admin-username" autocomplete="username" placeholder="Usuário com acesso administrativo" required>
           <input id="admin-password" type="password" autocomplete="current-password" placeholder="Senha" required>
           <button type="submit">Entrar na administração</button>
         </form>
@@ -1276,10 +1290,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       renderAnnouncements(data.announcements || []);
     };
 
-    const dashboardToken = new URLSearchParams(window.location.search).get('token');
-    const dashboardApiUrl = dashboardToken
-      ? '/api/status?token=' + encodeURIComponent(dashboardToken)
-      : '/api/status';
+    const dashboardApiUrl = '/api/status';
 
     let adminCsrf = sessionStorage.getItem('lantern.admin.csrf') || '';
     const syncAdminSession = async () => {
@@ -1497,6 +1508,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     const loadAdmin = async () => {
       const sessionReady = await syncAdminSession();
       if (!sessionReady) {
+        $('dashboard-shell').classList.add('auth-locked');
         $('admin-login').classList.remove('hidden');
         $('admin-content').classList.add('hidden');
         setText('admin-state', 'Autenticação necessária');
@@ -1504,6 +1516,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       }
       const usersResponse = await adminFetch('/api/admin/users', { method: 'GET' });
       if (!usersResponse.ok) {
+        $('dashboard-shell').classList.add('auth-locked');
         $('admin-login').classList.remove('hidden');
         $('admin-content').classList.add('hidden');
         setText('admin-state', 'Autenticação necessária');
@@ -1520,6 +1533,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       const resetRequestsBody = resetRequestsResponse.ok ? await resetRequestsResponse.json() : { requests: [] };
       $('admin-login').classList.add('hidden');
       $('admin-content').classList.remove('hidden');
+      $('dashboard-shell').classList.remove('auth-locked');
       setText('admin-state', 'Sessão administrativa ativa');
       const retention = $('retention-policy');
       if (retention) retention.value = retentionBody.policy || 'forever';
@@ -1620,6 +1634,8 @@ export class LanternRelay {
   private presenceBroadcastTimer: NodeJS.Timeout | null = null;
   private announcementSweepTimer: NodeJS.Timeout | null = null;
   private groupSweepTimer: NodeJS.Timeout | null = null;
+  private calendarAutomationTimer: NodeJS.Timeout | null = null;
+  private calendarAutomationRunning = false;
   private bonjour: BonjourService | null = null;
   private published: Service | null = null;
   private udpSocket: UdpSocket | null = null;
@@ -1710,6 +1726,7 @@ export class LanternRelay {
     this.startPresenceBroadcastLoop();
     this.startAnnouncementSweepLoop();
     this.startGroupSweepLoop();
+    this.startCalendarAutomationLoop();
 
     logRelay('started', {
       endpoint: `${this.config.tlsCertFile ? 'wss' : 'ws'}://${this.config.host}:${this.config.port}`,
@@ -1730,6 +1747,66 @@ export class LanternRelay {
       { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
       { name: 'stickers', source: RELAY_STICKERS_DIR }
     ], 'relay-ui');
+  }
+
+  getManagementSnapshot() {
+    return {
+      users: this.centralStore.listUsers(),
+      passwordResetRequests: this.centralStore.listPasswordResetRequests(),
+      announcementTtlMs: this.centralStore.getAnnouncementTtlMs(),
+      announcements: this.listDashboardAnnouncements(this.listDashboardPeers(Date.now()), Date.now()),
+      calendarAutomation: this.getCalendarAutomationSettings()
+    };
+  }
+
+  createManagedUser(input: { username: string; displayName: string; department?: string; password: string; role?: 'admin' | 'user' }) {
+    const user = this.centralStore.createUser(input, 'relay-ui');
+    this.broadcastDirectory();
+    return user;
+  }
+
+  updateManagedUser(userId: string, input: { displayName?: string; department?: string; disabled?: boolean; role?: 'admin' | 'user' }) {
+    let user = this.centralStore.updateUser(userId, {
+      displayName: input.displayName,
+      department: input.department,
+      disabled: input.disabled
+    }, 'relay-ui');
+    if (input.role) user = this.centralStore.setUserRole(userId, input.role, 'relay-ui');
+    if (user.disabled) this.disconnectDisabledUser(userId);
+    this.broadcastDirectory();
+    this.bumpPresenceRevision('relay_ui_user_updated');
+    this.broadcastPresence('relay_ui_user_updated');
+    return user;
+  }
+
+  resetManagedUserPassword(userId: string, password: string): void {
+    this.centralStore.resetPassword(userId, password, 'relay-ui');
+  }
+
+  deleteManagedUser(userId: string): void {
+    this.disconnectDisabledUser(userId);
+    this.centralStore.deleteUser(userId, 'relay-ui');
+    this.broadcastDirectory();
+    this.bumpPresenceRevision('relay_ui_user_deleted');
+    this.broadcastPresence('relay_ui_user_deleted');
+  }
+
+  reviewManagedPasswordReset(requestId: string, approve: boolean) {
+    return this.centralStore.reviewPasswordResetRequest(requestId, approve, 'relay-ui');
+  }
+
+  setAnnouncementExpiryPolicy(ttlMs: number): number {
+    return this.centralStore.setAnnouncementTtlMs(ttlMs, 'relay-ui');
+  }
+
+  setActiveAnnouncementExpiry(messageId: string, expiresAt: number): void {
+    const state = this.announcementsById.get(messageId);
+    if (!state || state.deletedAt || state.expiredAt) throw new Error('Anúncio ativo não encontrado.');
+    const normalized = Math.trunc(Number(expiresAt));
+    if (!Number.isFinite(normalized) || normalized <= Date.now()) throw new Error('Informe uma expiração futura.');
+    state.expiresAt = normalized;
+    this.announcementsById.set(messageId, state);
+    if (!this.persistAnnouncementStore()) throw new Error('Não foi possível persistir a nova expiração.');
   }
 
   async stop(reason = 'shutdown'): Promise<void> {
@@ -1758,6 +1835,10 @@ export class LanternRelay {
     if (this.groupSweepTimer) {
       clearInterval(this.groupSweepTimer);
       this.groupSweepTimer = null;
+    }
+    if (this.calendarAutomationTimer) {
+      clearInterval(this.calendarAutomationTimer);
+      this.calendarAutomationTimer = null;
     }
     if (this.udpSocket) {
       try {
@@ -1959,6 +2040,99 @@ export class LanternRelay {
       }
     }, GROUP_SWEEP_INTERVAL_MS);
     this.groupSweepTimer.unref?.();
+  }
+
+  private getCalendarAutomationState(): CalendarAutomationState {
+    const stored = this.centralStore.readCanonicalState<Partial<CalendarAutomationState>>('calendar-automation', 1);
+    return {
+      version: 1,
+      enabled: stored?.enabled === true,
+      url: typeof stored?.url === 'string' ? stored.url : '',
+      updateTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(stored?.updateTime || '')) ? String(stored?.updateTime) : '08:00',
+      lastRunDate: typeof stored?.lastRunDate === 'string' ? stored.lastRunDate : '',
+      lastRunAt: Number(stored?.lastRunAt) || 0,
+      lastError: typeof stored?.lastError === 'string' ? stored.lastError : '',
+      seenEventIds: stored?.seenEventIds && typeof stored.seenEventIds === 'object' ? stored.seenEventIds : {}
+    };
+  }
+
+  private saveCalendarAutomationState(state: CalendarAutomationState): void {
+    this.centralStore.writeCanonicalState('calendar-automation', state, 1);
+  }
+
+  getCalendarAutomationSettings() {
+    const { seenEventIds, ...settings } = this.getCalendarAutomationState();
+    return { ...settings, publishedEvents: Object.keys(seenEventIds).length };
+  }
+
+  configureCalendarAutomation(input: { enabled?: boolean; url?: string; updateTime?: string }) {
+    const state = this.getCalendarAutomationState();
+    const url = input.url === undefined ? state.url : String(input.url).trim();
+    const updateTime = input.updateTime === undefined ? state.updateTime : String(input.updateTime).trim();
+    if (url) {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('O calendário deve usar uma URL HTTP ou HTTPS.');
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(updateTime)) throw new Error('Informe um horário válido para atualização.');
+    if (input.enabled === true && !url) throw new Error('Informe o link ICS antes de ativar a automação.');
+    const next = { ...state, enabled: input.enabled === undefined ? state.enabled : input.enabled, url, updateTime, lastError: '' };
+    this.saveCalendarAutomationState(next);
+    return this.getCalendarAutomationSettings();
+  }
+
+  async runCalendarAutomationNow(): Promise<{ eventsFound: number; announcementsCreated: number }> {
+    return this.runCalendarAutomation(true);
+  }
+
+  private startCalendarAutomationLoop(): void {
+    if (this.calendarAutomationTimer) return;
+    const check = () => { void this.runCalendarAutomation(false).catch((error) => logRelay('calendar_automation_failed', { message: error instanceof Error ? error.message : String(error) }, { level: 'warn' })); };
+    this.calendarAutomationTimer = setInterval(check, 30_000);
+    this.calendarAutomationTimer.unref?.();
+    check();
+  }
+
+  private async runCalendarAutomation(force: boolean): Promise<{ eventsFound: number; announcementsCreated: number }> {
+    if (this.calendarAutomationRunning) throw new Error('A atualização do calendário já está em andamento.');
+    const state = this.getCalendarAutomationState();
+    if (!state.url || (!force && !state.enabled)) return { eventsFound: 0, announcementsCreated: 0 };
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    if (!force && (state.lastRunDate === today || currentTime < state.updateTime || (state.lastRunAt > 0 && Date.now() - state.lastRunAt < 15 * 60_000))) return { eventsFound: 0, announcementsCreated: 0 };
+    this.calendarAutomationRunning = true;
+    try {
+      const events = await fetchCalendarEventsForDay(state.url, now);
+      let announcementsCreated = 0;
+      for (const event of events) {
+        if (state.seenEventIds[event.id]) continue;
+        const published = await this.publishCalendarEvent(event);
+        state.seenEventIds[event.id] = Date.now();
+        if (published) announcementsCreated += 1;
+      }
+      state.seenEventIds = Object.fromEntries(Object.entries(state.seenEventIds).sort((a, b) => b[1] - a[1]).slice(0, 2000));
+      state.lastRunDate = today; state.lastRunAt = Date.now(); state.lastError = '';
+      this.saveCalendarAutomationState(state);
+      logRelay('calendar_automation_completed', { eventsFound: events.length, announcementsCreated });
+      return { eventsFound: events.length, announcementsCreated };
+    } catch (error) {
+      state.lastRunAt = Date.now(); state.lastError = error instanceof Error ? error.message : String(error);
+      this.saveCalendarAutomationState(state);
+      throw error;
+    } finally { this.calendarAutomationRunning = false; }
+  }
+
+  private async publishCalendarEvent(event: CalendarAutomationEvent): Promise<boolean> {
+    const formatTime = (value: number) => new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
+    const lines = [`📅 ${event.title}`, event.allDay ? 'Evento de dia inteiro' : `${formatTime(event.start)} – ${formatTime(event.end)}`];
+    if (event.location) lines.push(`📍 ${event.location}`);
+    if (event.description) lines.push('', event.description.slice(0, 1200));
+    const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: 'relay-calendar', to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
+    const saved = this.centralStore.saveFrame({ messageId: frame.messageId, type: frame.type, senderUserId: frame.from, targetUserId: null, conversationId: 'announcements', createdAt: frame.createdAt, payload: frame.payload });
+    if (saved !== 'inserted') return false;
+    this.trackAnnouncement(frame);
+    await this.routeFrame(frame, null);
+    return true;
   }
 
   private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2342,20 +2516,6 @@ export class LanternRelay {
       return;
     }
 
-    const isDashboardRoute =
-      requestUrl.pathname === '/' ||
-      requestUrl.pathname.startsWith('/dashboard') ||
-      requestUrl.pathname.startsWith('/api/status') ||
-      requestUrl.pathname.startsWith('/api/admin/');
-    if (isDashboardRoute && !this.isLoopbackRequest(req)) {
-      this.writeJson(res, method, {
-        ok: false,
-        error: 'LOCALHOST_ONLY',
-        message: 'A administração do Relay só pode ser acessada no próprio servidor.'
-      }, 403);
-      return;
-    }
-
     if (requestUrl.pathname === '/api/admin/login' && method === 'POST') {
       const body = await this.readJsonBody(req);
       try {
@@ -2449,12 +2609,15 @@ export class LanternRelay {
         const body = await this.readJsonBody(req);
         try {
           const userId = decodeURIComponent(userMatch[1]);
-          const user = this.centralStore.updateUser(userId, {
+          let user = this.centralStore.updateUser(userId, {
             displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
             department: typeof body.department === 'string' ? body.department : undefined,
             disabled: typeof body.disabled === 'boolean' ? body.disabled : undefined,
             locale: body.locale === 'en' || body.locale === 'es' || body.locale === 'pt-BR' ? body.locale : undefined
           }, adminSession.userId);
+          if (body.role === 'admin' || body.role === 'user') {
+            user = this.centralStore.setUserRole(userId, body.role, adminSession.userId);
+          }
           this.writeJson(res, method, { ok: true, user });
           if (user.disabled) this.disconnectDisabledUser(userId);
           this.broadcastDirectory();
@@ -2549,11 +2712,12 @@ export class LanternRelay {
     }
 
     if (requestUrl.pathname === '/api/status') {
-      if (!this.isDashboardAuthorized(requestUrl)) {
+      const adminToken = this.getCookie(req, 'lantern_admin');
+      if (!this.centralStore.getAdminSession(adminToken)) {
         this.writeJson(res, method, {
           ok: false,
           error: 'UNAUTHORIZED',
-          message: 'Informe o token do painel do Relay.'
+          message: 'Autenticação administrativa necessária.'
         }, 401);
         return;
       }
@@ -2579,14 +2743,6 @@ export class LanternRelay {
       requestUrl.pathname === '/dashboard' ||
       requestUrl.pathname === '/dashboard/'
     ) {
-      if (!this.isDashboardAuthorized(requestUrl)) {
-        this.writeJson(res, method, {
-          ok: false,
-          error: 'UNAUTHORIZED',
-          message: 'Informe o token do painel do Relay.'
-        }, 401);
-        return;
-      }
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store'
@@ -2656,10 +2812,6 @@ export class LanternRelay {
       if (key === name) return decodeURIComponent(rest.join('='));
     }
     return '';
-  }
-
-  private isDashboardAuthorized(requestUrl: URL): boolean {
-    return !RELAY_DASHBOARD_TOKEN || requestUrl.searchParams.get('token') === RELAY_DASHBOARD_TOKEN;
   }
 
   private ensureStickerDirectory(): void {
@@ -4237,7 +4389,7 @@ export class LanternRelay {
       Number.isFinite(frame.createdAt) && frame.createdAt > 0
         ? Math.trunc(frame.createdAt)
         : Date.now();
-    const expiresAt = createdAt + ANNOUNCEMENT_TTL_MS;
+    const expiresAt = createdAt + this.centralStore.getAnnouncementTtlMs();
     const previous = this.announcementsById.get(frame.messageId);
     this.announcementsById.set(frame.messageId, {
       messageId: frame.messageId,
@@ -4742,7 +4894,7 @@ export class LanternRelay {
       for (const storedFrame of this.centralStore.listAnnouncementFrames()) {
         if (this.announcementsById.has(storedFrame.messageId)) continue;
         const createdAt = Math.trunc(storedFrame.createdAt);
-        const expiresAt = createdAt + ANNOUNCEMENT_TTL_MS;
+        const expiresAt = createdAt + this.centralStore.getAnnouncementTtlMs();
         if (expiresAt <= now) {
           staleFrameIds.push(storedFrame.messageId);
           continue;

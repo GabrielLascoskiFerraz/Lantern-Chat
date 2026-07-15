@@ -32,6 +32,18 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5a10 10 0 0 1 14 0M8 16a6 6 0 0 1 8 0M11 19.5a1.5 1.5 0 0 1 2 0"/></svg>
             <span>Conexão</span>
           </a>
+          <a class="nav-link" href="#accounts" data-section="accounts">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg>
+            <span>Contas</span>
+          </a>
+          <a class="nav-link" href="#password-resets" data-section="password-resets">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5V10Zm7 3v4"/></svg>
+            <span>Redefinições</span>
+          </a>
+          <a class="nav-link" href="#announcement-settings" data-section="announcement-settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h3l8-3v18l-8-3H5V6Zm3 3v6"/></svg>
+            <span>Anúncios</span>
+          </a>
         </nav>
       </div>
 
@@ -151,7 +163,7 @@
             <div class="card-header">
               <div>
                 <h3>Anúncios ativos</h3>
-                <p>Publicações disponíveis nas próximas 24 horas.</p>
+                <p>Publicações que ainda estão dentro do período configurado.</p>
               </div>
               <span id="announcements-count" class="count-badge">0</span>
             </div>
@@ -160,6 +172,60 @@
             </div>
           </article>
         </div>
+      </section>
+
+      <section id="accounts" class="page-section" aria-labelledby="accounts-title">
+        <div class="section-heading"><div><span class="section-kicker">Administração local</span><h2 id="accounts-title">Contas</h2></div><span id="accounts-count" class="count-badge">0</span></div>
+        <div class="management-grid">
+          <article class="card management-card">
+            <div class="card-header compact"><div><h3>Criar conta</h3><p>A permissão de dashboard pode ser atribuída agora ou depois.</p></div></div>
+            <form id="create-account-form" class="management-form">
+              <label class="field"><span>Usuário</span><input id="create-username" required minlength="3" autocomplete="off"></label>
+              <label class="field"><span>Nome de exibição</span><input id="create-display-name" required autocomplete="off"></label>
+              <label class="field"><span>Setor</span><input id="create-department" autocomplete="off"></label>
+              <label class="field"><span>Senha inicial</span><input id="create-password" type="password" required minlength="10" autocomplete="new-password"></label>
+              <label class="check-field"><input id="create-admin" type="checkbox"><span>Permitir acesso à dashboard administrativa</span></label>
+              <button class="button primary" type="submit">Criar conta</button>
+            </form>
+          </article>
+          <article class="card management-card accounts-card">
+            <div class="card-header compact"><div><h3>Contas existentes</h3><p>Edite setor, estado, senha e acesso administrativo.</p></div></div>
+            <div id="accounts-list" class="management-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="password-resets" class="page-section" aria-labelledby="password-resets-title">
+        <div class="section-heading"><div><span class="section-kicker">Acesso</span><h2 id="password-resets-title">Solicitações de redefinição</h2></div><span id="password-resets-count" class="count-badge">0</span></div>
+        <article class="card management-card"><div id="password-resets-list" class="management-list"></div></article>
+      </section>
+
+      <section id="announcement-settings" class="page-section" aria-labelledby="announcement-settings-title">
+        <div class="section-heading"><div><span class="section-kicker">Publicações</span><h2 id="announcement-settings-title">Expiração dos anúncios</h2></div></div>
+        <div class="management-grid">
+          <article class="card management-card">
+            <div class="card-header compact"><div><h3>Tempo padrão</h3><p>Aplicado aos novos anúncios publicados depois da alteração.</p></div></div>
+            <form id="announcement-ttl-form" class="management-form inline-form">
+              <label class="field"><span>Duração</span><input id="announcement-ttl-value" type="number" min="1" max="525600" required></label>
+              <label class="field"><span>Unidade</span><select id="announcement-ttl-unit"><option value="60000">Minutos</option><option value="3600000">Horas</option><option value="86400000" selected>Dias</option></select></label>
+              <button class="button primary" type="submit">Salvar duração</button>
+            </form>
+          </article>
+          <article class="card management-card">
+            <div class="card-header compact"><div><h3>Anúncios ativos</h3><p>Altere individualmente quando cada anúncio deixará de aparecer.</p></div></div>
+            <div id="managed-announcements-list" class="management-list"></div>
+          </article>
+        </div>
+        <article class="card management-card calendar-automation-card">
+          <div class="card-header compact"><div><h3>Calendário automático</h3><p>Consulte um link ICS diariamente e publique os compromissos do dia nos anúncios.</p></div><span id="calendar-status" class="state-badge disabled">Desativado</span></div>
+          <form id="calendar-automation-form" class="management-form calendar-form">
+            <label class="field calendar-url-field"><span>Link do calendário ICS</span><input id="calendar-url" type="url" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics" autocomplete="off"></label>
+            <label class="field"><span>Horário da atualização</span><input id="calendar-update-time" type="time" value="08:00" required></label>
+            <label class="check-field"><input id="calendar-enabled" type="checkbox"><span>Publicar automaticamente os eventos do dia</span></label>
+            <div class="calendar-actions"><button class="button primary" type="submit">Salvar automação</button><button id="calendar-refresh-now" class="button" type="button">Atualizar agora</button></div>
+          </form>
+          <div id="calendar-last-result" class="calendar-result">Nenhuma atualização executada.</div>
+        </article>
       </section>
 
       <section id="connection" class="page-section" aria-labelledby="connection-title">
@@ -213,6 +279,12 @@
                   <button id="pick-key" class="button" type="button">Selecionar</button>
                 </div>
               </label>
+              <div class="startup-settings" aria-labelledby="startup-settings-title">
+                <div><strong id="startup-settings-title">Inicialização automática</strong><span>Mantenha o Relay disponível sem precisar iniciá-lo manualmente.</span></div>
+                <label class="check-field"><input id="start-at-login" type="checkbox"><span>Iniciar o Lantern Relay UI com o sistema</span></label>
+                <label class="check-field"><input id="start-relay-on-launch" type="checkbox"><span>Ligar o servidor automaticamente ao abrir a Relay UI</span></label>
+                <small id="startup-support"></small>
+              </div>
               <div class="settings-footer">
                 <span id="settings-state">Configuração salva</span>
                 <button id="save-settings" class="button primary" type="button">Aplicar configuração</button>

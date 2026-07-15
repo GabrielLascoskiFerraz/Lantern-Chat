@@ -8,6 +8,22 @@ const { CentralStore } = require('../dist-relay/centralStore.js');
 
 const createTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-central-state-'));
 const silentLog = () => undefined;
+const createAdmin = (store) => store.createUser({
+  username: 'admin-test', displayName: 'Admin Test', password: 'admin-test-password', role: 'admin'
+});
+
+test('um Relay novo começa sem conta administrativa padrão', () => {
+  const root = createTempDir();
+  try {
+    const store = new CentralStore(path.join(root, 'central'), silentLog);
+    assert.deepEqual(store.listUsers(), []);
+    const user = store.createUser({ username: 'owner-test', displayName: 'Owner Test', password: 'owner-test-password' });
+    assert.equal(user.role, 'user');
+    assert.equal(store.setUserRole(user.userId, 'admin', 'relay-ui').role, 'admin');
+    assert.equal(store.setUserRole(user.userId, 'user', 'relay-ui').role, 'user');
+    store.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 test('estado canônico é cifrado e sobrevive à reabertura do SQLite', () => {
   const root = createTempDir();
@@ -56,8 +72,7 @@ test('pesquisa, anexos, auditoria e backup permanecem canônicos e cifrados', as
   process.env.LANTERN_RELAY_ADMIN_PASSWORD = 'admin-test-password';
   try {
     const store = new CentralStore(dataDir, silentLog);
-    const admin = store.listUsers().find((user) => user.username === 'admin');
-    assert.ok(admin);
+    const admin = createAdmin(store);
     const peer = store.createUser({
       username: 'search-peer', displayName: 'Search Peer', password: 'search-peer-password'
     });
@@ -116,7 +131,7 @@ test('cursor do servidor pagina mensagens sem lacunas mesmo com timestamps iguai
   process.env.LANTERN_RELAY_ADMIN_PASSWORD = 'admin-test-password';
   try {
     const store = new CentralStore(dataDir, silentLog);
-    const admin = store.listUsers().find((user) => user.username === 'admin');
+    const admin = createAdmin(store);
     const peer = store.createUser({
       username: 'cursor-peer', displayName: 'Cursor Peer', password: 'cursor-peer-password'
     });
@@ -150,7 +165,7 @@ test('diretório só oculta contas desativadas e limpa estados antigos de contat
   process.env.LANTERN_RELAY_ADMIN_PASSWORD = 'admin-test-password';
   try {
     const store = new CentralStore(dataDir, silentLog);
-    const admin = store.listUsers().find((user) => user.username === 'admin');
+    const admin = createAdmin(store);
     const peer = store.createUser({
       username: 'visible-peer', displayName: 'Visible Peer', department: 'Produto',
       password: 'visible-peer-password'
@@ -236,7 +251,7 @@ test('exportação canônica não depende do cache e respeita edições, exclus�
   process.env.LANTERN_RELAY_ADMIN_PASSWORD = 'admin-test-password';
   try {
     const store = new CentralStore(dataDir, silentLog);
-    const admin = store.listUsers().find((user) => user.username === 'admin');
+    const admin = createAdmin(store);
     const peer = store.createUser({ username: 'export-peer', displayName: 'Export Peer', password: 'export-peer-password' });
     const conversationId = `dm:${[admin.userId, peer.userId].sort().join(':')}`;
     const base = Date.now();

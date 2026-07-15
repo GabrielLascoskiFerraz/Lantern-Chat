@@ -8,6 +8,8 @@ interface RelayUiSettings {
   port: number;
   tlsCertFile: string;
   tlsKeyFile: string;
+  startAtLogin: boolean;
+  startRelayOnLaunch: boolean;
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -18,7 +20,9 @@ const normalizeSettings = (value: Partial<RelayUiSettings>): RelayUiSettings => 
   port: Number.isFinite(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535
     ? Math.trunc(Number(value.port)) : 43190,
   tlsCertFile: String(value.tlsCertFile || '').trim(),
-  tlsKeyFile: String(value.tlsKeyFile || '').trim()
+  tlsKeyFile: String(value.tlsKeyFile || '').trim(),
+  startAtLogin: value.startAtLogin === true,
+  startRelayOnLaunch: value.startRelayOnLaunch === true
 });
 const loadSettings = (): RelayUiSettings => {
   try { return normalizeSettings(JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))); }
@@ -28,7 +32,13 @@ const saveSettings = (value: Partial<RelayUiSettings>): RelayUiSettings => {
   const next = normalizeSettings({ ...loadSettings(), ...value });
   fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(next, null, 2));
+  applyLoginItemSettings(next);
   return next;
+};
+const loginItemSupported = (): boolean => process.platform === 'darwin' || process.platform === 'win32';
+const applyLoginItemSettings = (settings: RelayUiSettings): void => {
+  if (!loginItemSupported()) return;
+  app.setLoginItemSettings({ openAtLogin: settings.startAtLogin, openAsHidden: false });
 };
 const localAddresses = (): string[] => Object.values(os.networkInterfaces())
   .flatMap((entries) => entries || [])
@@ -38,8 +48,8 @@ const localAddresses = (): string[] => Object.values(os.networkInterfaces())
 const snapshot = () => {
   const settings = loadSettings();
   return relay
-    ? { running: true, settings, localAddresses: localAddresses(), ...relay.getDashboardSnapshot() }
-    : { running: false, settings, localAddresses: localAddresses(), port: settings.port,
+    ? { running: true, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), ...relay.getDashboardSnapshot() }
+    : { running: false, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), port: settings.port,
         tls: Boolean(settings.tlsCertFile && settings.tlsKeyFile), peersOnline: 0,
         announcementsActive: 0, uptimeMs: 0, centralStore: {}, transferMetrics: null, peers: [] };
 };
@@ -82,7 +92,18 @@ const createWindow = () => {
   mainWindow.on('closed', () => { mainWindow = null; });
 };
 
-app.whenReady().then(() => { Menu.setApplicationMenu(null); createWindow(); });
+app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
+  const settings = loadSettings();
+  applyLoginItemSettings(settings);
+  createWindow();
+  if (settings.startRelayOnLaunch) {
+    try { await startRelay(); }
+    catch (error) {
+      dialog.showErrorBox('Não foi possível iniciar o Lantern Relay', error instanceof Error ? error.message : String(error));
+    }
+  }
+});
 app.on('window-all-closed', () => void stopRelay().finally(() => app.quit()));
 ipcMain.handle('relay-ui:status', snapshot);
 ipcMain.handle('relay-ui:start', startRelay);
@@ -92,13 +113,32 @@ ipcMain.handle('relay-ui:backup', async () => {
   if (!relay) throw new Error('Inicie o Relay antes de criar um backup.');
   return relay.createCanonicalBackup();
 });
+const requireRelay = (): LanternRelay => {
+  if (!relay) throw new Error('Inicie o Relay para acessar o gerenciamento.');
+  return relay;
+};
+ipcMain.handle('relay-ui:management', () => requireRelay().getManagementSnapshot());
+ipcMain.handle('relay-ui:createUser', (_event, input) => requireRelay().createManagedUser(input));
+ipcMain.handle('relay-ui:updateUser', (_event, userId, input) => requireRelay().updateManagedUser(String(userId), input));
+ipcMain.handle('relay-ui:resetPassword', (_event, userId, password) => requireRelay().resetManagedUserPassword(String(userId), String(password)));
+ipcMain.handle('relay-ui:deleteUser', (_event, userId) => requireRelay().deleteManagedUser(String(userId)));
+ipcMain.handle('relay-ui:reviewPasswordReset', (_event, requestId, approve) => requireRelay().reviewManagedPasswordReset(String(requestId), Boolean(approve)));
+ipcMain.handle('relay-ui:setAnnouncementTtl', (_event, ttlMs) => requireRelay().setAnnouncementExpiryPolicy(Number(ttlMs)));
+ipcMain.handle('relay-ui:setAnnouncementExpiry', (_event, messageId, expiresAt) => requireRelay().setActiveAnnouncementExpiry(String(messageId), Number(expiresAt)));
+ipcMain.handle('relay-ui:configureCalendar', (_event, input) => requireRelay().configureCalendarAutomation(input));
+ipcMain.handle('relay-ui:refreshCalendar', () => requireRelay().runCalendarAutomationNow());
 ipcMain.handle('relay-ui:openDashboard', async () => {
   if (!relay) throw new Error('Inicie o Relay antes de abrir a administração.');
   const settings = loadSettings();
   const protocol = settings.tlsCertFile && settings.tlsKeyFile ? 'https' : 'http';
   await shell.openExternal(`${protocol}://127.0.0.1:${settings.port}/`);
 });
-ipcMain.handle('relay-ui:updateSettings', async (_event, value) => { saveSettings(value); return relay ? restartRelay() : snapshot(); });
+ipcMain.handle('relay-ui:updateSettings', async (_event, value: Partial<RelayUiSettings>) => {
+  const previous = loadSettings();
+  const next = saveSettings(value);
+  const connectionChanged = previous.port !== next.port || previous.tlsCertFile !== next.tlsCertFile || previous.tlsKeyFile !== next.tlsKeyFile;
+  return relay && connectionChanged ? restartRelay() : snapshot();
+});
 const pickPem = async (title: string) => {
   const result = await dialog.showOpenDialog({ title, properties: ['openFile'], filters: [{ name: 'PEM', extensions: ['pem', 'crt', 'cer', 'key'] }] });
   return result.canceled ? null : result.filePaths[0] || null;

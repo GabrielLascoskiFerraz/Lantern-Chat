@@ -80,10 +80,11 @@ const sendAndWait = async (client, envelope, predicate) => {
 test('anexos diretos, de anúncios e de grupos baixam imediatamente do Relay', async () => {
   const port = await getFreePort();
   const bootstrap = new CentralStore(path.join(root, 'central'), () => undefined);
+  bootstrap.createUser({ username: 'attachment-sender', displayName: 'Attachment Sender', password: 'attachment-sender-password' });
   const recipientUser = bootstrap.createUser({
     username: 'attachment-peer', displayName: 'Attachment Peer', password: 'attachment-peer-password'
   });
-  const senderAuth = bootstrap.login('admin', 'admin-test-password', 'attachment-sender');
+  const senderAuth = bootstrap.login('attachment-sender', 'attachment-sender-password', 'attachment-sender');
   const recipientAuth = bootstrap.login('attachment-peer', 'attachment-peer-password', 'attachment-recipient');
   bootstrap.close();
 

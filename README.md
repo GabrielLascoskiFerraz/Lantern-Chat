@@ -110,10 +110,10 @@ Healthcheck:
 http://127.0.0.1:43190/health
 ```
 
-Dashboard administrativa local:
+Dashboard administrativa autenticada:
 
 ```text
-http://127.0.0.1:43190/
+http://<endereço-do-relay>:43190/
 ```
 
 Cliente Lantern pelo navegador:
@@ -124,22 +124,11 @@ http://<endereço-do-relay>:43190/app/
 
 Em modo externo, use obrigatoriamente `https://` e um certificado confiável. O cliente web usa a mesma conta e o mesmo histórico canônico dos aplicativos desktop.
 
-## Conta administrativa inicial
+## Acesso administrativo
 
-No primeiro início, o Relay cria a conta administrativa `admin`. Para desenvolvimento, a credencial padrão é:
+O Relay não cria usuário ou senha administrativa padrão. Crie ou selecione uma conta na Lantern Relay UI e habilite **Acesso à dashboard**. Essa permissão não é exibida no cliente, no perfil, na lista de contatos ou nas conversas.
 
-```text
-usuário: admin
-senha: root
-```
-
-Defina uma senha inicial diferente antes da primeira execução:
-
-```bash
-LANTERN_RELAY_ADMIN_PASSWORD='uma-senha-forte' npm run relay:start
-```
-
-Troque a credencial padrão imediatamente fora de um ambiente de desenvolvimento.
+A dashboard pode ser acessada por outros computadores, mas exibe primeiro a autenticação e não entrega métricas nem operações sem uma sessão administrativa válida. Fora de uma rede confiável, configure HTTPS para não transmitir credenciais em texto simples.
 
 ## Executando o Relay
 
@@ -166,7 +155,6 @@ Modo externo com TLS obrigatório:
 LANTERN_RELAY_EXTERNAL=1 \
 LANTERN_RELAY_TLS_CERT='/caminho/fullchain.pem' \
 LANTERN_RELAY_TLS_KEY='/caminho/privkey.pem' \
-LANTERN_RELAY_ADMIN_PASSWORD='uma-senha-forte' \
 npm run relay:start
 ```
 
@@ -178,9 +166,7 @@ Variáveis úteis:
 | `LANTERN_RELAY_HOST` / `LANTERN_RELAY_PORT` | Interface e porta de escuta |
 | `LANTERN_RELAY_TLS_CERT` / `LANTERN_RELAY_TLS_KEY` | Certificado e chave TLS |
 | `LANTERN_RELAY_EXTERNAL=1` | Exige transporte seguro |
-| `LANTERN_RELAY_ADMIN_PASSWORD` | Senha do administrador no primeiro início |
 | `LANTERN_RELAY_MASTER_KEY` | Chave mestra fornecida externamente |
-| `LANTERN_RELAY_DASHBOARD_TOKEN` | Proteção adicional opcional da dashboard |
 | `LANTERN_RELAY_LOG_LEVEL` | `debug`, `info`, `warn` ou `error` |
 | `LANTERN_RELAY_STICKERS_DIR` | Catálogo de figurinhas servido pelo Relay |
 
@@ -195,10 +181,14 @@ npm run relay-ui:dev
 A Relay UI permite:
 
 - iniciar, parar e reiniciar o Relay;
+- iniciar a Relay UI com o sistema e ligar o servidor automaticamente ao abrir;
 - configurar porta, certificado e chave;
 - copiar endereços locais disponíveis;
 - acompanhar usuários, sessões, armazenamento, transferências, anúncios, frames e tempo ativo;
-- abrir a administração completa de contas e sessões no navegador local;
+- criar e gerenciar contas, conceder acesso administrativo e aprovar solicitações de redefinição de senha;
+- definir a expiração padrão ou individual dos anúncios;
+- publicar automaticamente, nos anúncios, os eventos de um calendário ICS no horário escolhido;
+- abrir a dashboard autenticada no navegador, inclusive por outro computador da rede;
 - criar um backup restaurável sem interromper o Relay.
 
 Certificado e chave são opcionais juntos no modo local. Para rede externa, use o Relay em modo externo com TLS obrigatório.
@@ -241,13 +231,31 @@ Contas, sessões, mensagens diretas, anúncios, grupos, eventos e metadados de a
 
 Use a Relay UI ou a dashboard administrativa para criar um pacote em `central/backups`. Cada pacote contém uma cópia consistente do SQLite, a chave mestra, anexos diretos, anexos de grupos, stickers e um manifesto SHA-256. Ele pode ser restaurado copiando seu conteúdo de volta para o diretório de dados com o Relay parado. O cache SQLite dos clientes não substitui esse backup e pode ser reconstruído sob demanda a partir do Relay.
 
+## Migração da edição com dados locais
+
+Backups exportados pela antiga edição peer-to-peer podem ser consolidados em um Relay canônico novo. O aplicativo **Lantern Migration** trabalha primeiro em modo de análise, deduplica as cópias locais, reconstrói as relações entre usuários, verifica anexos por SHA-256 e aplica a importação em staging com rollback preservado.
+
+```bash
+npm run migration-ui:dev
+```
+
+Na interface, **Aplicar migração** só é liberado depois de uma análise bem-sucedida para a mesma origem, destino e opções. Para automação, o mesmo motor permanece disponível por linha de comando:
+
+```bash
+npm run migrate:local-backups -- \
+  --backups "/pasta/com/LanternBackup-*" \
+  --relay-data "/pasta/de/dados/do/relay"
+```
+
+Revise o dry-run e acrescente `--apply` somente com o Relay parado. O procedimento completo e o mapeamento opcional de contas estão em [docs/local-backup-migration.md](docs/local-backup-migration.md).
+
 ## Verificação
 
 ```bash
 npm run verify
 ```
 
-O comando executa lint, typecheck dos quatro processos, testes de migração, persistência cifrada, cursor canônico, busca indexada, backup/restauração, transferência imediata de anexos diretos e de grupo e sessões multi-device, além de todos os builds de desenvolvimento. A mesma verificação roda no CI da branch.
+O comando executa lint, typecheck dos cinco processos, testes de migração, calendário, persistência cifrada, cursor canônico, busca indexada, backup/restauração, transferência imediata de anexos diretos e de grupo e sessões multi-device, além de todos os builds de desenvolvimento. A mesma verificação roda no CI da branch.
 
 ## Builds
 

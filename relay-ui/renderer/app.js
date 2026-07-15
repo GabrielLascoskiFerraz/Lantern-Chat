@@ -160,6 +160,106 @@ const renderAddresses = (state) => {
   }
 };
 
+const managementEmpty = (title, detail) => emptyState('○', title, detail);
+
+const renderManagement = (state) => {
+  const users = Array.isArray(state.users) ? state.users : [];
+  const requests = Array.isArray(state.passwordResetRequests) ? state.passwordResetRequests : [];
+  const announcements = Array.isArray(state.announcements) ? state.announcements : [];
+  $('accounts-count').textContent = number(users.length);
+  $('password-resets-count').textContent = number(requests.length);
+  const accounts = $('accounts-list');
+  accounts.replaceChildren();
+  if (!users.length) accounts.append(managementEmpty('Nenhuma conta', 'Crie a primeira conta para começar.'));
+  for (const user of users) {
+    const row = document.createElement('article'); row.className = 'management-row';
+    const head = document.createElement('div'); head.className = 'management-row-head';
+    const identity = document.createElement('div'); identity.className = 'account-identity';
+    const avatar = document.createElement('span'); avatar.className = 'avatar'; avatar.style.background = user.avatarBg || '#147ad6'; avatar.textContent = user.avatarEmoji || '🙂';
+    const labels = document.createElement('div');
+    const name = document.createElement('strong'); name.textContent = user.displayName;
+    const username = document.createElement('span'); username.textContent = `@${user.username}${user.department ? ` · ${user.department}` : ''}`;
+    labels.append(name, username); identity.append(avatar, labels);
+    const status = document.createElement('span'); status.className = `state-badge${user.disabled ? ' disabled' : ''}`; status.textContent = user.disabled ? 'Desativada' : 'Ativa';
+    head.append(identity, status);
+    const controls = document.createElement('div'); controls.className = 'management-controls';
+    const department = document.createElement('input'); department.value = user.department || ''; department.placeholder = 'Setor'; department.setAttribute('aria-label', `Setor de ${user.displayName}`);
+    const adminLabel = document.createElement('label'); adminLabel.className = 'check-field compact';
+    const admin = document.createElement('input'); admin.type = 'checkbox'; admin.checked = user.role === 'admin';
+    const adminText = document.createElement('span'); adminText.textContent = 'Acesso à dashboard'; adminLabel.append(admin, adminText);
+    const save = document.createElement('button'); save.className = 'button'; save.type = 'button'; save.textContent = 'Salvar';
+    save.addEventListener('click', () => runManagementAction(() => api.updateUser(user.userId, { department: department.value, role: admin.checked ? 'admin' : 'user' }), 'Conta atualizada.'));
+    const password = document.createElement('input'); password.type = 'password'; password.placeholder = 'Nova senha'; password.autocomplete = 'new-password';
+    const reset = document.createElement('button'); reset.className = 'button'; reset.type = 'button'; reset.textContent = 'Redefinir senha';
+    reset.addEventListener('click', () => {
+      if (password.value.length < 10) return showFeedback('A senha deve ter pelo menos 10 caracteres.', 'error');
+      void runManagementAction(() => api.resetPassword(user.userId, password.value), 'Senha redefinida e sessões encerradas.');
+    });
+    const toggle = document.createElement('button'); toggle.className = user.disabled ? 'button' : 'button danger'; toggle.type = 'button'; toggle.textContent = user.disabled ? 'Reativar' : 'Desativar';
+    toggle.addEventListener('click', () => runManagementAction(() => api.updateUser(user.userId, { disabled: !user.disabled }), user.disabled ? 'Conta reativada.' : 'Conta desativada.'));
+    const remove = document.createElement('button'); remove.className = 'button danger'; remove.type = 'button'; remove.textContent = 'Excluir';
+    remove.addEventListener('click', () => { if (window.confirm(`Excluir a conta de ${user.displayName}? O histórico será preservado.`)) void runManagementAction(() => api.deleteUser(user.userId), 'Conta excluída.'); });
+    controls.append(department, adminLabel, save, password, reset, toggle, remove);
+    row.append(head, controls); accounts.append(row);
+  }
+
+  const resets = $('password-resets-list'); resets.replaceChildren();
+  if (!requests.length) resets.append(managementEmpty('Nenhuma solicitação pendente', 'Novos pedidos aparecerão aqui.'));
+  for (const request of requests) {
+    const row = document.createElement('article'); row.className = 'management-row horizontal';
+    const detail = document.createElement('div'); const title = document.createElement('strong'); title.textContent = request.displayName;
+    const subtitle = document.createElement('span'); subtitle.textContent = `@${request.username} · solicitada em ${new Date(request.requestedAt).toLocaleString('pt-BR')}`; detail.append(title, subtitle);
+    const actions = document.createElement('div'); actions.className = 'row-actions';
+    if (request.status === 'pending') {
+      const approve = document.createElement('button'); approve.className = 'button primary'; approve.textContent = 'Aprovar'; approve.type = 'button'; approve.addEventListener('click', () => runManagementAction(() => api.reviewPasswordReset(request.requestId, true), 'Redefinição aprovada.'));
+      const reject = document.createElement('button'); reject.className = 'button danger'; reject.textContent = 'Rejeitar'; reject.type = 'button'; reject.addEventListener('click', () => runManagementAction(() => api.reviewPasswordReset(request.requestId, false), 'Solicitação rejeitada.'));
+      actions.append(approve, reject);
+    } else { const stateLabel = document.createElement('span'); stateLabel.className = 'state-badge'; stateLabel.textContent = 'Aprovada'; actions.append(stateLabel); }
+    row.append(detail, actions); resets.append(row);
+  }
+
+  const ttlMs = Number(state.announcementTtlMs) || 86400000;
+  const ttlDays = ttlMs / 86400000;
+  if (Number.isInteger(ttlDays)) { $('announcement-ttl-value').value = String(ttlDays); $('announcement-ttl-unit').value = '86400000'; }
+  else { $('announcement-ttl-value').value = String(Math.max(1, Math.round(ttlMs / 3600000))); $('announcement-ttl-unit').value = '3600000'; }
+  const announcementList = $('managed-announcements-list'); announcementList.replaceChildren();
+  if (!announcements.length) announcementList.append(managementEmpty('Nenhum anúncio ativo', 'Os anúncios publicados aparecerão aqui.'));
+  for (const announcement of announcements) {
+    const row = document.createElement('article'); row.className = 'management-row horizontal';
+    const detail = document.createElement('div'); const title = document.createElement('strong'); title.textContent = announcement.authorName || 'Usuário';
+    const subtitle = document.createElement('span'); subtitle.textContent = announcement.text || '(sem conteúdo)'; detail.append(title, subtitle);
+    const controls = document.createElement('div'); controls.className = 'expiry-controls';
+    const input = document.createElement('input'); input.type = 'datetime-local'; input.value = new Date(announcement.expiresAt - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const save = document.createElement('button'); save.className = 'button'; save.type = 'button'; save.textContent = 'Alterar';
+    save.addEventListener('click', () => runManagementAction(() => api.setAnnouncementExpiry(announcement.messageId, new Date(input.value).getTime()), 'Expiração atualizada.'));
+    controls.append(input, save); row.append(detail, controls); announcementList.append(row);
+  }
+  const calendar = state.calendarAutomation || {};
+  const calendarForm = $('calendar-automation-form');
+  if (!calendarForm.contains(document.activeElement)) {
+    $('calendar-url').value = calendar.url || '';
+    $('calendar-update-time').value = calendar.updateTime || '08:00';
+    $('calendar-enabled').checked = Boolean(calendar.enabled);
+  }
+  $('calendar-status').textContent = calendar.enabled ? 'Ativado' : 'Desativado';
+  $('calendar-status').className = `state-badge${calendar.enabled ? '' : ' disabled'}`;
+  $('calendar-last-result').textContent = calendar.lastError
+    ? `Última tentativa: ${calendar.lastError}`
+    : calendar.lastRunAt
+      ? `Última atualização em ${new Date(calendar.lastRunAt).toLocaleString('pt-BR')} · ${number(calendar.publishedEvents)} evento(s) já publicado(s).`
+      : 'Nenhuma atualização executada.';
+};
+
+const refreshManagement = async () => {
+  if (!latestState?.running) return;
+  renderManagement(await api.management());
+};
+
+const runManagementAction = async (action, successMessage) => {
+  try { await action(); await refreshManagement(); await refresh(); showFeedback(successMessage); }
+  catch (error) { showFeedback(cleanError(error), 'error'); }
+};
+
 const setButtons = (state) => {
   $('start').disabled = actionInFlight || state.running;
   $('restart').disabled = actionInFlight || !state.running;
@@ -217,7 +317,13 @@ const render = (state) => {
     $('port-input').value = String(state.settings?.port || 43190);
     $('cert-input').value = state.settings?.tlsCertFile || '';
     $('key-input').value = state.settings?.tlsKeyFile || '';
+    $('start-at-login').checked = Boolean(state.settings?.startAtLogin);
+    $('start-relay-on-launch').checked = Boolean(state.settings?.startRelayOnLaunch);
   }
+  $('start-at-login').disabled = !state.loginItemSupported;
+  $('startup-support').textContent = state.loginItemSupported
+    ? 'Compatível com a inicialização nativa deste sistema.'
+    : 'A inicialização com o sistema não é gerenciada automaticamente nesta plataforma.';
   renderUsers(peers);
   renderAnnouncements(announcements);
   renderAddresses(state);
@@ -240,6 +346,7 @@ const runAction = async (action, successMessage) => {
     const state = await action();
     if (state?.settings) render(state);
     else await refresh();
+    if (latestState?.running) await refreshManagement();
     if (successMessage) showFeedback(successMessage);
   } catch (error) {
     showFeedback(cleanError(error), 'error');
@@ -290,6 +397,8 @@ $('pick-key').addEventListener('click', async () => {
   if (selected) { $('key-input').value = selected; markSettingsDirty(); }
 });
 $('port-input').addEventListener('input', markSettingsDirty);
+$('start-at-login').addEventListener('change', markSettingsDirty);
+$('start-relay-on-launch').addEventListener('change', markSettingsDirty);
 $('save-settings').addEventListener('click', async () => {
   const port = Number($('port-input').value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -300,13 +409,55 @@ $('save-settings').addEventListener('click', async () => {
     const state = await api.updateSettings({
       port,
       tlsCertFile: $('cert-input').value,
-      tlsKeyFile: $('key-input').value
+      tlsKeyFile: $('key-input').value,
+      startAtLogin: $('start-at-login').checked,
+      startRelayOnLaunch: $('start-relay-on-launch').checked
     });
     settingsDirty = false;
     $('settings-state').textContent = 'Configuração salva';
     $('settings-state').className = '';
     return state;
   }, 'Configuração aplicada.');
+});
+
+$('create-account-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const password = $('create-password').value;
+  if (password.length < 10) return showFeedback('A senha inicial deve ter pelo menos 10 caracteres.', 'error');
+  void runManagementAction(async () => {
+    await api.createUser({
+      username: $('create-username').value,
+      displayName: $('create-display-name').value,
+      department: $('create-department').value,
+      password,
+      role: $('create-admin').checked ? 'admin' : 'user'
+    });
+    $('create-account-form').reset();
+  }, 'Conta criada.');
+});
+
+$('announcement-ttl-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const ttlMs = Number($('announcement-ttl-value').value) * Number($('announcement-ttl-unit').value);
+  void runManagementAction(() => api.setAnnouncementTtl(ttlMs), 'Tempo padrão dos anúncios atualizado.');
+});
+
+$('calendar-automation-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  void runManagementAction(() => api.configureCalendar({
+    url: $('calendar-url').value,
+    updateTime: $('calendar-update-time').value,
+    enabled: $('calendar-enabled').checked
+  }), 'Automação do calendário salva.');
+});
+
+$('calendar-refresh-now').addEventListener('click', async () => {
+  try {
+    await api.configureCalendar({ url: $('calendar-url').value, updateTime: $('calendar-update-time').value, enabled: $('calendar-enabled').checked });
+    const result = await api.refreshCalendar();
+    await refreshManagement(); await refresh();
+    showFeedback(`${number(result.eventsFound)} evento(s) encontrado(s) · ${number(result.announcementsCreated)} anúncio(s) criado(s).`);
+  } catch (error) { showFeedback(cleanError(error), 'error'); }
 });
 
 const navLinks = Array.from(document.querySelectorAll('.nav-link'));
@@ -316,5 +467,6 @@ for (const link of navLinks) {
   });
 }
 
-void refresh({ silent: false });
+void refresh({ silent: false }).then(() => refreshManagement()).catch(() => undefined);
 window.setInterval(() => void refresh(), 3_000);
+window.setInterval(() => void refreshManagement().catch(() => undefined), 15_000);

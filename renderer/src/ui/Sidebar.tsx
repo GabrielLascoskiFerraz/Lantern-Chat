@@ -40,6 +40,7 @@ import {
 import { GroupInfo, GroupMember, Peer, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { CreateGroupDialog } from './CreateGroupDialog';
 
 interface SidebarProps {
   profile: Profile;
@@ -83,20 +84,6 @@ interface SidebarProps {
   relayEndpoint: string | null;
   syncActive: boolean;
 }
-
-const GROUP_EMOJI_CHOICES = ['👥', '💬', '🏢', '🚀', '🎯', '🧠', '🛠️', '📌', '📣', '☕', '🐱', '🦊', '🍕', '🌟', '🔥', '✅'];
-const GROUP_COLOR_CHOICES = [
-  '#147ad6',
-  '#00b7c3',
-  '#8cbd18',
-  '#ff8c00',
-  '#d13438',
-  '#8764b8',
-  '#107c10',
-  '#5c2e91',
-  '#69797e',
-  '#ca5010'
-];
 
 export const Sidebar = ({
   profile,
@@ -147,13 +134,6 @@ export const Sidebar = ({
   const [quickStatusClosing, setQuickStatusClosing] = useState(false);
   const [customStatusDraft, setCustomStatusDraft] = useState('');
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
-  const [groupDraft, setGroupDraft] = useState({
-    name: '',
-    emoji: '👥',
-    avatarBg: '#147ad6',
-    description: ''
-  });
-  const [groupMemberIds, setGroupMemberIds] = useState<string[]>([]);
   const quickStatusRef = useRef<HTMLDivElement | null>(null);
   const quickStatusButtonRef = useRef<HTMLButtonElement | null>(null);
   const quickStatusCloseTimeoutRef = useRef<number | null>(null);
@@ -1023,148 +1003,13 @@ export const Sidebar = ({
         </div>
       )}
 
-      {createGroupOpen && (
-        <div
-          className="group-create-backdrop"
-          onClick={() => setCreateGroupOpen(false)}
-        >
-          <div className="group-create-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="group-create-header">
-              <div className="group-create-title">
-                <PeopleTeam20Regular />
-                <Text weight="semibold">Novo grupo</Text>
-              </div>
-              <Button
-                appearance="subtle"
-                icon={<Dismiss20Regular />}
-                onClick={() => setCreateGroupOpen(false)}
-              />
-            </div>
-            <div className="group-create-form">
-              <div className="group-create-avatar-row">
-                <Avatar emoji={groupDraft.emoji || '👥'} bg={groupDraft.avatarBg || '#147ad6'} size={42} />
-                <Input
-                  value={groupDraft.emoji}
-                  maxLength={4}
-                  placeholder="Emoji"
-                  onChange={(_, data) => setGroupDraft((current) => ({ ...current, emoji: data.value || '👥' }))}
-                />
-                <Input
-                  value={groupDraft.avatarBg}
-                  placeholder="#147ad6"
-                  onChange={(_, data) => setGroupDraft((current) => ({ ...current, avatarBg: data.value || '#147ad6' }))}
-                />
-              </div>
-              <div className="group-choice-grid emoji">
-                {GROUP_EMOJI_CHOICES.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    className={`group-choice-btn ${groupDraft.emoji === emoji ? 'selected' : ''}`}
-                    onClick={() => setGroupDraft((current) => ({ ...current, emoji }))}
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-              <div className="group-choice-grid colors">
-                {GROUP_COLOR_CHOICES.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    className={`group-color-btn ${
-                      groupDraft.avatarBg.toLowerCase() === color.toLowerCase() ? 'selected' : ''
-                    }`}
-                    style={{ background: color }}
-                    aria-label={`Usar cor ${color}`}
-                    onClick={() => setGroupDraft((current) => ({ ...current, avatarBg: color }))}
-                  />
-                ))}
-                <label
-                  className="group-color-picker-btn"
-                  title="Escolher cor customizada"
-                  aria-label="Escolher cor customizada"
-                >
-                  <input
-                    type="color"
-                    value={/^#[0-9a-f]{6}$/i.test(groupDraft.avatarBg) ? groupDraft.avatarBg : '#147ad6'}
-                    onChange={(event) =>
-                      setGroupDraft((current) => ({ ...current, avatarBg: event.target.value }))
-                    }
-                  />
-                  <span style={{ background: groupDraft.avatarBg || '#147ad6' }} />
-                </label>
-              </div>
-              <Input
-                value={groupDraft.name}
-                placeholder="Nome do grupo"
-                onChange={(_, data) => setGroupDraft((current) => ({ ...current, name: data.value }))}
-              />
-              <Input
-                value={groupDraft.description}
-                placeholder="Descrição"
-                onChange={(_, data) => setGroupDraft((current) => ({ ...current, description: data.value }))}
-              />
-              <div className="group-create-members">
-                <Caption1>Participantes</Caption1>
-                <div className="group-create-members-list">
-                  {peers.map((peer) => {
-                    const checked = groupMemberIds.includes(peer.deviceId);
-                    const isOnline = onlinePeerIds.includes(peer.deviceId);
-                    return (
-                      <label key={peer.deviceId} className="group-member-option">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            setGroupMemberIds((current) =>
-                              current.includes(peer.deviceId)
-                                ? current.filter((id) => id !== peer.deviceId)
-                                : [...current, peer.deviceId]
-                            );
-                          }}
-                        />
-                        <Avatar emoji={peer.avatarEmoji} bg={peer.avatarBg} size={26} />
-                        <span>{peer.displayName}</span>
-                        <span className={`presence-dot inline ${isOnline ? 'online' : 'offline'}`} />
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-            <div className="group-create-actions">
-              <Button appearance="secondary" onClick={() => setCreateGroupOpen(false)}>
-                Cancelar
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={!groupDraft.name.trim() || groupMemberIds.length === 0}
-                onClick={() => {
-                  void onCreateGroup({
-                    name: groupDraft.name.trim(),
-                    emoji: groupDraft.emoji.trim() || '👥',
-                    avatarBg: groupDraft.avatarBg.trim() || '#147ad6',
-                    description: groupDraft.description.trim(),
-                    memberDeviceIds: groupMemberIds
-                  }).then(() => {
-                    setCreateGroupOpen(false);
-                    setGroupDraft({
-                      name: '',
-                      emoji: '👥',
-                      avatarBg: '#147ad6',
-                      description: ''
-                    });
-                    setGroupMemberIds([]);
-                  });
-                }}
-              >
-                Criar grupo
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <CreateGroupDialog
+        open={createGroupOpen}
+        peers={peers}
+        onlinePeerIds={onlinePeerIds}
+        onClose={() => setCreateGroupOpen(false)}
+        onCreate={onCreateGroup}
+      />
 
       <ConfirmDialog
         open={Boolean(pendingClearConversationId)}

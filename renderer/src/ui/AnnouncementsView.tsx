@@ -178,7 +178,6 @@ export const AnnouncementsView = ({
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const [filePreviewByMessageId, setFilePreviewByMessageId] = useState<Record<string, string>>({});
   const paneRootRef = useRef<HTMLDivElement | null>(null);
-  const [nowTs, setNowTs] = useState(() => Date.now());
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -399,13 +398,6 @@ export const AnnouncementsView = ({
   );
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setNowTs(Date.now());
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     const node = messagesScrollRef.current;
     if (!node) return;
     if (!stickToBottomRef.current && !isNearBottom()) return;
@@ -449,18 +441,6 @@ export const AnnouncementsView = ({
     });
     return () => window.cancelAnimationFrame(frameA);
   }, []);
-
-  const formatRemaining = (createdAt: number): string => {
-    const remaining = createdAt + 24 * 60 * 60 * 1000 - nowTs;
-    if (remaining <= 0) return 'expira em breve';
-    const totalMinutes = Math.ceil(remaining / 60_000);
-    const days = Math.floor(totalMinutes / (24 * 60));
-    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-    const minutes = totalMinutes % 60;
-    if (days > 0) return `expira em ${days}d ${hours}h`;
-    if (hours > 0) return `expira em ${hours}h ${minutes}m`;
-    return `expira em ${minutes}m`;
-  };
 
   const openReactionDetails = async (messageId: string): Promise<void> => {
     setDetailsDialog({
@@ -523,7 +503,7 @@ export const AnnouncementsView = ({
                 Anúncios
               </span>
             </Text>
-            <Caption1>Comunicados para todos os usuários. Eles ficam disponíveis por 24h.</Caption1>
+            <Caption1>Comunicados para todos os usuários, com expiração definida pelo Relay.</Caption1>
           </div>
         </div>
       </header>
@@ -540,10 +520,11 @@ export const AnnouncementsView = ({
           .filter((message) => !message.deletedAt)
           .map((message) => {
             const outgoing = message.direction === 'out';
+            const fromCalendar = message.senderDeviceId === 'relay-calendar';
             const sender = peers.find((peer) => peer.deviceId === message.senderDeviceId);
-            const emoji = outgoing ? profile.avatarEmoji : sender?.avatarEmoji || '📢';
-            const bg = outgoing ? profile.avatarBg : sender?.avatarBg || '#5b5fc7';
-            const senderName = outgoing ? 'Você' : sender?.displayName || message.senderDeviceId;
+            const emoji = outgoing ? profile.avatarEmoji : fromCalendar ? '📅' : sender?.avatarEmoji || '📢';
+            const bg = outgoing ? profile.avatarBg : fromCalendar ? '#107c10' : sender?.avatarBg || '#5b5fc7';
+            const senderName = outgoing ? 'Você' : fromCalendar ? 'Agenda do Relay' : sender?.displayName || message.senderDeviceId;
             const summary = reactionsByMessageId[message.messageId] || { counts: {}, myReaction: null };
             const readSummary = readsByMessageId[message.messageId] || { count: 0, readByMe: false };
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
@@ -599,7 +580,7 @@ export const AnnouncementsView = ({
                         <span className="announcement-sender">{senderName}</span>
                         <span className="announcement-expiry-clock">
                           <Clock20Regular />
-                          {formatRemaining(message.createdAt)}
+                          expiração automática
                         </span>
                       </div>
                       {isFile ? (
