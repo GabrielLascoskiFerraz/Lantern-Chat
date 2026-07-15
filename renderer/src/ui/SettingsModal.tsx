@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Dialog,
@@ -9,16 +9,37 @@ import {
   DialogTitle,
   Field,
   Input,
+  Spinner,
   Switch,
   Text
 } from '@fluentui/react-components';
+import {
+  Alert20Regular,
+  Apps20Regular,
+  LockClosed20Regular,
+  Person20Regular
+} from '@fluentui/react-icons';
 import { ipcClient, Profile, StartupSettings } from '../api/ipcClient';
 import { Avatar } from './Avatar';
+import { ProfileIdentityEditor } from './ProfileIdentityEditor';
+import { isProfileColor } from './profileIdentityOptions';
+import {
+  FontSizeMode,
+  FontSizeSelector,
+  fontSizeModeLabel,
+  ThemeMode,
+  ThemeSelector,
+  themeModeLabel
+} from './AppearancePreferences';
 
 interface SettingsModalProps {
   open: boolean;
   profile: Profile;
   startupSettings: StartupSettings | null;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
+  fontSizeMode: FontSizeMode;
+  onFontSizeModeChange: (mode: FontSizeMode) => void;
   onClose: () => void;
   onSave: (payload: {
     profile: {
@@ -35,17 +56,37 @@ interface SettingsModalProps {
   }) => Promise<void>;
 }
 
+type SettingsSection = 'profile' | 'notifications' | 'application' | 'security';
+
+const SETTINGS_SECTIONS: Array<{
+  id: SettingsSection;
+  icon: typeof Person20Regular;
+  label: string;
+  description: string;
+}> = [
+  { id: 'profile', icon: Person20Regular, label: 'Perfil', description: 'Nome, status e identidade visual' },
+  { id: 'notifications', icon: Alert20Regular, label: 'Notificações', description: 'Silêncio e avisos do aplicativo' },
+  { id: 'application', icon: Apps20Regular, label: 'Aplicativo', description: 'Inicialização e arquivos recebidos' },
+  { id: 'security', icon: LockClosed20Regular, label: 'Segurança', description: 'Senha e acesso à conta' }
+];
+
+const STATUS_PRESETS = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
+
 export const SettingsModal = ({
   open,
   profile,
   startupSettings,
+  themeMode,
+  onThemeModeChange,
+  fontSizeMode,
+  onFontSizeModeChange,
   onClose,
   onSave
 }: SettingsModalProps) => {
+  const [activeSection, setActiveSection] = useState<SettingsSection>('profile');
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [statusMessage, setStatusMessage] = useState(profile.statusMessage);
   const [avatarEmoji, setAvatarEmoji] = useState(profile.avatarEmoji);
-  const [customEmoji, setCustomEmoji] = useState(profile.avatarEmoji);
   const [avatarBg, setAvatarBg] = useState(profile.avatarBg);
   const [openAtLogin, setOpenAtLogin] = useState(Boolean(startupSettings?.openAtLogin));
   const [downloadsDir, setDownloadsDir] = useState(startupSettings?.downloadsDir || '');
@@ -59,74 +100,15 @@ export const SettingsModal = ({
   const [passwordFeedback, setPasswordFeedback] = useState('');
   const [passwordChanged, setPasswordChanged] = useState(false);
   const [passwordBusy, setPasswordBusy] = useState(false);
-  const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
-  const emojiGroups = {
-    rostos: [
-      '🙂', '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇', '😉', '😍', '🥰',
-      '😘', '😋', '😌', '😎', '🤓', '🧐', '🤠', '🥳', '🤩', '😴', '🤗', '🫡', '🫶', '🙌',
-      '👏', '🤝', '🙏', '✨', '⭐', '🌟', '😏', '🤭', '🫢', '🤫', '🫠', '😶‍🌫️', '😬', '😮',
-      '😯', '😲', '😳', '🥺', '😢', '😭', '😤', '😡', '🤯', '🥵', '🥶', '🥴', '😵', '🤪',
-      '😜', '😝', '🤤', '😷', '🤒', '🤕', '🤠', '🫨', '😶', '🫥', '🤐', '🤔', '🫣', '🫤',
-      '😔', '😞', '☹️', '🙁', '😣', '😖', '😫', '😩', '😱', '😨', '😰', '😥', '😓'
-    ],
-    trabalho: [
-      '🧠', '👩‍💻', '👨‍💻', '🧑‍💻', '🖥️', '⌨️', '🖱️', '🛠️', '🔧', '📚', '📖', '🧾',
-      '📝', '📅', '📌', '📎', '📈', '📊', '📉', '🗂️', '🎯', '⏱️', '🚀', '⚡', '💡', '✅',
-      '🔒', '🧭', '🧪', '🛰️', '🏢', '💼', '🗃️', '🗄️', '📁', '📂', '🧮', '📐', '📏', '🖇️',
-      '🖊️', '🖋️', '✏️', '🧷', '📤', '📥', '📨', '📩', '📫', '📮', '📞', '☎️', '📱', '💻',
-      '🧑‍🔬', '👩‍🔬', '👨‍🔬', '🧑‍🏫', '👩‍🏫', '👨‍🏫', '🧑‍💼', '👩‍💼', '👨‍💼', '🧑‍💼', '🏷️',
-      '🛎️', '🔔', '📣', '📢', '📡', '🕹️', '🧯', '⚙️', '🪛', '🔩', '🧰'
-    ],
-    animais: [
-      '🐶', '🐱', '🐰', '🦊', '🐼', '🐨', '🦁', '🐯', '🐸', '🐵', '🐧', '🦄', '🐢', '🐬',
-      '🐙', '🐳', '🦉', '🦋', '🐝', '🐞', '🐇', '🐈', '🐕', '🦝', '🦔', '🦦', '🦥', '🦜',
-      '🦚', '🐿️', '🦌', '🦬', '🐺', '🐗', '🐴', '🫎', '🫏', '🐮', '🐷', '🐭', '🐹', '🐻',
-      '🐻‍❄️', '🐔', '🐣', '🐤', '🦆', '🦢', '🦩', '🦤', '🦭', '🐡', '🐠', '🦈', '🐊', '🦎',
-      '🐍', '🐉', '🦂', '🕷️', '🕸️', '🪲', '🪳', '🪰', '🪱', '🦗', '🐾', '🪿'
-    ],
-    comida: [
-      '🍕', '🍔', '🍟', '🌭', '🌮', '🌯', '🍣', '🍜', '🍝', '🍱', '🥟', '🍗', '🥗', '🥪',
-      '🍞', '🥐', '🍩', '🍪', '🧁', '🍰', '🍫', '🍿', '🍓', '🍉', '🍇', '🍍', '🥭', '🍒',
-      '☕', '🧃', '🍎', '🍏', '🍐', '🍊', '🍋', '🍌', '🫐', '🥝', '🍅', '🥑', '🥦', '🥕',
-      '🌽', '🥔', '🍠', '🥒', '🫑', '🧅', '🧄', '🍄', '🥜', '🫘', '🌰', '🍯', '🥛', '🍼',
-      '🍵', '🧋', '🥤', '🍺', '🍻', '🍷', '🥂', '🍸', '🍹', '🧉', '🍾', '🍦', '🍧', '🍨',
-      '🍮', '🥧', '🍫', '🍬', '🍭', '🍡', '🥮'
-    ]
-  } as const;
-  const emojiGroupLabels: Record<keyof typeof emojiGroups, string> = {
-    rostos: 'Rostos e emoções',
-    trabalho: 'Trabalho',
-    animais: 'Animais',
-    comida: 'Comidas e bebidas'
-  };
-  const [selectedGroup, setSelectedGroup] = useState<keyof typeof emojiGroups>('rostos');
-  const colorOptions = [
-    '#5b5fc7',
-    '#6264a7',
-    '#4f6bed',
-    '#0078d4',
-    '#00b7c3',
-    '#00a892',
-    '#13a10e',
-    '#8cbd18',
-    '#ffb900',
-    '#ff8c00',
-    '#f7630c',
-    '#e74856',
-    '#d13438',
-    '#c239b3',
-    '#8e8cd8',
-    '#6b7280'
-  ];
-  const isHexColor = /^#[0-9a-fA-F]{6}$/;
-  const safeColor = isHexColor.test(avatarBg) ? avatarBg : profile.avatarBg;
-  const resetDraftFromProps = () => {
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState('');
+
+  const resetDraftFromProps = (): void => {
+    setActiveSection('profile');
     setDisplayName(profile.displayName);
     setStatusMessage(profile.statusMessage);
     setAvatarEmoji(profile.avatarEmoji);
-    setCustomEmoji(profile.avatarEmoji);
     setAvatarBg(profile.avatarBg);
-    setSelectedGroup('rostos');
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
     setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
@@ -136,30 +118,55 @@ export const SettingsModal = ({
     setNewPasswordConfirm('');
     setPasswordFeedback('');
     setPasswordChanged(false);
+    setPasswordBusy(false);
+    setSaveBusy(false);
+    setSaveFeedback('');
   };
-  const dialogSurfaceStyle = {
-    width: '85vw',
-    maxWidth: '85vw',
-    height: '85vh',
-    maxHeight: '85vh'
-  } as const;
 
   useEffect(() => {
-    if (!open) return;
-    resetDraftFromProps();
+    if (open) resetDraftFromProps();
   }, [open, profile, startupSettings]);
 
-  const activeDoNotDisturbUntil =
-    doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
+  const activeDoNotDisturbUntil = doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
   const doNotDisturbLabel = activeDoNotDisturbUntil
     ? `Ativo até ${new Date(activeDoNotDisturbUntil).toLocaleTimeString('pt-BR', {
         hour: '2-digit',
         minute: '2-digit'
       })}`
     : 'Desativado';
+
+  const hasChanges = useMemo(
+    () =>
+      displayName !== profile.displayName ||
+      statusMessage !== profile.statusMessage ||
+      avatarEmoji !== profile.avatarEmoji ||
+      avatarBg.toLowerCase() !== profile.avatarBg.toLowerCase() ||
+      openAtLogin !== Boolean(startupSettings?.openAtLogin) ||
+      downloadsDir !== (startupSettings?.downloadsDir || '') ||
+      doNotDisturbUntil !== Number(startupSettings?.doNotDisturbUntil || 0),
+    [
+      avatarBg,
+      avatarEmoji,
+      displayName,
+      doNotDisturbUntil,
+      downloadsDir,
+      openAtLogin,
+      profile,
+      startupSettings,
+      statusMessage
+    ]
+  );
+
+  const requestClose = (): void => {
+    if (saveBusy || passwordBusy) return;
+    if (hasChanges && !window.confirm('Descartar as alterações feitas nas configurações?')) return;
+    onClose();
+  };
+
   const setDoNotDisturbFor = (milliseconds: number): void => {
     setDoNotDisturbUntil(Date.now() + milliseconds);
   };
+
   const setDoNotDisturbUntilTomorrow = (): void => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -167,279 +174,352 @@ export const SettingsModal = ({
     setDoNotDisturbUntil(tomorrow.getTime());
   };
 
+  const save = async (): Promise<void> => {
+    if (!hasChanges || saveBusy) return;
+    setSaveBusy(true);
+    setSaveFeedback('');
+    try {
+      await onSave({
+        profile: {
+          displayName: displayName.trim() || profile.displayName,
+          avatarEmoji: avatarEmoji.trim() || profile.avatarEmoji,
+          avatarBg: isProfileColor(avatarBg) ? avatarBg.trim() : profile.avatarBg,
+          statusMessage: statusMessage.trim() || 'Disponível'
+        },
+        startup: {
+          openAtLogin,
+          downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || ''),
+          doNotDisturbUntil: activeDoNotDisturbUntil
+        }
+      });
+    } catch (error) {
+      setSaveFeedback(error instanceof Error ? error.message : 'Não foi possível salvar as configurações.');
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  const changePassword = (): void => {
+    setPasswordBusy(true);
+    setPasswordFeedback('');
+    setPasswordChanged(false);
+    void ipcClient.changePassword({ currentPassword, newPassword })
+      .then(() => {
+        setCurrentPassword('');
+        setNewPassword('');
+        setNewPasswordConfirm('');
+        setPasswordChanged(true);
+        setPasswordFeedback('Senha alterada com sucesso. As outras sessões foram encerradas.');
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setPasswordFeedback(
+          message.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '')
+        );
+      })
+      .finally(() => setPasswordBusy(false));
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(_, data) => !data.open && onClose()}>
-      <DialogSurface className="settings-modal" style={dialogSurfaceStyle}>
+    <Dialog open={open} onOpenChange={(_, data) => !data.open && requestClose()}>
+      <DialogSurface className="settings-modal">
         <DialogBody>
-          <DialogTitle>Perfil</DialogTitle>
-          <DialogContent className="settings-layout">
-            <section className="settings-preview-card">
-              <Avatar emoji={avatarEmoji} bg={avatarBg} size={124} />
-              <Text weight="semibold" size={500}>
-                {displayName || profile.displayName}
-              </Text>
-              <Text size={300}>{statusMessage || 'Disponível'}</Text>
-              <Text size={200}>ID: {profile.deviceId.slice(0, 12)}</Text>
-            </section>
+          <DialogTitle>
+            <div className="settings-title-row">
+              <div>
+                <span>Configurações</span>
+                <Text size={200}>Personalize o Lantern neste dispositivo.</Text>
+              </div>
+              {hasChanges && <span className="settings-pending-badge" role="status">Alterações pendentes</span>}
+            </div>
+          </DialogTitle>
 
-            <section className="settings-controls">
-              <Field className="settings-field" label="Nome de exibição">
-                <Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} />
-              </Field>
-              <Field className="settings-field settings-field-status" label="Mensagem de status">
-                <Input
-                  value={statusMessage}
-                  onChange={(_, data) => setStatusMessage(data.value)}
-                  placeholder="Ex.: Em reunião, respondo depois"
-                  maxLength={120}
-                />
-                <div className="status-presets">
-                  {statusPresets.map((preset) => (
-                    <button
-                      type="button"
-                      key={preset}
-                      className={`status-chip ${statusMessage.trim() === preset ? 'active' : ''}`}
-                      onClick={() => setStatusMessage(preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-
-              <Field className="settings-field settings-field-emoji" label="Escolha seu emoji">
-                <div className="emoji-group-tabs">
-                  {(Object.keys(emojiGroups) as Array<keyof typeof emojiGroups>).map((group) => (
-                    <button
-                      type="button"
-                      key={group}
-                      className={`emoji-tab ${selectedGroup === group ? 'active' : ''}`}
-                      onClick={() => setSelectedGroup(group)}
-                    >
-                      {emojiGroupLabels[group]}
-                    </button>
-                  ))}
-                </div>
-                <div className="emoji-grid">
-                  {emojiGroups[selectedGroup].map((emoji) => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      className={`emoji-choice ${avatarEmoji === emoji ? 'active' : ''}`}
-                      onClick={() => setAvatarEmoji(emoji)}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
-                </div>
-                <div className="custom-emoji-row">
-                  <Input
-                    value={customEmoji}
-                    onChange={(_, data) => setCustomEmoji(data.value)}
-                    placeholder="Cole seu emoji personalizado aqui"
-                  />
-                  <Button
-                    appearance="secondary"
-                    onClick={() => {
-                      const value = customEmoji.trim();
-                      if (value) setAvatarEmoji(value);
-                    }}
+          <DialogContent className="settings-content">
+            <nav className="settings-navigation" aria-label="Seções das configurações">
+              {SETTINGS_SECTIONS.map((section) => {
+                const SectionIcon = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    className={activeSection === section.id ? 'active' : ''}
+                    aria-current={activeSection === section.id ? 'page' : undefined}
+                    onClick={() => setActiveSection(section.id)}
                   >
-                    Usar Emoji
-                  </Button>
-                </div>
-              </Field>
+                    <span className="settings-navigation-icon" aria-hidden="true">
+                      <SectionIcon />
+                    </span>
+                    <span>
+                      <strong>{section.label}</strong>
+                      <small>{section.description}</small>
+                    </span>
+                  </button>
+                );
+              })}
+            </nav>
 
-              <Field className="settings-field settings-field-color" label="Cor do perfil">
-                <div className="color-wheel">
-                  {colorOptions.map((color, index) => {
-                    const angle = (360 / colorOptions.length) * index;
-                    return (
-                      <button
-                        key={color}
-                        type="button"
-                        className={`color-node ${avatarBg.toLowerCase() === color.toLowerCase() ? 'active' : ''}`}
-                        style={{
-                          backgroundColor: color,
-                          transform: `translate(-50%, -50%) rotate(${angle}deg) translate(66px) rotate(-${angle}deg)`
-                        }}
-                        onClick={() => setAvatarBg(color)}
+            <div className="settings-section-panel">
+              {activeSection === 'profile' && (
+                <section aria-labelledby="settings-profile-title">
+                  <header className="settings-section-heading">
+                    <div>
+                      <h2 id="settings-profile-title">Perfil</h2>
+                      <p>Estas informações acompanham sua conta em todos os dispositivos.</p>
+                    </div>
+                  </header>
+
+                  <div className="settings-profile-layout">
+                    <aside className="settings-preview-card" aria-label="Prévia do perfil">
+                      <span className="settings-preview-eyebrow">PRÉVIA</span>
+                      <Avatar emoji={avatarEmoji} bg={avatarBg} size={116} />
+                      <Text weight="semibold" size={500}>{displayName.trim() || profile.displayName}</Text>
+                      <Text size={300}>{statusMessage.trim() || 'Disponível'}</Text>
+                      <Text size={200} className="settings-profile-id">ID {profile.deviceId.slice(0, 12)}</Text>
+                    </aside>
+
+                    <div className="settings-profile-form">
+                      <div className="settings-card settings-basic-profile-card">
+                        <Field label="Nome de exibição">
+                          <Input
+                            value={displayName}
+                            maxLength={80}
+                            onChange={(_, data) => setDisplayName(data.value)}
+                          />
+                        </Field>
+                        <Field label="Mensagem de status">
+                          <Input
+                            value={statusMessage}
+                            onChange={(_, data) => setStatusMessage(data.value)}
+                            placeholder="Ex.: Em reunião, respondo depois"
+                            maxLength={120}
+                          />
+                          <div className="status-presets" aria-label="Sugestões de status">
+                            {STATUS_PRESETS.map((preset) => (
+                              <button
+                                type="button"
+                                key={preset}
+                                aria-pressed={statusMessage.trim() === preset}
+                                className={`status-chip ${statusMessage.trim() === preset ? 'active' : ''}`}
+                                onClick={() => setStatusMessage(preset)}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        </Field>
+                      </div>
+
+                      <ProfileIdentityEditor
+                        emoji={avatarEmoji}
+                        color={avatarBg}
+                        onEmojiChange={setAvatarEmoji}
+                        onColorChange={setAvatarBg}
                       />
-                    );
-                  })}
-                  <div className="color-wheel-center">
-                    <div className="color-preview" style={{ backgroundColor: avatarBg }} />
+                    </div>
                   </div>
-                </div>
-                <div className="color-input-row">
-                  <Input
-                    value={avatarBg}
-                    onChange={(_, data) => setAvatarBg(data.value)}
-                    placeholder="#5b5fc7"
-                  />
-                  <input
-                    type="color"
-                    value={safeColor}
-                    onChange={(event) => setAvatarBg(event.target.value)}
-                  />
-                </div>
-              </Field>
+                </section>
+              )}
 
-              <Field className="settings-field" label="Inicialização">
-                <div className="settings-relay-toggle-row">
-                  <Switch
-                    label="Iniciar com o sistema"
-                    checked={openAtLogin}
-                    disabled={!startupSettings?.supported}
-                    onChange={(_, data) => setOpenAtLogin(Boolean(data.checked))}
-                  />
-                  <Text size={200} className={`relay-connection-badge ${openAtLogin ? 'online' : 'offline'}`}>
-                    {startupSettings?.supported
-                      ? openAtLogin
-                        ? 'Ativado'
-                        : 'Desativado'
-                      : 'Não suportado neste sistema'}
-                  </Text>
-                </div>
-              </Field>
+              {activeSection === 'notifications' && (
+                <section aria-labelledby="settings-notifications-title">
+                  <header className="settings-section-heading">
+                    <div>
+                      <h2 id="settings-notifications-title">Notificações</h2>
+                      <p>Controle quando o Lantern pode chamar sua atenção.</p>
+                    </div>
+                  </header>
+                  <div className="settings-card settings-option-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Não perturbe</h3>
+                        <p>Silencia notificações nativas e sons pelo período escolhido.</p>
+                      </div>
+                      <span className={`settings-state-pill ${activeDoNotDisturbUntil ? 'enabled' : ''}`}>
+                        {doNotDisturbLabel}
+                      </span>
+                    </div>
+                    <div className="settings-dnd-actions">
+                      <Button appearance="secondary" onClick={() => setDoNotDisturbFor(15 * 60 * 1000)}>15 minutos</Button>
+                      <Button appearance="secondary" onClick={() => setDoNotDisturbFor(60 * 60 * 1000)}>1 hora</Button>
+                      <Button appearance="secondary" onClick={setDoNotDisturbUntilTomorrow}>Até amanhã</Button>
+                      {activeDoNotDisturbUntil > 0 && (
+                        <Button appearance="subtle" onClick={() => setDoNotDisturbUntil(0)}>Desativar</Button>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
 
-              <Field className="settings-field" label="Segurança da conta">
-                {!passwordExpanded ? (
-                  <Button appearance="secondary" onClick={() => setPasswordExpanded(true)}>
-                    Alterar senha
-                  </Button>
-                ) : (
-                  <div className="settings-password-panel">
-                    <Input
-                      type="password"
-                      value={currentPassword}
-                      onChange={(_, data) => setCurrentPassword(data.value)}
-                      placeholder="Senha atual"
-                      autoComplete="current-password"
-                    />
-                    <Input
-                      type="password"
-                      value={newPassword}
-                      onChange={(_, data) => setNewPassword(data.value)}
-                      placeholder="Nova senha (mín. 10 caracteres)"
-                      autoComplete="new-password"
-                    />
-                    <Input
-                      type="password"
-                      value={newPasswordConfirm}
-                      onChange={(_, data) => setNewPasswordConfirm(data.value)}
-                      placeholder="Confirmar nova senha"
-                      autoComplete="new-password"
-                    />
-                    {passwordFeedback && <Text size={200} className={`settings-password-feedback ${passwordChanged ? 'success' : ''}`}>{passwordFeedback}</Text>}
-                    <div className="settings-password-actions">
-                      <Button appearance="subtle" onClick={() => {
-                        setPasswordExpanded(false);
-                        setPasswordFeedback('');
-                        setPasswordChanged(false);
-                      }}>Cancelar</Button>
+              {activeSection === 'application' && (
+                <section aria-labelledby="settings-application-title">
+                  <header className="settings-section-heading">
+                    <div>
+                      <h2 id="settings-application-title">Aplicativo</h2>
+                      <p>Preferências que valem somente para este dispositivo.</p>
+                    </div>
+                  </header>
+                  <div className="settings-card settings-option-card settings-theme-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Tema do aplicativo</h3>
+                        <p>Escolha a aparência do Lantern. A alteração é aplicada imediatamente neste dispositivo.</p>
+                      </div>
+                      <span className="settings-state-pill">{themeModeLabel(themeMode)}</span>
+                    </div>
+                    <ThemeSelector value={themeMode} onChange={onThemeModeChange} />
+                  </div>
+                  <div className="settings-card settings-option-card settings-font-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Tamanho da fonte</h3>
+                        <p>Ajuste a escala dos textos e controles para este dispositivo.</p>
+                      </div>
+                      <span className="settings-state-pill">{fontSizeModeLabel(fontSizeMode)}</span>
+                    </div>
+                    <FontSizeSelector value={fontSizeMode} onChange={onFontSizeModeChange} />
+                  </div>
+                  <div className="settings-card settings-option-card">
+                    <div className="settings-switch-row">
+                      <div>
+                        <h3>Abrir o Lantern ao iniciar o sistema</h3>
+                        <p>Inicia o aplicativo automaticamente depois que você entra no computador.</p>
+                      </div>
+                      <Switch
+                        checked={openAtLogin}
+                        disabled={!startupSettings?.supported}
+                        onChange={(_, data) => setOpenAtLogin(Boolean(data.checked))}
+                        aria-label="Abrir o Lantern ao iniciar o sistema"
+                      />
+                    </div>
+                    {!startupSettings?.supported && (
+                      <Text size={200} className="settings-inline-help">Esta opção não é suportada neste sistema.</Text>
+                    )}
+                  </div>
+                  <div className="settings-card settings-option-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Pasta de arquivos recebidos</h3>
+                        <p>Os novos anexos baixados neste dispositivo serão salvos nessa pasta.</p>
+                      </div>
+                    </div>
+                    <div className="settings-directory-row">
+                      <Input
+                        value={downloadsDir}
+                        onChange={(_, data) => setDownloadsDir(data.value)}
+                        placeholder="Selecione a pasta para arquivos recebidos"
+                        aria-label="Pasta de arquivos recebidos"
+                      />
                       <Button
-                        appearance="primary"
-                        disabled={passwordBusy || !currentPassword || newPassword.length < 10 || newPassword !== newPasswordConfirm}
-                        onClick={() => {
-                          setPasswordBusy(true);
-                          setPasswordFeedback('');
-                          setPasswordChanged(false);
-                          void ipcClient.changePassword({ currentPassword, newPassword })
-                            .then(() => {
+                        appearance="secondary"
+                        onClick={() =>
+                          void ipcClient.pickDirectory(downloadsDir).then((folder) => {
+                            if (folder) setDownloadsDir(folder);
+                          })
+                        }
+                      >
+                        Escolher pasta
+                      </Button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {activeSection === 'security' && (
+                <section aria-labelledby="settings-security-title">
+                  <header className="settings-section-heading">
+                    <div>
+                      <h2 id="settings-security-title">Segurança</h2>
+                      <p>Atualize a senha usada para acessar sua conta.</p>
+                    </div>
+                  </header>
+                  <div className="settings-card settings-option-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Senha da conta</h3>
+                        <p>Ao alterar a senha, suas outras sessões serão encerradas.</p>
+                      </div>
+                      {!passwordExpanded && (
+                        <Button appearance="secondary" onClick={() => setPasswordExpanded(true)}>Alterar senha</Button>
+                      )}
+                    </div>
+                    {passwordExpanded && (
+                      <div className="settings-password-panel">
+                        <Field label="Senha atual">
+                          <Input
+                            type="password"
+                            value={currentPassword}
+                            onChange={(_, data) => setCurrentPassword(data.value)}
+                            autoComplete="current-password"
+                          />
+                        </Field>
+                        <Field label="Nova senha" hint="Use pelo menos 10 caracteres.">
+                          <Input
+                            type="password"
+                            value={newPassword}
+                            onChange={(_, data) => setNewPassword(data.value)}
+                            autoComplete="new-password"
+                          />
+                        </Field>
+                        <Field label="Confirmar nova senha">
+                          <Input
+                            type="password"
+                            value={newPasswordConfirm}
+                            onChange={(_, data) => setNewPasswordConfirm(data.value)}
+                            autoComplete="new-password"
+                          />
+                        </Field>
+                        {passwordFeedback && (
+                          <Text
+                            size={200}
+                            className={`settings-password-feedback ${passwordChanged ? 'success' : ''}`}
+                            role={passwordChanged ? 'status' : 'alert'}
+                          >
+                            {passwordFeedback}
+                          </Text>
+                        )}
+                        <div className="settings-password-actions">
+                          <Button
+                            appearance="subtle"
+                            disabled={passwordBusy}
+                            onClick={() => {
+                              setPasswordExpanded(false);
                               setCurrentPassword('');
                               setNewPassword('');
                               setNewPasswordConfirm('');
-                              setPasswordChanged(true);
-                              setPasswordFeedback('Senha alterada com sucesso. As outras sessões foram encerradas.');
-                            })
-                            .catch((error) => {
-                              const message = error instanceof Error ? error.message : String(error);
+                              setPasswordFeedback('');
                               setPasswordChanged(false);
-                              setPasswordFeedback(message.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
-                            })
-                            .finally(() => setPasswordBusy(false));
-                        }}
-                      >Salvar nova senha</Button>
-                    </div>
+                            }}
+                          >
+                            Cancelar
+                          </Button>
+                          <Button
+                            appearance="primary"
+                            disabled={passwordBusy || !currentPassword || newPassword.length < 10 || newPassword !== newPasswordConfirm}
+                            onClick={changePassword}
+                          >
+                            {passwordBusy ? <><Spinner size="tiny" /> Salvando...</> : 'Salvar nova senha'}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </Field>
-
-              <Field className="settings-field settings-field-dnd" label="Não perturbe">
-                <div className="settings-relay-toggle-row">
-                  <Text size={200} className={`relay-connection-badge ${activeDoNotDisturbUntil ? 'online' : 'offline'}`}>
-                    {doNotDisturbLabel}
-                  </Text>
-                  {activeDoNotDisturbUntil > 0 && (
-                    <Button appearance="secondary" onClick={() => setDoNotDisturbUntil(0)}>
-                      Desativar
-                    </Button>
-                  )}
-                </div>
-                <div className="settings-dnd-actions">
-                  <Button appearance="secondary" onClick={() => setDoNotDisturbFor(15 * 60 * 1000)}>
-                    15 min
-                  </Button>
-                  <Button appearance="secondary" onClick={() => setDoNotDisturbFor(60 * 60 * 1000)}>
-                    1h
-                  </Button>
-                  <Button appearance="secondary" onClick={() => setDoNotDisturbUntilTomorrow()}>
-                    Até amanhã
-                  </Button>
-                </div>
-                <Text size={200} className="settings-relay-help">
-                  Silencia notificações nativas e sons pelo período escolhido.
-                </Text>
-              </Field>
-
-              <Field className="settings-field" label="Pasta padrão de recebimento">
-                <div className="settings-relay-manual-grid">
-                  <Input
-                    value={downloadsDir}
-                    onChange={(_, data) => setDownloadsDir(data.value)}
-                    placeholder="Selecione a pasta para arquivos recebidos"
-                  />
-                  <Button
-                    appearance="secondary"
-                    onClick={() =>
-                      void ipcClient.pickDirectory(downloadsDir).then((folder) => {
-                        if (folder) setDownloadsDir(folder);
-                      })
-                    }
-                  >
-                    Escolher pasta
-                  </Button>
-                </div>
-                <Text size={200} className="settings-relay-help">
-                  Os novos arquivos recebidos serão salvos nesta pasta.
-                </Text>
-              </Field>
-
-            </section>
+                </section>
+              )}
+            </div>
           </DialogContent>
-          <DialogActions>
-            <Button appearance="secondary" onClick={onClose}>Cancelar</Button>
+
+          <DialogActions className="settings-actions">
+            <div className="settings-actions-feedback" aria-live="polite">
+              {saveFeedback || (hasChanges ? 'As alterações ainda não foram salvas.' : 'Tudo atualizado.')}
+            </div>
+            <Button appearance="secondary" disabled={saveBusy || passwordBusy} onClick={requestClose}>Cancelar</Button>
             <Button
               className="settings-save-btn"
               appearance="primary"
-              onClick={() =>
-                void onSave({
-                  profile: {
-                    displayName: displayName.trim() || profile.displayName,
-                    avatarEmoji: avatarEmoji.trim() || profile.avatarEmoji,
-                    avatarBg: isHexColor.test(avatarBg.trim()) ? avatarBg.trim() : profile.avatarBg,
-                    statusMessage: statusMessage.trim() || 'Disponível'
-                  },
-                  startup: {
-                    openAtLogin,
-                    downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || ''),
-                    doNotDisturbUntil: activeDoNotDisturbUntil
-                  }
-                })
-              }
+              disabled={!hasChanges || saveBusy || !isProfileColor(avatarBg)}
+              onClick={() => void save()}
             >
-              Salvar
+              {saveBusy ? <><Spinner size="tiny" /> Salvando...</> : 'Salvar alterações'}
             </Button>
           </DialogActions>
         </DialogBody>

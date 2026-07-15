@@ -68,6 +68,7 @@ interface LanternState {
   settingsOpen: boolean;
   themeMode: 'system' | 'light' | 'dark';
   resolvedTheme: 'light' | 'dark';
+  fontSizeMode: 'small' | 'medium' | 'large';
   ready: boolean;
   startupError: string | null;
   syncActive: boolean;
@@ -75,6 +76,7 @@ interface LanternState {
   setSearch: (value: string) => void;
   setSettingsOpen: (open: boolean) => void;
   setThemeMode: (mode: 'system' | 'light' | 'dark') => void;
+  setFontSizeMode: (mode: 'small' | 'medium' | 'large') => void;
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
   login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<void>;
@@ -175,6 +177,7 @@ interface LanternState {
 
 const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
+const FONT_SIZE_KEY = 'lantern.font-size';
 const MESSAGES_PAGE_SIZE = 80;
 const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
@@ -184,6 +187,12 @@ const getInitialThemeMode = (): 'system' | 'light' | 'dark' => {
   }
   const stored = window.localStorage.getItem(THEME_KEY);
   return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+};
+
+const getInitialFontSizeMode = (): 'small' | 'medium' | 'large' => {
+  if (typeof window === 'undefined') return 'medium';
+  const stored = window.localStorage.getItem(FONT_SIZE_KEY);
+  return stored === 'small' || stored === 'medium' || stored === 'large' ? stored : 'medium';
 };
 
 const getSystemDark = (): boolean =>
@@ -378,6 +387,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   settingsOpen: false,
   themeMode: initialThemeMode,
   resolvedTheme: resolveTheme(initialThemeMode, initialSystemDark),
+  fontSizeMode: getInitialFontSizeMode(),
   ready: false,
   startupError: null,
   syncActive: false,
@@ -393,6 +403,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       themeMode: mode,
       resolvedTheme: resolveTheme(mode, systemDark)
     });
+  },
+  setFontSizeMode: (mode) => {
+    if (typeof window !== 'undefined') window.localStorage.setItem(FONT_SIZE_KEY, mode);
+    set({ fontSizeMode: mode });
   },
   setSystemDark: (isDark) => {
     const mode = get().themeMode;

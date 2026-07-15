@@ -133,6 +133,8 @@ export const Shell = () => {
     dismissToast,
     themeMode,
     setThemeMode,
+    fontSizeMode,
+    setFontSizeMode,
     syncActive,
     loadingConversationId,
     loadInitial,
@@ -513,6 +515,10 @@ export const Shell = () => {
         open={settingsOpen}
         profile={profile}
         startupSettings={startupSettings}
+        themeMode={themeMode}
+        onThemeModeChange={setThemeMode}
+        fontSizeMode={fontSizeMode}
+        onFontSizeModeChange={setFontSizeMode}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
           await updateProfile(payload.profile);

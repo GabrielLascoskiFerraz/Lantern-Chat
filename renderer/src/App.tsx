@@ -67,17 +67,30 @@ class AppErrorBoundary extends Component<
   }
 }
 
-const configureTheme = (theme: Theme): Theme => ({
-  ...theme,
-  fontFamilyBase: '"Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
-  borderRadiusSmall: '4px',
-  borderRadiusMedium: '6px',
-  borderRadiusLarge: '8px'
-});
+const FONT_SCALE = { small: 0.9, medium: 1, large: 1.12 } as const;
+
+const configureTheme = (theme: Theme, fontSizeMode: keyof typeof FONT_SCALE): Theme => {
+  const configured: Theme = {
+    ...theme,
+    fontFamilyBase: '"Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    borderRadiusSmall: '4px',
+    borderRadiusMedium: '6px',
+    borderRadiusLarge: '8px'
+  };
+  const scale = FONT_SCALE[fontSizeMode];
+  for (const [key, value] of Object.entries(theme)) {
+    if (!key.startsWith('fontSizeBase') || typeof value !== 'string') continue;
+    const size = Number.parseFloat(value);
+    if (!Number.isFinite(size)) continue;
+    (configured as unknown as Record<string, string>)[key] = `${Math.round(size * scale * 100) / 100}px`;
+  }
+  return configured;
+};
 
 export default function App() {
   const loadInitial = useLanternStore((state) => state.loadInitial);
   const resolvedTheme = useLanternStore((state) => state.resolvedTheme);
+  const fontSizeMode = useLanternStore((state) => state.fontSizeMode);
   const ready = useLanternStore((state) => state.ready);
   const authState = useLanternStore((state) => state.authState);
   const setSystemDark = useLanternStore((state) => state.setSystemDark);
@@ -85,8 +98,8 @@ export default function App() {
     typeof window !== 'undefined' && window.lantern ? ipcClient.getPlatform() : 'linux';
 
   const theme = useMemo(
-    () => configureTheme(resolvedTheme === 'dark' ? darkTheme : lightTheme),
-    [resolvedTheme]
+    () => configureTheme(resolvedTheme === 'dark' ? darkTheme : lightTheme, fontSizeMode),
+    [fontSizeMode, resolvedTheme]
   );
 
   useEffect(() => {
@@ -110,6 +123,10 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', resolvedTheme);
   }, [resolvedTheme]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-font-size', fontSizeMode);
+  }, [fontSizeMode]);
 
   useEffect(() => {
     const locale = authState?.user?.locale || window.localStorage.getItem('lantern.locale') || 'pt-BR';
