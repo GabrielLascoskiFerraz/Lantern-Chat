@@ -446,13 +446,13 @@ export const GroupDetailsModal = ({
               )}
             </DialogContent>
             <DialogActions className="group-details-actions">
-              {(isOwner || group.missingOnRelay) && (
+              {isOwner && (
                 <Button
                   appearance="subtle"
                   icon={<Delete20Regular />}
                   onClick={() => setDeleteConfirmOpen(true)}
                 >
-                  {group.missingOnRelay ? 'Excluir localmente' : 'Excluir grupo'}
+                  Excluir grupo
                 </Button>
               )}
               <Button
@@ -508,13 +508,9 @@ export const GroupDetailsModal = ({
 
       <ConfirmDialog
         open={deleteConfirmOpen}
-        title={group.missingOnRelay ? 'Excluir grupo localmente?' : 'Excluir grupo?'}
-        description={
-          group.missingOnRelay
-            ? 'O Relay não reconhece mais este grupo. A conversa será removida apenas deste Lantern.'
-            : 'O grupo será encerrado para todos os participantes. Essa ação não remove os arquivos locais já recebidos.'
-        }
-        confirmLabel={group.missingOnRelay ? 'Excluir localmente' : 'Excluir grupo'}
+        title="Excluir grupo?"
+        description="O grupo será encerrado para todos os participantes. Essa ação não remove os arquivos locais já recebidos."
+        confirmLabel="Excluir grupo"
         onCancel={() => setDeleteConfirmOpen(false)}
         onConfirm={() => {
           void onDeleteGroup(group.groupId);

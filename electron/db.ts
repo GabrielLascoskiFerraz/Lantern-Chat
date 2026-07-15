@@ -52,6 +52,7 @@ export class DbService {
   private readonly db: Database.Database;
 
   constructor(userDataPath: string) {
+    fs.mkdirSync(userDataPath, { recursive: true });
     const dbPath = path.join(userDataPath, 'lantern.db');
     this.db = new Database(dbPath);
     runMigrations(this.db);
@@ -160,6 +161,8 @@ export class DbService {
       avatarEmoji: peer.avatarEmoji,
       avatarBg: peer.avatarBg,
       statusMessage: peer.statusMessage,
+      username: peer.username?.trim() || '',
+      department: peer.department?.trim() || '',
       lastSeenAt: peer.lastSeenAt || Date.now(),
       lastAddress: peer.address?.trim() || null,
       lastPort: peer.port > 0 ? peer.port : null
@@ -167,13 +170,15 @@ export class DbService {
 
     this.db
       .prepare(
-        `INSERT INTO peers_cache(deviceId, displayName, avatarEmoji, avatarBg, statusMessage, lastSeenAt, lastAddress, lastPort)
-         VALUES (@deviceId, @displayName, @avatarEmoji, @avatarBg, @statusMessage, @lastSeenAt, @lastAddress, @lastPort)
+        `INSERT INTO peers_cache(deviceId, displayName, avatarEmoji, avatarBg, statusMessage, username, department, lastSeenAt, lastAddress, lastPort)
+         VALUES (@deviceId, @displayName, @avatarEmoji, @avatarBg, @statusMessage, @username, @department, @lastSeenAt, @lastAddress, @lastPort)
          ON CONFLICT(deviceId) DO UPDATE SET
             displayName = COALESCE(NULLIF(excluded.displayName, ''), peers_cache.displayName),
             avatarEmoji = COALESCE(NULLIF(excluded.avatarEmoji, ''), peers_cache.avatarEmoji),
             avatarBg = COALESCE(NULLIF(excluded.avatarBg, ''), peers_cache.avatarBg),
             statusMessage = COALESCE(excluded.statusMessage, peers_cache.statusMessage),
+            username = excluded.username,
+            department = excluded.department,
             lastSeenAt = CASE
               WHEN excluded.lastSeenAt IS NULL THEN peers_cache.lastSeenAt
               WHEN peers_cache.lastSeenAt IS NULL THEN excluded.lastSeenAt
@@ -198,6 +203,8 @@ export class DbService {
            avatarEmoji,
            avatarBg,
            statusMessage,
+           username,
+           department,
            lastSeenAt,
            lastAddress,
            lastPort
@@ -210,6 +217,8 @@ export class DbService {
       avatarEmoji: string | null;
       avatarBg: string | null;
       statusMessage: string | null;
+      username: string | null;
+      department: string | null;
       lastSeenAt: number | null;
       lastAddress: string | null;
       lastPort: number | null;
@@ -227,6 +236,8 @@ export class DbService {
            avatarEmoji,
            avatarBg,
            statusMessage,
+           username,
+           department,
            lastSeenAt,
            lastAddress,
            lastPort
@@ -241,6 +252,8 @@ export class DbService {
           avatarEmoji: string | null;
           avatarBg: string | null;
           statusMessage: string | null;
+          username: string | null;
+          department: string | null;
           lastSeenAt: number | null;
           lastAddress: string | null;
           lastPort: number | null;
@@ -1027,6 +1040,7 @@ export class DbService {
          replyToFileName,
          forwardedFromMessageId,
          editedAt,
+         serverSeq,
          createdAt
        )
        VALUES
@@ -1053,6 +1067,7 @@ export class DbService {
          @replyToFileName,
          @forwardedFromMessageId,
          @editedAt,
+         @serverSeq,
          @createdAt
        )`
     );
@@ -1081,7 +1096,8 @@ export class DbService {
         replyToPreviewText: row.replyToPreviewText ?? null,
         replyToFileName: row.replyToFileName ?? null,
         forwardedFromMessageId: row.forwardedFromMessageId ?? null,
-        editedAt: row.editedAt ?? null
+        editedAt: row.editedAt ?? null,
+        serverSeq: row.serverSeq ?? null
       };
 
       const result = insert.run(normalizedRow);
@@ -1435,14 +1451,14 @@ export class DbService {
     const listAnnouncementIds = this.db.prepare(
       `SELECT messageId
        FROM messages
-       WHERE type = 'announcement' AND deletedAt IS NULL`
+       WHERE conversationId = 'announcements' AND deletedAt IS NULL`
     );
     const deleteAllAnnouncementReactions = this.db.prepare(
       `DELETE FROM message_reactions
        WHERE messageId IN (
          SELECT messageId
          FROM messages
-         WHERE type = 'announcement'
+         WHERE conversationId = 'announcements'
        )`
     );
     const deleteReactionsForMessage = this.db.prepare(
@@ -1660,12 +1676,12 @@ export class DbService {
     const listAnnouncementIds = this.db.prepare(
       `SELECT messageId
        FROM messages
-       WHERE type = 'announcement' AND deletedAt IS NULL`
+       WHERE conversationId = 'announcements' AND deletedAt IS NULL`
     );
     const deleteAll = this.db.prepare(
       `DELETE FROM announcement_reads
        WHERE messageId IN (
-         SELECT messageId FROM messages WHERE type = 'announcement'
+         SELECT messageId FROM messages WHERE conversationId = 'announcements'
        )`
     );
     const deleteForMessage = this.db.prepare(
@@ -1889,6 +1905,25 @@ export class DbService {
       .get(fileId) as DbMessage | undefined;
   }
 
+  getConversationServerCursor(conversationId: string, beforeCreatedAt?: number): number | null {
+    if (!beforeCreatedAt) return null;
+    const row = this.db
+      .prepare(
+        `SELECT MIN(serverSeq) AS serverSeq
+         FROM messages
+         WHERE conversationId = ? AND createdAt = ? AND serverSeq IS NOT NULL`
+      )
+      .get(conversationId, beforeCreatedAt) as { serverSeq: number | null } | undefined;
+    return typeof row?.serverSeq === 'number' ? row.serverSeq : null;
+  }
+
+  updateMessageServerSeq(messageId: string, serverSeq?: number): void {
+    if (!Number.isFinite(serverSeq) || Number(serverSeq) <= 0) return;
+    this.db
+      .prepare('UPDATE messages SET serverSeq = COALESCE(serverSeq, ?) WHERE messageId = ?')
+      .run(Math.trunc(Number(serverSeq)), messageId);
+  }
+
   getMessages(conversationId: string, limit: number, before?: number): DbMessage[] {
     if (before) {
       const rows = this.db
@@ -2095,6 +2130,8 @@ export class DbService {
     avatarEmoji: string | null;
     avatarBg: string | null;
     statusMessage: string | null;
+    username: string | null;
+    department: string | null;
     lastSeenAt: number | null;
     lastAddress: string | null;
     lastPort: number | null;
@@ -2105,6 +2142,8 @@ export class DbService {
       avatarEmoji: row.avatarEmoji || '🙂',
       avatarBg: row.avatarBg || '#5b5fc7',
       statusMessage: row.statusMessage || '',
+      username: row.username || '',
+      department: row.department || '',
       address: row.lastAddress || '',
       port: row.lastPort || 0,
       appVersion: 'unknown',
@@ -2116,38 +2155,38 @@ export class DbService {
   purgeExpiredAnnouncements(cutoffMs: number): string[] {
     const list = this.db.prepare(
       `SELECT messageId FROM messages
-       WHERE type = 'announcement' AND createdAt <= ?`
+       WHERE conversationId = 'announcements' AND createdAt <= ?`
     );
     const remove = this.db.prepare(
       `DELETE FROM messages
-       WHERE type = 'announcement' AND createdAt <= ?`
+       WHERE conversationId = 'announcements' AND createdAt <= ?`
     );
     const removeReactions = this.db.prepare(
       `DELETE FROM message_reactions
        WHERE messageId IN (
          SELECT messageId FROM messages
-         WHERE type = 'announcement' AND createdAt <= ?
+         WHERE conversationId = 'announcements' AND createdAt <= ?
        )`
     );
     const removePendingReactions = this.db.prepare(
       `DELETE FROM pending_message_reactions
        WHERE messageId IN (
          SELECT messageId FROM messages
-         WHERE type = 'announcement' AND createdAt <= ?
+         WHERE conversationId = 'announcements' AND createdAt <= ?
        )`
     );
     const removeHidden = this.db.prepare(
       `DELETE FROM hidden_messages
        WHERE messageId IN (
          SELECT messageId FROM messages
-         WHERE type = 'announcement' AND createdAt <= ?
+         WHERE conversationId = 'announcements' AND createdAt <= ?
        )`
     );
     const removeReads = this.db.prepare(
       `DELETE FROM announcement_reads
        WHERE messageId IN (
          SELECT messageId FROM messages
-         WHERE type = 'announcement' AND createdAt <= ?
+         WHERE conversationId = 'announcements' AND createdAt <= ?
        )`
     );
     const touchConversation = this.db.prepare(
@@ -2177,11 +2216,11 @@ export class DbService {
     const placeholders = uniqueIds.map(() => '?').join(', ');
     const list = this.db.prepare(
       `SELECT messageId FROM messages
-       WHERE type = 'announcement' AND messageId IN (${placeholders})`
+       WHERE conversationId = 'announcements' AND messageId IN (${placeholders})`
     );
     const removeMessages = this.db.prepare(
       `DELETE FROM messages
-       WHERE type = 'announcement' AND messageId IN (${placeholders})`
+       WHERE conversationId = 'announcements' AND messageId IN (${placeholders})`
     );
     const removeReactions = this.db.prepare(
       `DELETE FROM message_reactions
@@ -2223,7 +2262,7 @@ export class DbService {
       .prepare(
         `SELECT messageId
          FROM messages
-         WHERE type = 'announcement' AND deletedAt IS NULL
+         WHERE conversationId = 'announcements' AND deletedAt IS NULL
            AND NOT EXISTS (
              SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
            )`

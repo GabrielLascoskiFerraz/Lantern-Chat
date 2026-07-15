@@ -52,6 +52,13 @@ export const SettingsModal = ({
   const [doNotDisturbUntil, setDoNotDisturbUntil] = useState(
     Number(startupSettings?.doNotDisturbUntil || 0)
   );
+  const [passwordExpanded, setPasswordExpanded] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
+  const [passwordFeedback, setPasswordFeedback] = useState('');
+  const [passwordChanged, setPasswordChanged] = useState(false);
+  const [passwordBusy, setPasswordBusy] = useState(false);
   const statusPresets = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
   const emojiGroups = {
     rostos: [
@@ -86,6 +93,12 @@ export const SettingsModal = ({
       '🍮', '🥧', '🍫', '🍬', '🍭', '🍡', '🥮'
     ]
   } as const;
+  const emojiGroupLabels: Record<keyof typeof emojiGroups, string> = {
+    rostos: 'Rostos e emoções',
+    trabalho: 'Trabalho',
+    animais: 'Animais',
+    comida: 'Comidas e bebidas'
+  };
   const [selectedGroup, setSelectedGroup] = useState<keyof typeof emojiGroups>('rostos');
   const colorOptions = [
     '#5b5fc7',
@@ -117,6 +130,12 @@ export const SettingsModal = ({
     setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
     setDownloadsDir(startupSettings?.downloadsDir || '');
     setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
+    setPasswordExpanded(false);
+    setCurrentPassword('');
+    setNewPassword('');
+    setNewPasswordConfirm('');
+    setPasswordFeedback('');
+    setPasswordChanged(false);
   };
   const dialogSurfaceStyle = {
     width: '85vw',
@@ -197,7 +216,7 @@ export const SettingsModal = ({
                       className={`emoji-tab ${selectedGroup === group ? 'active' : ''}`}
                       onClick={() => setSelectedGroup(group)}
                     >
-                      {group}
+                      {emojiGroupLabels[group]}
                     </button>
                   ))}
                 </div>
@@ -282,6 +301,69 @@ export const SettingsModal = ({
                       : 'Não suportado neste sistema'}
                   </Text>
                 </div>
+              </Field>
+
+              <Field className="settings-field" label="Segurança da conta">
+                {!passwordExpanded ? (
+                  <Button appearance="secondary" onClick={() => setPasswordExpanded(true)}>
+                    Alterar senha
+                  </Button>
+                ) : (
+                  <div className="settings-password-panel">
+                    <Input
+                      type="password"
+                      value={currentPassword}
+                      onChange={(_, data) => setCurrentPassword(data.value)}
+                      placeholder="Senha atual"
+                      autoComplete="current-password"
+                    />
+                    <Input
+                      type="password"
+                      value={newPassword}
+                      onChange={(_, data) => setNewPassword(data.value)}
+                      placeholder="Nova senha (mín. 10 caracteres)"
+                      autoComplete="new-password"
+                    />
+                    <Input
+                      type="password"
+                      value={newPasswordConfirm}
+                      onChange={(_, data) => setNewPasswordConfirm(data.value)}
+                      placeholder="Confirmar nova senha"
+                      autoComplete="new-password"
+                    />
+                    {passwordFeedback && <Text size={200} className={`settings-password-feedback ${passwordChanged ? 'success' : ''}`}>{passwordFeedback}</Text>}
+                    <div className="settings-password-actions">
+                      <Button appearance="subtle" onClick={() => {
+                        setPasswordExpanded(false);
+                        setPasswordFeedback('');
+                        setPasswordChanged(false);
+                      }}>Cancelar</Button>
+                      <Button
+                        appearance="primary"
+                        disabled={passwordBusy || !currentPassword || newPassword.length < 10 || newPassword !== newPasswordConfirm}
+                        onClick={() => {
+                          setPasswordBusy(true);
+                          setPasswordFeedback('');
+                          setPasswordChanged(false);
+                          void ipcClient.changePassword({ currentPassword, newPassword })
+                            .then(() => {
+                              setCurrentPassword('');
+                              setNewPassword('');
+                              setNewPasswordConfirm('');
+                              setPasswordChanged(true);
+                              setPasswordFeedback('Senha alterada com sucesso. As outras sessões foram encerradas.');
+                            })
+                            .catch((error) => {
+                              const message = error instanceof Error ? error.message : String(error);
+                              setPasswordChanged(false);
+                              setPasswordFeedback(message.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+                            })
+                            .finally(() => setPasswordBusy(false));
+                        }}
+                      >Salvar nova senha</Button>
+                    </div>
+                  </div>
+                )}
               </Field>
 
               <Field className="settings-field settings-field-dnd" label="Não perturbe">

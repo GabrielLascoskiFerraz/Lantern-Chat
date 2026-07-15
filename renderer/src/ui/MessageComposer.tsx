@@ -62,11 +62,13 @@ interface PasteProgressItem {
 type EmojiCategory =
   | 'rostos'
   | 'gestos'
+  | 'pessoas'
   | 'animais'
   | 'comida'
   | 'objetos'
   | 'natureza'
   | 'atividades'
+  | 'viagens'
   | 'bandeiras'
   | 'simbolos';
 
@@ -85,11 +87,13 @@ const normalizeSearchTerm = (value: string): string =>
 const CATEGORY_EXACT_SEARCH_TERMS: Record<EmojiCategory, string[]> = {
   rostos: ['rosto', 'rostos', 'face', 'faces', 'emocao', 'emocoes'],
   gestos: ['gesto', 'gestos', 'mao', 'maos', 'mãos'],
+  pessoas: ['pessoa', 'pessoas', 'profissao', 'profissoes', 'família', 'familia'],
   animais: ['animal', 'animais', 'bicho', 'bichos', 'pet', 'pets'],
   comida: ['comida', 'comidas', 'bebida', 'bebidas', 'alimento', 'alimentos'],
   objetos: ['objeto', 'objetos', 'ferramenta', 'ferramentas'],
   natureza: ['natureza', 'planta', 'plantas', 'clima', 'tempo', 'flor', 'flores'],
   atividades: ['atividade', 'atividades', 'esporte', 'esportes', 'jogo', 'jogos', 'musica', 'música'],
+  viagens: ['viagem', 'viagens', 'transporte', 'transportes', 'veiculo', 'veiculos', 'lugar', 'lugares'],
   bandeiras: ['bandeira', 'bandeiras', 'pais', 'país', 'paises', 'países'],
   simbolos: ['simbolo', 'simbolos', 'símbolo', 'símbolos', 'icone', 'ícone', 'icones', 'ícones']
 };
@@ -323,7 +327,7 @@ const createEmojiItems = (category: EmojiCategory, emojis: string[]): EmojiItem[
 
 const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem[] }> = {
   rostos: {
-    label: 'Rostos',
+    label: '😀 Rostos',
     emojis: createEmojiItems('rostos', [
       '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩',
       '😘', '😗', '☺️', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🫢', '🫣',
@@ -336,18 +340,32 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   gestos: {
-    label: 'Gestos',
+    label: '👋 Gestos',
     emojis: createEmojiItems('gestos', [
       '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙', '👈', '👉',
       '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '🫶', '👐', '🤲', '🤝',
       '🙏', '✍️', '💅', '🤳', '💪', '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷',
-      '🦴', '👀', '👁️', '👅', '👄', '🫦', '🙋', '🙋‍♂️', '🙋‍♀️', '🙇', '🙇‍♂️', '🙇‍♀️', '🤦', '🤦‍♂️',
-      '🤦‍♀️', '🤷', '🤷‍♂️', '🤷‍♀️', '🙅', '🙅‍♂️', '🙅‍♀️', '🙆', '🙆‍♂️', '🙆‍♀️', '🙎', '🙎‍♂️',
-      '🙎‍♀️', '🙍', '🙍‍♂️', '🙍‍♀️', '💁', '💁‍♂️', '💁‍♀️', '🙆🏻', '🙆🏽', '🙆🏿'
+      '🦴', '👀', '👁️', '👅', '👄', '🫦'
+    ])
+  },
+  pessoas: {
+    label: '🧑 Pessoas',
+    emojis: createEmojiItems('pessoas', [
+      '👶', '🧒', '👦', '👧', '🧑', '👨', '👩', '🧔', '🧔‍♂️', '🧔‍♀️', '🧑‍🦰', '🧑‍🦱', '🧑‍🦳', '🧑‍🦲',
+      '👱', '👱‍♂️', '👱‍♀️', '🧓', '👴', '👵', '🙍', '🙍‍♂️', '🙍‍♀️', '🙎', '🙎‍♂️', '🙎‍♀️', '🙅', '🙅‍♂️',
+      '🙅‍♀️', '🙆', '🙆‍♂️', '🙆‍♀️', '💁', '💁‍♂️', '💁‍♀️', '🙋', '🙋‍♂️', '🙋‍♀️', '🧏', '🧏‍♂️', '🧏‍♀️',
+      '🙇', '🙇‍♂️', '🙇‍♀️', '🤦', '🤦‍♂️', '🤦‍♀️', '🤷', '🤷‍♂️', '🤷‍♀️', '🧑‍⚕️', '👨‍⚕️', '👩‍⚕️',
+      '🧑‍🎓', '👨‍🎓', '👩‍🎓', '🧑‍🏫', '👨‍🏫', '👩‍🏫', '🧑‍⚖️', '👨‍⚖️', '👩‍⚖️', '🧑‍🌾', '👨‍🌾', '👩‍🌾',
+      '🧑‍🍳', '👨‍🍳', '👩‍🍳', '🧑‍🔧', '👨‍🔧', '👩‍🔧', '🧑‍🏭', '👨‍🏭', '👩‍🏭', '🧑‍💼', '👨‍💼', '👩‍💼',
+      '🧑‍🔬', '👨‍🔬', '👩‍🔬', '🧑‍💻', '👨‍💻', '👩‍💻', '🧑‍🎤', '👨‍🎤', '👩‍🎤', '🧑‍🎨', '👨‍🎨', '👩‍🎨',
+      '🧑‍✈️', '👨‍✈️', '👩‍✈️', '🧑‍🚀', '👨‍🚀', '👩‍🚀', '👮', '👮‍♂️', '👮‍♀️', '🕵️', '🕵️‍♂️', '🕵️‍♀️',
+      '👷', '👷‍♂️', '👷‍♀️', '🥷', '👸', '🤴', '🫅', '👳', '👲', '🧕', '🤵', '👰', '🤰', '🫃', '🫄',
+      '🤱', '👩‍🍼', '👨‍🍼', '🧑‍🍼', '🧍', '🧎', '🚶', '🏃', '💃', '🕺', '👯', '🧖', '🧘',
+      '👭', '👫', '👬', '💏', '💑', '👪', '🗣️', '👤', '👥'
     ])
   },
   animais: {
-    label: 'Animais',
+    label: '🐶 Animais',
     emojis: createEmojiItems('animais', [
       '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈', '🐈‍⬛', '🦁', '🐯', '🐅', '🐆', '🐴',
       '🫎', '🫏', '🐎', '🦄', '🦓', '🦌', '🦬', '🐮', '🐂', '🐃', '🐄', '🐷', '🐖', '🐗', '🐽', '🐏',
@@ -360,7 +378,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   comida: {
-    label: 'Comida',
+    label: '🍕 Comidas',
     emojis: createEmojiItems('comida', [
       '🍏', '🍎', '🍐', '🍊', '🍋', '🍋‍🟩', '🍌', '🍉', '🍇', '🍓', '🫐', '🍈', '🍒', '🍑', '🥭', '🍍',
       '🥥', '🥝', '🍅', '🍆', '🥑', '🥦', '🫛', '🥬', '🥒', '🌶️', '🫑', '🌽', '🥕', '🫒', '🧄', '🧅',
@@ -373,7 +391,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   objetos: {
-    label: 'Objetos',
+    label: '💡 Objetos',
     emojis: createEmojiItems('objetos', [
       '⌚', '📱', '📲', '💻', '⌨️', '🖥️', '🖨️', '🖱️', '🖲️', '🕹️', '💽', '💾', '💿', '📀', '🧮', '🎥',
       '🎞️', '📷', '📸', '📹', '📼', '🔍', '🔎', '💡', '🔦', '🏮', '🪔', '📔', '📕', '📖', '📗', '📘',
@@ -389,7 +407,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   natureza: {
-    label: 'Natureza',
+    label: '🌿 Natureza',
     emojis: createEmojiItems('natureza', [
       '🌍', '🌎', '🌏', '🌐', '🗺️', '🗾', '🧭', '🏔️', '⛰️', '🌋', '🗻', '🏕️', '🏞️', '🏜️', '🏝️', '🏖️',
       '🏛️', '🏟️', '🏞️', '🌅', '🌄', '🌠', '🎑', '🌇', '🌆', '🏙️', '🌃', '🌌', '🌉', '🌁', '🧱', '🌳',
@@ -401,7 +419,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   atividades: {
-    label: 'Atividades',
+    label: '⚽ Atividades',
     emojis: createEmojiItems('atividades', [
       '⚽', '🏀', '🏈', '⚾', '🥎', '🎾', '🏐', '🏉', '🥏', '🎱', '🪀', '🏓', '🏸', '🏒', '🏑', '🥍',
       '🏏', '🪃', '🥅', '⛳', '🪁', '🏹', '🎣', '🤿', '🥊', '🥋', '🎽', '🛹', '🛼', '🛷', '⛸️', '🥌',
@@ -412,8 +430,21 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
       '🕺', '💃', '🪭', '🪇'
     ])
   },
+  viagens: {
+    label: '🚗 Viagens',
+    emojis: createEmojiItems('viagens', [
+      '🚗', '🚕', '🚙', '🚌', '🚎', '🏎️', '🚓', '🚑', '🚒', '🚐', '🛻', '🚚', '🚛', '🚜', '🦯',
+      '🦽', '🦼', '🛴', '🚲', '🛵', '🏍️', '🛺', '🚨', '🚔', '🚍', '🚘', '🚖', '🛞', '🚡', '🚠',
+      '🚟', '🚃', '🚋', '🚞', '🚝', '🚄', '🚅', '🚈', '🚂', '🚆', '🚇', '🚊', '🚉', '✈️', '🛫',
+      '🛬', '🛩️', '💺', '🛰️', '🚀', '🛸', '🚁', '🛶', '⛵', '🚤', '🛥️', '🛳️', '⛴️', '🚢',
+      '⚓', '🛟', '⛽', '🚧', '🚦', '🚥', '🗺️', '🗿', '🗽', '🗼', '🏰', '🏯', '🏟️', '🎡', '🎢',
+      '🎠', '⛲', '⛱️', '🏖️', '🏝️', '🏜️', '🌋', '⛰️', '🏕️', '⛺', '🛖', '🏠', '🏡', '🏢',
+      '🏥', '🏦', '🏨', '🏪', '🏫', '🏬', '🏭', '🏛️', '⛪', '🕌', '🛕', '🕍', '⛩️', '🕋', '🌁',
+      '🌃', '🏙️', '🌄', '🌅', '🌆', '🌇', '🌉', '♨️', '🎇', '🎆'
+    ])
+  },
   bandeiras: {
-    label: 'Bandeiras',
+    label: '🏳️ Bandeiras',
     emojis: createEmojiItems('bandeiras', [
       '🏁', '🚩', '🎌', '🏴', '🏳️', '🏳️‍🌈', '🏳️‍⚧️', '🏴‍☠️',
       '🇧🇷', '🇦🇷', '🇺🇾', '🇵🇾', '🇨🇱', '🇧🇴', '🇵🇪', '🇨🇴', '🇻🇪', '🇪🇨', '🇲🇽', '🇵🇦', '🇨🇷', '🇨🇺',
@@ -426,7 +457,7 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
     ])
   },
   simbolos: {
-    label: 'Símbolos',
+    label: '❤️ Símbolos',
     emojis: createEmojiItems('simbolos', [
       '❤️', '🩷', '🧡', '💛', '💚', '💙', '🩵', '💜', '🤎', '🖤', '🩶', '🤍', '💔', '❣️', '💕', '💞',
       '💓', '💗', '💖', '💘', '💝', '💟', '☮️', '✝️', '☪️', '🕉️', '☸️', '✡️', '🔯', '🕎', '☯️', '☦️',
@@ -450,11 +481,13 @@ const EMOJI_CATEGORIES: Record<EmojiCategory, { label: string; emojis: EmojiItem
 const EMOJI_CATEGORY_ORDER: EmojiCategory[] = [
   'rostos',
   'gestos',
+  'pessoas',
   'animais',
   'comida',
   'objetos',
   'natureza',
   'atividades',
+  'viagens',
   'bandeiras',
   'simbolos'
 ];
@@ -1598,6 +1631,7 @@ export const MessageComposer = ({
                       type="button"
                       className={`emoji-cat-btn ${emojiCategory === category ? 'active' : ''}`}
                       onClick={() => setEmojiCategory(category)}
+                      title={EMOJI_CATEGORIES[category].label.replace(/^\S+\s/, '')}
                     >
                       {EMOJI_CATEGORIES[category].label}
                     </button>
@@ -1729,21 +1763,27 @@ export const MessageComposer = ({
         <div className="composer-actions">
           {onSendFile && (
             <Button
+              className="composer-action-button composer-attach-button"
               icon={<Attach20Regular />}
               onClick={() => void pickAttachment()}
               appearance="secondary"
               disabled={disabled || isSubmitting || editing}
+              title="Anexar arquivo"
+              aria-label="Anexar arquivo"
             >
-              Anexar
+              <span className="composer-action-label">Anexar</span>
             </Button>
           )}
           <Button
+            className="composer-action-button composer-send-button"
             icon={<Send20Filled />}
             onClick={() => void submit()}
             appearance="primary"
             disabled={disabled || isSubmitting || (!text.trim() && pendingFilePaths.length === 0)}
+            title={editing ? 'Salvar alteração' : 'Enviar mensagem'}
+            aria-label={editing ? 'Salvar alteração' : 'Enviar mensagem'}
           >
-            {editing ? 'Salvar' : 'Enviar'}
+            <span className="composer-action-label">{editing ? 'Salvar' : 'Enviar'}</span>
           </Button>
         </div>
       </div>

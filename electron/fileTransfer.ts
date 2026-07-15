@@ -539,7 +539,7 @@ export class FileTransferService {
   }
 
   buildOfferFrame(
-    to: string,
+    to: string | null,
     offer: FileOfferPayload,
     createdAt: number = Date.now()
   ): ProtocolFrame<FileOfferPayload> {

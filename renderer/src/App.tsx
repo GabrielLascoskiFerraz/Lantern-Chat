@@ -9,6 +9,7 @@ import {
 import { ipcClient } from './api/ipcClient';
 import { Shell } from './ui/Shell';
 import { LoginView } from './ui/LoginView';
+import { FirstLoginSetupView } from './ui/FirstLoginSetupView';
 import { useLanternStore } from './state/store';
 
 const brandPalette = {
@@ -119,7 +120,15 @@ export default function App() {
   return (
     <FluentProvider theme={theme} className="app-root">
       <AppErrorBoundary>
-        {!ready ? <div className="loading-screen"><Spinner /></div> : authState?.authenticated ? <Shell /> : <LoginView />}
+        {!ready ? (
+          <div className="loading-screen"><Spinner /></div>
+        ) : !authState?.authenticated ? (
+          <LoginView />
+        ) : authState.user && !authState.user.profileSetupCompleted ? (
+          <FirstLoginSetupView />
+        ) : (
+          <Shell />
+        )}
       </AppErrorBoundary>
     </FluentProvider>
   );

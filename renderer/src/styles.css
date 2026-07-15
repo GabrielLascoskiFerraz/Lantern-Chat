@@ -28,6 +28,14 @@
   --motion-ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --motion-ease-emphasized: cubic-bezier(0.22, 0.61, 0.36, 1);
   --sidebar-width: 360px;
+  --bg: var(--teams-bg);
+  --panel: var(--teams-surface);
+  --surface-subtle: var(--teams-surface-2);
+  --border: var(--teams-border);
+  --text: var(--teams-text);
+  --muted: var(--teams-muted);
+  --accent: var(--teams-accent);
+  --danger: #c4314b;
 }
 
 :root[data-theme='dark'] {
@@ -205,6 +213,10 @@ body {
   min-height: 0;
   height: 100%;
   overflow: hidden;
+}
+
+.mobile-conversation-back {
+  display: none !important;
 }
 
 .pane-layer {
@@ -2790,6 +2802,14 @@ body {
   line-height: 1;
 }
 
+.attachment-hydration-sentinel {
+  display: block;
+  width: 100%;
+  height: 1px;
+  margin-bottom: -1px;
+  pointer-events: none;
+}
+
 .composer-attachment-pending {
   margin-bottom: 8px;
   border: 1px solid var(--teams-border);
@@ -4090,34 +4110,130 @@ body {
 .login-address-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
 .login-feedback { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent); border-radius: 10px; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); font-size: 13px; line-height: 1.45; }
 .login-account-hint { color: var(--muted); line-height: 1.45; }
-.conversation-name-row { display: flex; min-width: 0; align-items: center; gap: 7px; }
-.department-tag { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 7px; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); font-size: 10px; font-weight: 650; letter-spacing: .02em; }
+.login-screen-v2 { grid-template-columns: minmax(210px, 300px) minmax(420px, 560px); justify-content: center; }
+.login-brand-v2 { align-self: center; }
+.login-brand-v2 .login-copy { margin-top: clamp(34px, 6vh, 70px); }
+.login-brand-v2 .login-copy h1 { font-family: inherit; font-size: clamp(38px, 4.7vw, 64px); font-weight: 720; line-height: 1.02; }
+.login-benefits { display: grid; gap: 11px; margin-top: 30px; color: var(--muted); font-size: 14px; }
+.login-benefits span { display: flex; align-items: center; gap: 10px; }
+.login-benefits b { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.login-card-v2 { gap: 20px; }
+.login-account-tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 4px; border-radius: 12px; background: var(--surface-subtle); }
+.login-account-tabs button { padding: 10px 14px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-weight: 650; cursor: pointer; }
+.login-account-tabs button.active { color: #fff; background: var(--accent); box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 28%, transparent); }
+.login-fields { display: grid; gap: 15px; }
+.login-field-hint { display: block; margin-top: 4px; color: var(--muted); }
+.login-connection { border: 1px solid var(--border); border-radius: 13px; background: color-mix(in srgb, var(--surface-subtle) 65%, transparent); overflow: hidden; }
+.login-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px 10px; font-weight: 650; }
+.login-connection-header small { max-width: 55%; overflow: hidden; color: var(--muted); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.login-connection-body { display: grid; gap: 12px; padding: 0 14px 14px; }
+.login-submit { width: 100%; }
+.login-privacy { margin: -8px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
+.login-session-options { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.login-link-button { padding: 4px 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
+.login-link-button:hover { text-decoration: underline; }
+.login-link-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; border-radius: 3px; }
+.password-reset-dialog-content { display: grid; gap: 15px; min-width: min(420px, 78vw); }
+.password-reset-dialog-content > p { margin: 0; color: var(--muted); line-height: 1.5; }
+.password-reset-dialog-content > small { color: var(--muted); }
+.settings-password-panel { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-subtle); }
+.settings-password-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.settings-password-feedback { color: var(--danger); line-height: 1.4; }
+.settings-password-feedback.success { color: #107c10; }
+
+.onboarding-screen { width: 100%; height: 100%; min-height: 0; display: grid; align-items: start; justify-items: center; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: clamp(18px, 4vw, 56px); padding-bottom: max(clamp(24px, 4vw, 56px), calc(env(safe-area-inset-bottom, 0px) + 20px)); background: radial-gradient(circle at 20% 10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 38%), var(--bg); }
+.onboarding-card { width: min(980px, 100%); margin: auto 0; padding: clamp(24px, 4vw, 48px); border: 1px solid var(--border); border-radius: 28px; background: color-mix(in srgb, var(--panel) 96%, transparent); box-shadow: 0 30px 90px #10234a20; }
+.onboarding-header { display: flex; align-items: center; justify-content: space-between; }
+.onboarding-brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 750; }
+.onboarding-brand img { width: 42px; height: 42px; object-fit: contain; }
+.onboarding-progress { display: flex; gap: 6px; }
+.onboarding-progress span { width: 32px; height: 4px; border-radius: 99px; background: var(--border); }
+.onboarding-progress span.active { background: var(--accent); }
+.onboarding-copy { max-width: 660px; margin: 34px 0 30px; }
+.onboarding-copy h1 { margin: 8px 0 10px; font-size: clamp(28px, 4vw, 44px); line-height: 1.08; letter-spacing: -.03em; }
+.onboarding-copy p { margin: 0; color: var(--muted); line-height: 1.55; }
+.onboarding-eyebrow { color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: .14em; }
+.onboarding-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: clamp(24px, 5vw, 60px); }
+.onboarding-preview { display: flex; min-height: 300px; align-items: center; justify-content: center; flex-direction: column; gap: 8px; padding: 24px; border-radius: 22px; background: linear-gradient(155deg, color-mix(in srgb, var(--accent) 15%, var(--surface-subtle)), var(--surface-subtle)); text-align: center; }
+.onboarding-preview strong { margin-top: 10px; font-size: 19px; }
+.onboarding-preview span,.onboarding-preview small { color: var(--muted); }
+.onboarding-options { display: grid; min-width: 0; gap: 22px; padding-bottom: 2px; }
+.onboarding-options > .fui-Button { width: 100%; min-height: 44px; position: relative; z-index: 1; }
+.onboarding-options fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.onboarding-options legend { margin-bottom: 10px; font-weight: 700; }
+.onboarding-emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px; }
+.onboarding-emoji-grid button { position: relative; display: grid; min-width: 0; aspect-ratio: 1; place-items: center; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-subtle); font-size: 23px; cursor: pointer; }
+.onboarding-emoji-grid button.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+.onboarding-emoji-grid svg { position: absolute; right: 1px; bottom: 1px; width: 12px; color: var(--accent); }
+.onboarding-color-grid { display: flex; flex-wrap: wrap; gap: 9px; }
+.onboarding-color-grid button { display: grid; width: 34px; height: 34px; place-items: center; border: 2px solid transparent; border-radius: 50%; color: white; cursor: pointer; }
+.onboarding-color-grid button.selected { border-color: var(--panel); box-shadow: 0 0 0 2px var(--accent); }
+.onboarding-startup-option { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 16px; border: 1px solid var(--border); border-radius: 13px; }
+.onboarding-startup-option div { display: grid; gap: 4px; }
+.onboarding-startup-option span { color: var(--muted); font-size: 12px; }
+.conversation-name-row { display: flex; min-width: 0; align-items: center; gap: 7px; overflow: visible !important; }
+.conversation-name-row > .fui-Text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.department-tag { display: inline-flex; max-width: 42%; min-height: 20px; flex: 0 1 auto; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 999px; color: color-mix(in srgb, var(--accent) 88%, var(--text)); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-size: 10px; font-weight: 750; letter-spacing: .02em; }
 
 @media (max-width: 800px) {
+  /* O Safari do iOS amplia automaticamente controles com fonte abaixo de 16px. */
+  input,
+  textarea,
+  select,
+  .fui-Input input,
+  .fui-Textarea textarea,
+  .fui-Select select {
+    font-size: 16px !important;
+  }
+
   .login-screen { grid-template-columns: 1fr; align-content: start; gap: 26px; padding: 24px; overflow: auto; }
   .login-brand { display: flex; align-items: center; gap: 24px; }
   .login-copy { margin: 0; }
   .login-brand h1 { font-size: clamp(30px, 7vw, 42px); }
   .login-brand p { margin-bottom: 0; }
   .login-card { width: 100%; }
+  .login-benefits { display: none; }
+  .onboarding-layout { grid-template-columns: 1fr; }
+  .onboarding-preview { min-height: 210px; }
 }
 
 @media (max-width: 540px) {
   .login-screen { padding: 16px; gap: 18px; }
   .login-brand { display: block; }
-  .login-copy { margin-top: 18px; }
+  .login-brand-v2 .login-copy { margin-top: 18px; }
+  .login-brand-v2 .login-copy h1 { font-size: clamp(30px, 9vw, 36px); line-height: 1.06; }
+  .login-identity { gap: 12px; }
+  .login-app-icon { width: 58px; height: 58px; }
+  .login-product strong { font-size: 23px; }
+  .login-product span { font-size: 10px; letter-spacing: .13em; }
   .login-brand p { font-size: 15px; line-height: 1.5; }
   .login-card { gap: 14px; padding: 20px 16px; border-radius: 20px; }
   .login-card-header { align-items: flex-start; }
   .login-card-header .fui-Select { max-width: 126px; }
   .login-mode-tabs { grid-template-columns: 1fr; }
   .login-address-row { grid-template-columns: 1fr; }
+  .login-session-options { align-items: flex-start; }
+  .password-reset-dialog-content { min-width: 0; }
+  .onboarding-screen { padding: 14px; padding-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 18px)); }
+  .onboarding-card { margin: 0; padding: 20px 16px; border-radius: 20px; }
+  .onboarding-copy { margin-block: 24px; }
+  .onboarding-emoji-grid { grid-template-columns: repeat(4, 1fr); }
+  .onboarding-startup-option { align-items: flex-start; }
 }
 
 @media (max-height: 760px) and (min-width: 801px) {
   .login-screen { align-items: start; padding-block: 24px; overflow: auto; }
   .login-copy { margin-top: 28px; }
   .login-card { gap: 13px; padding-block: 24px; }
+  .onboarding-screen { padding: 18px 24px 26px; }
+  .onboarding-card { padding: 22px 30px; }
+  .onboarding-copy { margin: 18px 0 20px; }
+  .onboarding-copy h1 { font-size: clamp(28px, 3vw, 36px); }
+  .onboarding-layout { grid-template-columns: 220px minmax(0, 1fr); gap: 34px; }
+  .onboarding-preview { min-height: 250px; padding: 18px; }
+  .onboarding-options { gap: 13px; }
+  .onboarding-emoji-grid button { max-height: 48px; }
+  .onboarding-startup-option { padding: 10px 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4178,5 +4294,141 @@ body {
 
   .settings-relay-manual-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --sidebar-width: 100%;
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell:not(.conversation-open) .pane-switcher,
+  .shell.conversation-open .sidebar {
+    display: none;
+  }
+
+  .shell.conversation-open .pane-switcher {
+    display: block;
+  }
+
+  .mobile-conversation-back {
+    position: absolute !important;
+    z-index: 40;
+    top: 17px;
+    left: 8px;
+    display: inline-flex !important;
+  }
+
+  .shell.conversation-open .pane-header {
+    padding-left: 48px;
+  }
+
+  .pane-header {
+    min-height: 64px;
+    padding-right: 8px;
+  }
+
+  .pane-header-actions {
+    gap: 2px;
+  }
+
+  .messages-scroll {
+    padding-inline: 8px;
+  }
+
+  .composer {
+    padding: 8px 8px max(8px, calc(env(safe-area-inset-bottom, 0px) + 6px));
+  }
+
+  .composer-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 6px;
+    align-items: end;
+  }
+
+  .composer-picker-stack {
+    flex-direction: row;
+    gap: 2px;
+  }
+
+  .composer-actions {
+    gap: 4px;
+  }
+
+  .composer-row .fui-Button {
+    width: 42px;
+    min-width: 42px;
+    height: 42px;
+    padding: 0;
+    border-radius: 12px;
+  }
+
+  .composer-row .fui-Button svg {
+    width: 21px;
+    height: 21px;
+  }
+
+  .composer-action-label {
+    display: none;
+  }
+
+  .composer-input {
+    min-width: 0;
+  }
+
+  .composer-input.fui-Textarea {
+    min-width: 0;
+    min-height: 42px;
+    max-height: 104px;
+  }
+
+  .composer-input textarea {
+    min-height: 40px;
+    max-height: 102px;
+    padding: 9px 11px;
+    line-height: 22px;
+  }
+
+  .composer-reply-draft,
+  .composer-attachment-pending {
+    margin-bottom: 6px;
+  }
+
+  .bubble {
+    max-width: 94%;
+  }
+
+  .settings-modal,
+  .group-details-modal {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    max-height: calc(100vh - 16px);
+  }
+}
+
+@media (max-width: 380px) {
+  .composer {
+    padding-inline: 6px;
+  }
+
+  .composer-row {
+    gap: 4px;
+  }
+
+  .composer-picker-stack,
+  .composer-actions {
+    gap: 2px;
+  }
+
+  .composer-row .fui-Button {
+    width: 38px;
+    min-width: 38px;
+    height: 40px;
+    border-radius: 11px;
   }
 }

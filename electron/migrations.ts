@@ -20,6 +20,8 @@ export const runMigrations = (db: Database.Database): void => {
       avatarEmoji TEXT,
       avatarBg TEXT,
       statusMessage TEXT,
+      username TEXT,
+      department TEXT,
       lastSeenAt INTEGER,
       lastAddress TEXT,
       lastPort INTEGER
@@ -225,6 +227,12 @@ export const runMigrations = (db: Database.Database): void => {
 	  if (!peerColumns.some((column) => column.name === 'statusMessage')) {
 	    db.exec('ALTER TABLE peers_cache ADD COLUMN statusMessage TEXT;');
 	  }
+	  if (!peerColumns.some((column) => column.name === 'username')) {
+	    db.exec('ALTER TABLE peers_cache ADD COLUMN username TEXT;');
+	  }
+	  if (!peerColumns.some((column) => column.name === 'department')) {
+	    db.exec('ALTER TABLE peers_cache ADD COLUMN department TEXT;');
+	  }
 
 	  const conversationColumns = db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>;
 	  if (!conversationColumns.some((column) => column.name === 'lastReadAt')) {
@@ -273,6 +281,10 @@ export const runMigrations = (db: Database.Database): void => {
   if (!messageColumns.some((column) => column.name === 'editedAt')) {
     db.exec('ALTER TABLE messages ADD COLUMN editedAt INTEGER;');
   }
+  if (!messageColumns.some((column) => column.name === 'serverSeq')) {
+    db.exec('ALTER TABLE messages ADD COLUMN serverSeq INTEGER;');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_server_seq ON messages(serverSeq);');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS message_favorites (

@@ -696,18 +696,38 @@ export class RelayClient {
   async requestConversationHistory(
     peerUserId: string,
     before = Number.MAX_SAFE_INTEGER,
-    limit = 100
+    limit = 100,
+    beforeSeq = Number.MAX_SAFE_INTEGER
   ): Promise<ProtocolFrame[]> {
     await this.waitUntilReady(8_000);
     const result = await this.centralRequest('relay:history:request', {
       peerUserId,
       before,
+      beforeSeq,
       limit: Math.max(1, Math.min(Math.trunc(limit) || 100, 500))
     });
     return Array.isArray(result.frames)
       ? result.frames.filter(
           (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
         )
+      : [];
+  }
+
+  async searchConversationMessageIds(
+    conversationId: string,
+    query: string,
+    limit = 500,
+    offset = 0
+  ): Promise<string[]> {
+    const result = conversationId.startsWith('group:')
+      ? await this.sendGroupAction('search', {
+          groupId: conversationId.slice('group:'.length), query, limit, offset
+        })
+      : await this.centralRequest('relay:search:request', {
+          peerUserId: conversationId.replace(/^dm:/, ''), query, limit, offset
+        });
+    return Array.isArray(result.messageIds)
+      ? result.messageIds.filter((value): value is string => typeof value === 'string')
       : [];
   }
 
@@ -1080,9 +1100,12 @@ export class RelayClient {
     return promise;
   }
 
-  async requestGroupFile(fileId: string, startIndex = 0): Promise<string> {
+  async requestGroupFile(
+    fileId: string,
+    startIndex = 0,
+    requestId = randomUUID()
+  ): Promise<string> {
     await this.waitUntilReady(8_000);
-    const requestId = randomUUID();
     return new Promise<string>((resolve, reject) => {
       this.sendEnvelope(
         {
@@ -1442,7 +1465,8 @@ export class RelayClient {
         else normalized.forEach((frame) => this.callbacks.onFrame(frame));
         return;
       }
-      case 'relay:history:page': {
+      case 'relay:history:page':
+      case 'relay:search:results': {
         const payload = asRecord(envelope.payload);
         const requestId = asString(payload?.requestId);
         if (!requestId) return;
@@ -1702,7 +1726,7 @@ export class RelayClient {
         if (!requestId) return;
         const pending = this.pendingCentralDownloads.get(requestId);
         if (!pending) return;
-        pending.chain = pending.chain.then(() => pending.onStart(payload || {}));
+        this.queueCentralDownloadWork(requestId, pending, () => pending.onStart(payload || {}));
         return;
       }
       case 'relay:attachment:data': {
@@ -1712,7 +1736,7 @@ export class RelayClient {
         if (!requestId || !attachmentId) return;
         const pending = this.pendingCentralDownloads.get(requestId);
         if (!pending) return;
-        pending.chain = pending.chain.then(() => pending.onChunk({
+        this.queueCentralDownloadWork(requestId, pending, () => pending.onChunk({
           fileId: attachmentId,
           index: Math.max(0, Math.trunc(Number(payload?.index) || 0)),
           total: Math.max(1, Math.trunc(Number(payload?.total) || 1)),
@@ -2040,6 +2064,22 @@ export class RelayClient {
         ? Math.trunc(rawPort)
         : DEFAULT_RELAY_PORT;
     return formatWsUrl(remoteAddress, port, envelope.secure === true);
+  }
+
+  private queueCentralDownloadWork(
+    requestId: string,
+    pending: PendingCentralDownload,
+    work: () => void | Promise<void>
+  ): void {
+    pending.chain = pending.chain.then(work);
+    void pending.chain.catch((error) => {
+      if (this.pendingCentralDownloads.get(requestId) !== pending) return;
+      this.pendingCentralDownloads.delete(requestId);
+      clearTimeout(pending.timeout);
+      pending.reject(
+        error instanceof Error ? error : new Error('Falha ao processar anexo recebido do Relay.')
+      );
+    });
   }
 
   private waitUntilReady(timeoutMs: number): Promise<void> {

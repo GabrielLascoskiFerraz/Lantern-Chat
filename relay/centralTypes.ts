@@ -11,9 +11,54 @@ export interface CentralUser {
   statusMessage: string;
   locale: SupportedLocale;
   role: 'admin' | 'user';
+  profileSetupCompleted: boolean;
   disabled: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface UserConversationPreference {
+  conversationId: string;
+  pinned: boolean;
+  archived: boolean;
+  manualUnread: boolean;
+  readAt: number;
+  updatedAt: number;
+}
+
+export interface UserMessagePreference {
+  messageId: string;
+  favorite: boolean;
+  hidden: boolean;
+  updatedAt: number;
+}
+
+export interface UserPreferencesSnapshot {
+  conversations: UserConversationPreference[];
+  messages: UserMessagePreference[];
+}
+
+export interface PasswordResetRequest {
+  requestId: string;
+  userId: string;
+  username: string;
+  displayName: string;
+  status: 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired';
+  requestedAt: number;
+  reviewedAt: number | null;
+  expiresAt: number | null;
+  consumedAt: number | null;
+}
+
+export interface CanonicalExportMessage {
+  messageId: string;
+  senderUserId: string;
+  type: 'text' | 'file';
+  text: string;
+  fileName: string;
+  fileSize: number;
+  createdAt: number;
+  editedAt: number;
 }
 
 export interface AuthSession {
@@ -23,6 +68,7 @@ export interface AuthSession {
 }
 
 export interface CanonicalFrame {
+  serverSeq?: number;
   messageId: string;
   type: string;
   senderUserId: string;
@@ -43,4 +89,3 @@ export interface AttachmentRecord {
   encryptedPath: string;
   createdAt: number;
 }
-

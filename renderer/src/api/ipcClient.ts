@@ -43,6 +43,11 @@ export interface AuthenticatedUser {
   statusMessage: string;
   locale: ClientLocale;
   role: 'admin' | 'user';
+  profileSetupCompleted: boolean;
+}
+export interface UserPreferencesSnapshot {
+  conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
+  messages: Array<{ messageId: string; favorite: boolean; hidden: boolean; updatedAt: number }>;
 }
 export interface ClientAuthState {
   authenticated: boolean;
@@ -209,7 +214,7 @@ export type AppEvent =
   | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary }
   | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary };
 
-interface LanternApi {
+export interface LanternApi {
   getPlatform: () =>
     | 'aix'
     | 'android'
@@ -224,8 +229,13 @@ interface LanternApi {
     | 'netbsd';
   getAuthState: () => Promise<ClientAuthState>;
   discoverRelays: (port?: number) => Promise<Array<{ host: string; port: number; secure: boolean }>>;
-  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<ClientAuthState>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<ClientAuthState>;
+  requestPasswordReset: (input: { relay: ClientRelayConfig; username: string }) => Promise<{ requestToken: string }>;
+  getPasswordResetStatus: (requestToken: string) => Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'>;
+  completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => Promise<void>;
+  changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) => Promise<ClientAuthState>;
+  completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<ClientAuthState>;
   logout: () => Promise<void>;
   getProfile: () => Promise<Profile>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<Profile>;
@@ -279,6 +289,10 @@ interface LanternApi {
   ) => Promise<MessageRow>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<MessageRow>;
+  sendAnnouncementFile: (
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow>;
   sendFile: (
     peerId: string,
     filePath: string,
@@ -328,10 +342,10 @@ interface LanternApi {
   archiveConversation: (conversationId: string) => Promise<number>;
   unarchiveConversation: (conversationId: string) => Promise<number>;
   clearConversation: (conversationId: string) => Promise<void>;
-  forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Promise<Record<string, number>>;
   getArchivedConversationIds: () => Promise<string[]>;
-  addManualPeer: (address: string, port: number) => Promise<void>;
+  getPinnedConversationIds: () => Promise<string[]>;
+  setConversationPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   pickFile: () => Promise<string | null>;
   pickFiles: () => Promise<string[]>;
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
@@ -365,10 +379,16 @@ export const ipcClient = {
   getPlatform: () => window.lantern.getPlatform(),
   getAuthState: () => window.lantern.getAuthState(),
   discoverRelays: (port?: number) => window.lantern.discoverRelays(port),
-  login: (input: { relay: ClientRelayConfig; username: string; password: string }) =>
+  login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) =>
     window.lantern.login(input),
+  requestPasswordReset: (input: { relay: ClientRelayConfig; username: string }) => window.lantern.requestPasswordReset(input),
+  getPasswordResetStatus: (requestToken: string) => window.lantern.getPasswordResetStatus(requestToken),
+  completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => window.lantern.completePasswordReset(input),
+  changePassword: (input: { currentPassword: string; newPassword: string }) => window.lantern.changePassword(input),
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) =>
     window.lantern.register(input),
+  completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) =>
+    window.lantern.completeFirstLoginSetup(input),
   logout: () => window.lantern.logout(),
   getProfile: () => window.lantern.getProfile(),
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) =>
@@ -421,6 +441,8 @@ export const ipcClient = {
   sendTyping: (peerId: string, isTyping: boolean) => window.lantern.sendTyping(peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendAnnouncement(text, replyTo),
+  sendAnnouncementFile: (filePath: string, replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendAnnouncementFile(filePath, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendFile(peerId, filePath, replyTo),
   sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
@@ -476,11 +498,11 @@ export const ipcClient = {
   archiveConversation: (conversationId: string) => window.lantern.archiveConversation(conversationId),
   unarchiveConversation: (conversationId: string) => window.lantern.unarchiveConversation(conversationId),
   clearConversation: (conversationId: string) => window.lantern.clearConversation(conversationId),
-  forgetContactConversation: (conversationId: string) =>
-    window.lantern.forgetContactConversation(conversationId),
   getConversations: () => window.lantern.getConversations(),
   getArchivedConversationIds: () => window.lantern.getArchivedConversationIds(),
-  addManualPeer: (address: string, port: number) => window.lantern.addManualPeer(address, port),
+  getPinnedConversationIds: () => window.lantern.getPinnedConversationIds(),
+  setConversationPinned: (conversationId: string, pinned: boolean) =>
+    window.lantern.setConversationPinned(conversationId, pinned),
   pickFile: () => window.lantern.pickFile(),
   pickFiles: () => window.lantern.pickFiles(),
   pickDirectory: (defaultPath?: string) => window.lantern.pickDirectory(defaultPath),

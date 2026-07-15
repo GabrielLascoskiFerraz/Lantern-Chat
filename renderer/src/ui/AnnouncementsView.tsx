@@ -37,6 +37,11 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import {
+  isImageAttachmentName,
+  isStickerAttachmentName,
+  MessageAttachment
+} from './MessageAttachment';
 
 interface AnnouncementsViewProps {
   messages: MessageRow[];
@@ -50,6 +55,10 @@ interface AnnouncementsViewProps {
   recentMessageIds: Record<string, number>;
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onSendFile: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  transferByFileId: Record<string, { transferred: number; total: number; stage?: string; detail?: string | null }>;
+  onOpenFile: (filePath: string) => Promise<void>;
+  onSaveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
@@ -137,6 +146,10 @@ export const AnnouncementsView = ({
   recentMessageIds,
   relayConnected,
   onSend,
+  onSendFile,
+  transferByFileId,
+  onOpenFile,
+  onSaveFileAs,
   onForwardMessage,
   onEditMessage,
   onReactToMessage,
@@ -163,6 +176,7 @@ export const AnnouncementsView = ({
     canEdit: boolean;
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
+  const [filePreviewByMessageId, setFilePreviewByMessageId] = useState<Record<string, string>>({});
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -232,6 +246,7 @@ export const AnnouncementsView = ({
   };
 
   const canEditMessage = (message: MessageRow): boolean =>
+    relayConnected &&
     message.type === 'announcement' &&
     message.direction === 'out' &&
     message.senderDeviceId === profile.deviceId &&
@@ -291,11 +306,13 @@ export const AnnouncementsView = ({
 
     const canReply = !message.deletedAt && !message.localOnly;
     const canForward =
+      relayConnected &&
       !message.deletedAt &&
       !message.localOnly &&
       (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
       forwardTargets.length > 0;
     const canDelete =
+      relayConnected &&
       !message.deletedAt &&
       !message.localOnly &&
       message.direction === 'out' &&
@@ -403,6 +420,26 @@ export const AnnouncementsView = ({
   }, [messages]);
 
   useEffect(() => {
+    let cancelled = false;
+    const pending = messages.filter(
+      (message) =>
+        message.type === 'file' &&
+        Boolean(message.filePath) &&
+        isImageAttachmentName(message.fileName) &&
+        !filePreviewByMessageId[message.messageId]
+    );
+    for (const message of pending) {
+      void ipcClient.getFilePreview(message.filePath!).then((preview) => {
+        if (cancelled || !preview) return;
+        setFilePreviewByMessageId((current) => ({ ...current, [message.messageId]: preview }));
+      }).catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [filePreviewByMessageId, messages]);
+
+  useEffect(() => {
     const frameA = window.requestAnimationFrame(() => {
       scrollToBottom('auto');
       const frameB = window.requestAnimationFrame(() => {
@@ -486,7 +523,7 @@ export const AnnouncementsView = ({
                 Anúncios
               </span>
             </Text>
-            <Caption1>Comunicados para todos os usuários online. Eles somem após 24h.</Caption1>
+            <Caption1>Comunicados para todos os usuários. Eles ficam disponíveis por 24h.</Caption1>
           </div>
         </div>
       </header>
@@ -512,6 +549,11 @@ export const AnnouncementsView = ({
             const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
             const reactionPickerOpen = reactionPickerMessageId === message.messageId;
             const canEditCurrentMessage = canEditMessage(message);
+            const isFile = message.type === 'file';
+            const filePreview = filePreviewByMessageId[message.messageId];
+            const isImageFile = isFile && isImageAttachmentName(message.fileName);
+            const isStickerFile = isFile && isStickerAttachmentName(message.fileName);
+            const transfer = message.fileId ? transferByFileId[message.fileId] : undefined;
             const hasReplyReference = Boolean(message.replyToMessageId);
             const replySenderLabel = message.replyToSenderDeviceId
               ? senderLabelForMessage(message.replyToSenderDeviceId)
@@ -531,7 +573,7 @@ export const AnnouncementsView = ({
               >
                 {!outgoing && <Avatar emoji={emoji} bg={bg} size={30} />}
                 <div className={`bubble-block ${outgoing ? 'out' : 'in'}`}>
-                  <div className={`bubble ${outgoing ? 'out' : 'in'}`}>
+                  <div className={`bubble ${outgoing ? 'out' : 'in'} ${isImageFile && !filePreview ? 'media-loading' : ''} ${isImageFile && filePreview ? 'media-loaded' : ''} ${isStickerFile ? 'sticker-bubble' : ''}`}>
                     <div onContextMenu={(event) => handleBubbleContextMenu(event, message)}>
                       {Boolean(message.forwardedFromMessageId) && (
                         <div className="message-forwarded-label">
@@ -560,7 +602,19 @@ export const AnnouncementsView = ({
                           {formatRemaining(message.createdAt)}
                         </span>
                       </div>
-                      <div className="message-text">{renderMessageText(message.bodyText || '')}</div>
+                      {isFile ? (
+                        <MessageAttachment
+                          message={message}
+                          outgoing={outgoing}
+                          previewDataUrl={filePreview}
+                          previewVisible={Boolean(filePreview)}
+                          transfer={transfer}
+                          onOpenFile={onOpenFile}
+                          onSaveFileAs={onSaveFileAs}
+                        />
+                      ) : (
+                        <div className="message-text">{renderMessageText(message.bodyText || '')}</div>
+                      )}
                       <div className="bubble-meta">
                         <span className="bubble-time">
                           <Checkmark20Regular />
@@ -588,6 +642,7 @@ export const AnnouncementsView = ({
                     <button
                       type="button"
                       className="reaction-trigger"
+                      disabled={!relayConnected}
                       onClick={() =>
                         setReactionPickerMessageId((current) =>
                           current === message.messageId ? null : message.messageId
@@ -639,6 +694,7 @@ export const AnnouncementsView = ({
                         <button
                           key={reaction}
                           type="button"
+                          disabled={!relayConnected}
                           tabIndex={reactionPickerOpen ? 0 : -1}
                           className={`reaction-btn ${summary.myReaction === reaction ? 'active' : ''}`}
                           onClick={() => {
@@ -658,6 +714,7 @@ export const AnnouncementsView = ({
                         appearance="subtle"
                         size="small"
                         icon={<Delete20Regular />}
+                        disabled={!relayConnected}
                         onClick={() => setPendingDeleteMessageId(message.messageId)}
                       >
                         Excluir
@@ -695,13 +752,14 @@ export const AnnouncementsView = ({
         </div>
       )}
       <MessageComposer
-        placeholder="Enviar anúncio para todos online"
+        placeholder="Enviar anúncio para todos"
         disabled={!relayConnected}
         autoFocusKey="announcements"
         onSend={async (text, replyTo) => {
           await onSend(text, replyTo);
           setReplyDraft(null);
         }}
+        onSendFile={onSendFile}
         onSubmitEdit={async (text) => {
           if (!editingMessage) return;
           await onEditMessage(editingMessage.messageId, text);
@@ -718,7 +776,7 @@ export const AnnouncementsView = ({
       <ConfirmDialog
         open={Boolean(pendingDeleteMessageId)}
         title="Excluir anúncio"
-        description="Este anúncio será removido para você e para os usuários online."
+        description="Este anúncio será removido para todos os usuários."
         confirmLabel="Excluir"
         onCancel={() => setPendingDeleteMessageId(null)}
         onConfirm={() => {

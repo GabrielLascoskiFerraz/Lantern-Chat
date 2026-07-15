@@ -30,7 +30,6 @@ import {
   DeletePayload,
   DbMessage,
   EditMessagePayload,
-  ForgetPeerPayload,
   FileOfferPayload,
   GroupEvent,
   GroupInfo,
@@ -44,6 +43,8 @@ import {
   StickerCatalogItem,
   TypingPayload
 } from './types';
+import { AttachmentRecoveryCoordinator } from './attachmentRecoveryCoordinator';
+import { prepareLanternUserDataPath } from './userDataPath';
 
 class LanternApp {
   private mainWindow: BrowserWindow | null = null;
@@ -68,10 +69,9 @@ class LanternApp {
   private peersById = new Map<string, Peer>();
   private readonly knownOnlinePeerIds = new Set<string>();
   private readonly peerUnreachableFailures = new Map<string, { count: number; lastAt: number }>();
-  private readonly forgottenPeersById = new Map<
-    string,
-    { waitingForOffline: boolean; updatedAt: number }
-  >();
+  private readonly canonicalPinnedConversationIds = new Set<string>();
+  private readonly canonicalFavoriteMessageIds = new Set<string>();
+  private readonly canonicalHiddenMessageIds = new Set<string>();
   private activeConversationId = ANNOUNCEMENTS_CONVERSATION_ID;
   private readonly syncNotificationMaxAgeMs = 2 * 60 * 1000;
   private readonly peerUnreachableFailureThreshold = 2;
@@ -96,8 +96,10 @@ class LanternApp {
   private readonly groupFileDownloadStartTimeoutMs = 20_000;
   private readonly groupFileDownloadMaxRetries = 3;
   private readonly groupFileUploadsInFlight = new Set<string>();
-  private readonly canonicalAttachmentDownloadsInFlight = new Set<string>();
+  private readonly canonicalAttachmentRecovery = new AttachmentRecoveryCoordinator();
   private readonly canonicalAttachmentRetryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly canonicalAttachmentRetryAttempts = new Map<string, number>();
+  private readonly canonicalAttachmentMaxRetries = 5;
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -188,6 +190,7 @@ class LanternApp {
     relay: ClientRelayConfig;
     username: string;
     password: string;
+    rememberMe?: boolean;
   }): Promise<ClientAuthState> {
     const state = await this.authService.login(input);
     return this.applyAuthenticatedState(state);
@@ -201,12 +204,67 @@ class LanternApp {
     this.db.resetCacheForAuthenticatedProfile(authenticatedProfile);
     Object.assign(this.profile, authenticatedProfile);
     this.authState = state;
+    await this.refreshCanonicalUserPreferences();
     this.relay?.stop();
     this.relay?.setAuthenticatedSession(this.profile, this.authService.getToken()!);
     this.relay?.setDirectRelayEndpoint(state.endpoint);
     await this.relay?.start();
     this.emitEvent({ type: 'auth:changed', state });
     return state;
+  }
+
+  private async completeFirstLoginSetup(input: {
+    avatarEmoji: string;
+    avatarBg: string;
+    openAtLogin: boolean;
+  }): Promise<ClientAuthState> {
+    const state = await this.authService.completeProfileSetup({
+      avatarEmoji: input.avatarEmoji,
+      avatarBg: input.avatarBg
+    });
+    if (!state.user) throw new Error('O Relay não retornou o perfil configurado.');
+    const authenticatedProfile = this.profileFromAccount(state.user);
+    this.db.updateProfile(authenticatedProfile);
+    Object.assign(this.profile, authenticatedProfile);
+    this.updateStartupSettings({ openAtLogin: Boolean(input.openAtLogin) });
+    this.authState = state;
+    this.relay?.updateProfile(this.profile);
+    this.emitEvent({ type: 'auth:changed', state });
+    return state;
+  }
+
+  private async refreshCanonicalUserPreferences(): Promise<void> {
+    this.canonicalPinnedConversationIds.clear();
+    this.canonicalFavoriteMessageIds.clear();
+    this.canonicalHiddenMessageIds.clear();
+    const snapshot = await this.authService.getUserPreferences();
+    for (const preference of snapshot.conversations) {
+      if (preference.pinned) this.canonicalPinnedConversationIds.add(preference.conversationId);
+      this.db.setConversationArchived(preference.conversationId, preference.archived);
+      if (preference.manualUnread) this.db.markConversationUnread(preference.conversationId);
+    }
+    for (const preference of snapshot.messages) {
+      if (preference.favorite) {
+        this.canonicalFavoriteMessageIds.add(preference.messageId);
+        if (this.db.getMessageById(preference.messageId)) this.db.setMessageFavorite(preference.messageId, true);
+      }
+      if (preference.hidden) {
+        this.canonicalHiddenMessageIds.add(preference.messageId);
+        if (this.db.getMessageById(preference.messageId)) this.db.hideMessageForMe(preference.messageId);
+      }
+    }
+  }
+
+  private async setConversationPinned(conversationId: string, pinned: boolean): Promise<void> {
+    await this.authService.updateConversationPreference({ conversationId, pinned });
+    if (pinned) this.canonicalPinnedConversationIds.add(conversationId);
+    else this.canonicalPinnedConversationIds.delete(conversationId);
+  }
+
+  private async setConversationArchived(conversationId: string, archived: boolean): Promise<number> {
+    if (!conversationId.startsWith('dm:')) return 0;
+    await this.authService.updateConversationPreference({ conversationId, archived });
+    return this.db.setConversationArchived(conversationId, archived);
   }
 
   private async logout(): Promise<void> {
@@ -227,11 +285,6 @@ class LanternApp {
   }
 
   async start(): Promise<void> {
-    const legacyUserData = path.join(app.getPath('appData'), 'Lantern Central');
-    const renamedUserData = path.join(app.getPath('appData'), 'Lantern');
-    if (fs.existsSync(legacyUserData) && !fs.existsSync(renamedUserData)) {
-      app.setPath('userData', legacyUserData);
-    }
     app.setName('Lantern');
     app.setAppUserModelId(APP_ID);
     const appIconPath = this.resolveAppIconPath();
@@ -257,6 +310,11 @@ class LanternApp {
       this.profile = { ...authenticatedProfile };
     } else {
       this.profile = cachedProfile;
+    }
+    if (this.authState.authenticated) {
+      await this.refreshCanonicalUserPreferences().catch((error) => {
+        console.warn('[Lantern] não foi possível carregar preferências canônicas:', error instanceof Error ? error.message : String(error));
+      });
     }
     this.relaySettings = this.db.getRelaySettings();
     this.presence = new PresenceService();
@@ -286,6 +344,13 @@ class LanternApp {
         }
       },
       onDirectory: (peers) => {
+        const visiblePeerIds = new Set(peers.map((peer) => peer.deviceId));
+        for (const existingPeerId of Array.from(this.peersById.keys())) {
+          if (existingPeerId === this.profile.deviceId || visiblePeerIds.has(existingPeerId)) continue;
+          this.peersById.delete(existingPeerId);
+          this.db.removePeerCache(existingPeerId);
+          this.dropPeerRuntimeState(existingPeerId);
+        }
         for (const peer of peers) {
           const cached: Peer = {
             ...peer,
@@ -367,6 +432,7 @@ class LanternApp {
             ? `Conectado ao Relay (${endpoint})`
             : 'Conectado ao Relay'
         });
+        this.resumeActiveConversationAttachmentDownloads();
         void (async () => {
           try {
             await this.relay?.syncGroups(this.db.getGroupSeqMap());
@@ -431,10 +497,15 @@ class LanternApp {
       getAuthState: () => this.authState,
       discoverRelays: (port) => this.authService.discover(port),
       login: (input) => this.login(input),
+      requestPasswordReset: (input) => this.authService.requestPasswordReset(input),
+      getPasswordResetStatus: (requestToken) => this.authService.getPasswordResetStatus(requestToken),
+      completePasswordReset: (input) => this.authService.completePasswordReset(input),
+      changePassword: (input) => this.authService.changePassword(input),
       register: async (input) => {
         const state = await this.authService.register(input);
         return this.applyAuthenticatedState(state);
       },
+      completeFirstLoginSetup: (input) => this.completeFirstLoginSetup(input),
       logout: () => this.logout(),
       getProfile: () => this.profile,
       updateProfile: (input) => {
@@ -467,6 +538,8 @@ class LanternApp {
       sendGroupText: (groupId, text, replyTo) => this.sendGroupText(groupId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
       sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
+      sendAnnouncementFile: (filePath, replyTo) =>
+        this.messageService.sendAnnouncementFile(filePath, replyTo),
       sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
       sendGroupFile: (groupId, filePath, replyTo) => this.sendGroupFile(groupId, filePath, replyTo),
       forwardMessageToPeer: (targetPeerId, sourceMessageId) =>
@@ -477,18 +550,22 @@ class LanternApp {
         this.reactToMessage(conversationId, messageId, reaction),
       deleteMessageForEveryone: (conversationId, messageId) =>
         this.deleteMessageForEveryone(conversationId, messageId),
-      deleteMessageForMe: async (conversationId, messageId) =>
+      deleteMessageForMe: (conversationId, messageId) =>
         this.deleteMessageForMe(conversationId, messageId),
       toggleMessageFavorite: (conversationId, messageId, favorite) =>
         this.toggleMessageFavorite(conversationId, messageId, favorite),
-      getMessageFavorites: (messageIds) => this.db.getMessageFavoritesMap(messageIds),
+      getMessageFavorites: (messageIds) => Object.fromEntries(
+        messageIds.filter((messageId) => this.canonicalFavoriteMessageIds.has(messageId)).map((messageId) => [messageId, true])
+      ),
       getFavoriteMessages: (conversationId) => this.db.getFavoriteMessages(conversationId),
       resyncConversation: (conversationId) => this.resyncConversation(conversationId),
       getMessages: (conversationId, limit, before) =>
         this.getMessagesAndRecoverMissingAttachments(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.db.getMessagesByIds(messageIds),
       searchConversationMessageIds: (conversationId, query, limit, offset) =>
-        this.db.searchConversationMessageIds(conversationId, query, limit, offset),
+        this.relay?.isConnected()
+          ? this.relay.searchConversationMessageIds(conversationId, query, limit, offset)
+          : this.db.searchConversationMessageIds(conversationId, query, limit, offset),
       getConversationPreviews: (conversationIds) => this.db.getConversationPreviews(conversationIds),
       getMessageReactions: (messageIds) =>
         this.db.getMessageReactionSummary(messageIds, this.profile.deviceId),
@@ -505,16 +582,14 @@ class LanternApp {
       prepareRelayStickerFile: (fileName) => this.prepareRelayStickerFile(fileName),
       exportConversation: (conversationId, format) =>
         this.exportConversation(conversationId, format),
-      setActiveConversation: (conversationId) => {
-        this.activeConversationId = conversationId;
-        this.markConversationRead(conversationId);
-      },
+      setActiveConversation: (conversationId) => this.activateConversation(conversationId),
       markConversationRead: (conversationId) => this.markConversationRead(conversationId),
       markConversationUnread: (conversationId) => this.markConversationUnread(conversationId),
-      archiveConversation: (conversationId) => this.db.setConversationArchived(conversationId, true),
-      unarchiveConversation: (conversationId) => this.db.setConversationArchived(conversationId, false),
+      archiveConversation: (conversationId) => this.setConversationArchived(conversationId, true),
+      unarchiveConversation: (conversationId) => this.setConversationArchived(conversationId, false),
+      getPinnedConversationIds: () => Array.from(this.canonicalPinnedConversationIds),
+      setConversationPinned: (conversationId, pinned) => this.setConversationPinned(conversationId, pinned),
       clearConversation: (conversationId) => this.clearConversation(conversationId),
-      forgetContactConversation: (conversationId) => this.forgetContactConversation(conversationId),
       getConversations: () =>
         Object.fromEntries(
           this.db
@@ -522,22 +597,6 @@ class LanternApp {
             .map((conversation) => [conversation.id, conversation.unreadCount])
         ),
       getArchivedConversationIds: () => this.db.getArchivedConversationIds(),
-      addManualPeer: (address, port) => {
-        try {
-          this.updateRelaySettings({
-            automatic: false,
-            host: address,
-            port
-          });
-        } catch (error) {
-          if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
-            console.warn(
-              '[Lantern] falha ao atualizar relay manual:',
-              error instanceof Error ? error.message : String(error)
-            );
-          }
-        }
-      },
       saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
     });
 
@@ -621,7 +680,7 @@ class LanternApp {
     const window = new BrowserWindow({
       width: 1280,
       height: 820,
-      minWidth: 980,
+      minWidth: 520,
       minHeight: 620,
       show: false,
       autoHideMenuBar: true,
@@ -689,15 +748,11 @@ class LanternApp {
   }
 
   private getKnownPeers(): Peer[] {
-    return this.presence
-      .getKnownPeers(this.db, this.profile)
-      .filter((peer) => !this.isPeerForgotten(peer.deviceId));
+    return this.presence.getKnownPeers(this.db, this.profile);
   }
 
   private getVisibleOnlinePeers(): Peer[] {
-    return this.presence
-      .getOnlinePeers()
-      .filter((peer) => !this.isPeerForgotten(peer.deviceId));
+    return this.presence.getOnlinePeers();
   }
 
   private getRelaySettingsSnapshot(): {
@@ -970,15 +1025,6 @@ class LanternApp {
     const incomingIds = new Set<string>();
     let changed = false;
 
-    const discoveredPeerIds = new Set(
-      relayPeers
-        .map((peer) => peer.deviceId)
-        .filter((peerId) => peerId && peerId !== this.profile.deviceId)
-    );
-    if (this.updateForgottenPeers(discoveredPeerIds, now)) {
-      changed = true;
-    }
-
     for (const relayPeer of relayPeers) {
       if (!relayPeer.deviceId || relayPeer.deviceId === this.profile.deviceId) continue;
 
@@ -999,10 +1045,6 @@ class LanternApp {
             : now,
         source: 'relay'
       };
-
-      if (this.isPeerForgotten(peer.deviceId)) {
-        continue;
-      }
 
       incomingIds.add(peer.deviceId);
       const touched = this.presence.touchOnlinePeer(peer, this.db, { bypassCooldown: true });
@@ -1030,42 +1072,6 @@ class LanternApp {
     }
   }
 
-  private isPeerForgotten(peerId: string): boolean {
-    return this.forgottenPeersById.has(peerId);
-  }
-
-  private updateForgottenPeers(discoveredPeerIds: Set<string>, now: number): boolean {
-    let becameVisible = false;
-
-    for (const [peerId, state] of Array.from(this.forgottenPeersById.entries())) {
-      const reachableNow = discoveredPeerIds.has(peerId);
-
-      if (state.waitingForOffline) {
-        if (!reachableNow) {
-          this.forgottenPeersById.set(peerId, {
-            waitingForOffline: false,
-            updatedAt: now
-          });
-        } else {
-          this.dropPeerRuntimeState(peerId);
-        }
-        continue;
-      }
-
-      if (reachableNow) {
-        this.forgottenPeersById.delete(peerId);
-        becameVisible = true;
-        continue;
-      }
-
-      if (now - state.updatedAt > 24 * 60 * 60 * 1000) {
-        this.forgottenPeersById.delete(peerId);
-      }
-    }
-
-    return becameVisible;
-  }
-
   private getPeerFromConversationId(conversationId: string): Peer | null {
     if (!conversationId.startsWith('dm:')) return null;
     const peerId = conversationId.slice(3);
@@ -1073,9 +1079,6 @@ class LanternApp {
   }
 
   private resolvePeerForTransport(peerId: string): Peer | undefined {
-    if (this.isPeerForgotten(peerId)) {
-      return undefined;
-    }
     const online = this.presence.getPeer(peerId);
     if (online) return online;
 
@@ -1103,10 +1106,59 @@ class LanternApp {
     }
   }
 
+  private activateConversation(conversationId: string): void {
+    this.activeConversationId = conversationId;
+    if (!conversationId) return;
+    this.markConversationRead(conversationId);
+    if (!this.relay?.isConnected()) return;
+    this.queueMissingAttachmentsForRecovery(
+      conversationId,
+      this.db.getMessages(conversationId, 100)
+    );
+  }
+
+  private resumeActiveConversationAttachmentDownloads(): void {
+    const conversationId = this.activeConversationId;
+    if (!conversationId || !this.relay?.isConnected()) return;
+    this.queueMissingAttachmentsForRecovery(
+      conversationId,
+      this.db.getMessages(conversationId, 100)
+    );
+  }
+
+  private queueMissingAttachmentsForRecovery(
+    conversationId: string,
+    messages: DbMessage[]
+  ): void {
+    const groupId = this.groupIdFromConversationId(conversationId);
+    for (const message of messages) {
+      if (
+        message.type !== 'file' ||
+        !message.fileId ||
+        !message.senderDeviceId ||
+        this.hasUsableLocalAttachment(message)
+      ) {
+        continue;
+      }
+      if (groupId) {
+        void this.requestGroupAttachmentIfNeeded({
+          fileId: message.fileId,
+          groupId,
+          messageId: message.messageId,
+          senderDeviceId: message.senderDeviceId,
+          fileSize: message.fileSize || 0
+        }).catch(() => undefined);
+      } else if (conversationId.startsWith('dm:')) {
+        void this.downloadMissingCanonicalAttachment(message);
+      }
+    }
+  }
+
   private async getMessagesAndRecoverMissingAttachments(
     conversationId: string,
     limit: number,
-    before?: number
+    before?: number,
+    options: { requireRelayPage?: boolean } = {}
   ): Promise<DbMessage[]> {
     const groupId = this.groupIdFromConversationId(conversationId);
     const pageLimit = Math.max(1, Math.min(Math.trunc(limit || 50), 100));
@@ -1132,12 +1184,17 @@ class LanternApp {
             const frames = await this.relay.requestConversationHistory(
               peerUserId,
               before || Number.MAX_SAFE_INTEGER,
-              pageLimit
+              pageLimit,
+              this.db.getConversationServerCursor(conversationId, before) ||
+                Number.MAX_SAFE_INTEGER
             );
             await this.applyCanonicalHistorySnapshot(frames);
           }
         }
       } catch (error) {
+        if (options.requireRelayPage) {
+          throw error;
+        }
         console.warn(
           '[Lantern][Relay] falha ao carregar página do histórico:',
           error instanceof Error ? error.message : String(error)
@@ -1145,30 +1202,17 @@ class LanternApp {
       }
     }
 
-    const messages = this.db.getMessages(conversationId, limit, before);
-    if (!this.relay?.isConnected()) return messages;
-
+    const messages = this.db
+      .getMessages(conversationId, limit, before)
+      .filter((message) => !this.canonicalHiddenMessageIds.has(message.messageId));
     for (const message of messages) {
-      if (
-        message.type !== 'file' ||
-        !message.fileId ||
-        !message.senderDeviceId ||
-        this.hasUsableLocalAttachment(message)
-      ) {
-        continue;
-      }
-      if (groupId) {
-        void this.requestGroupAttachmentIfNeeded({
-          fileId: message.fileId,
-          groupId,
-          messageId: message.messageId,
-          senderDeviceId: message.senderDeviceId,
-          fileSize: message.fileSize || 0
-        }).catch(() => undefined);
-      } else if (conversationId.startsWith('dm:')) {
-        void this.downloadMissingCanonicalAttachment(message);
+      if (this.canonicalFavoriteMessageIds.has(message.messageId)) {
+        this.db.setMessageFavorite(message.messageId, true);
       }
     }
+    if (!this.relay?.isConnected()) return messages;
+
+    this.queueMissingAttachmentsForRecovery(conversationId, messages);
     return messages;
   }
 
@@ -1179,13 +1223,32 @@ class LanternApp {
       const retry = this.canonicalAttachmentRetryTimers.get(message.messageId);
       if (retry) clearTimeout(retry);
       this.canonicalAttachmentRetryTimers.delete(message.messageId);
+      this.canonicalAttachmentRetryAttempts.delete(message.messageId);
     } catch (error) {
+      this.fileTransfer.abortIncoming(message.fileId);
       if (this.canonicalAttachmentRetryTimers.has(message.messageId)) return;
+      const reason = error instanceof Error ? error.message : 'Falha ao baixar anexo do Relay.';
+      const attempt = (this.canonicalAttachmentRetryAttempts.get(message.messageId) || 0) + 1;
+      this.canonicalAttachmentRetryAttempts.set(message.messageId, attempt);
+      const permanent = this.isPermanentCanonicalAttachmentError(reason);
+      if (permanent || attempt > this.canonicalAttachmentMaxRetries) {
+        this.db.updateMessageStatus(message.messageId, 'failed');
+        const failed = this.db.getMessageById(message.messageId);
+        if (failed) this.emitEvent({ type: 'message:updated', message: failed });
+        this.emitEvent({
+          type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
+          messageId: message.messageId, peerId: message.senderDeviceId,
+          transferred: 0, total: message.fileSize || 0, stage: 'failed', attempt,
+          detail: reason
+        });
+        return;
+      }
       this.emitEvent({
         type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
         messageId: message.messageId, peerId: message.senderDeviceId,
         transferred: 0, total: message.fileSize || 0, stage: 'retrying',
-        detail: error instanceof Error ? error.message : 'Tentando baixar novamente do Relay.'
+        attempt,
+        detail: reason
       });
       const retry = setTimeout(() => {
         this.canonicalAttachmentRetryTimers.delete(message.messageId);
@@ -1193,18 +1256,41 @@ class LanternApp {
         if (latest && !this.hasUsableLocalAttachment(latest)) {
           void this.downloadMissingCanonicalAttachment(latest);
         }
-      }, 5_000);
+      }, Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1)));
       retry.unref?.();
       this.canonicalAttachmentRetryTimers.set(message.messageId, retry);
     }
   }
 
-  private async downloadCanonicalAttachment(message: DbMessage): Promise<void> {
-    if (!this.relay || !message.fileId || !message.fileName || !message.fileSize || !message.fileSha256) {
+  private isPermanentCanonicalAttachmentError(reason: string): boolean {
+    const normalized = reason.toLocaleLowerCase('pt-BR');
+    return (
+      normalized.includes('acesso negado') ||
+      normalized.includes('anexo ainda incompleto') ||
+      normalized.includes('não corresponde à mensagem') ||
+      normalized.includes('metadados do anexo incompletos') ||
+      normalized.includes('integridade')
+    );
+  }
+
+  private downloadCanonicalAttachment(message: DbMessage): Promise<void> {
+    if (this.hasUsableLocalAttachment(message)) return Promise.resolve();
+    return this.canonicalAttachmentRecovery.run(message.messageId, () =>
+      this.performCanonicalAttachmentDownload(message)
+    );
+  }
+
+  private async performCanonicalAttachmentDownload(message: DbMessage): Promise<void> {
+    if (
+      !this.relay ||
+      !message.fileId ||
+      !message.fileName ||
+      message.fileSize === null ||
+      message.fileSize === undefined ||
+      !message.fileSha256
+    ) {
       throw new Error('Metadados do anexo incompletos.');
     }
-    if (this.hasUsableLocalAttachment(message) || this.canonicalAttachmentDownloadsInFlight.has(message.messageId)) return;
-    this.canonicalAttachmentDownloadsInFlight.add(message.messageId);
     const offer: FileOfferPayload = {
       fileId: message.fileId,
       messageId: message.messageId,
@@ -1212,28 +1298,39 @@ class LanternApp {
       size: message.fileSize,
       sha256: message.fileSha256
     };
-    try {
-      this.fileTransfer.startIncoming(offer, message.senderDeviceId);
-      this.emitEvent({
-        type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
-        messageId: message.messageId, peerId: message.senderDeviceId,
-        transferred: 0, total: message.fileSize, stage: 'downloading'
-      });
-      await this.relay.downloadCentralAttachment(message.fileId, {
-        onStart: () => undefined,
-        onChunk: (chunk) => {
-          const progress = this.fileTransfer.onChunk(chunk);
-          this.emitEvent({
-            type: 'transfer:progress', direction: 'receive', fileId: message.fileId!,
-            messageId: message.messageId, peerId: message.senderDeviceId,
-            transferred: progress.transferred, total: progress.total, stage: 'downloading'
-          });
+    this.fileTransfer.startIncoming(offer, message.senderDeviceId);
+    this.emitEvent({
+      type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
+      messageId: message.messageId, peerId: message.senderDeviceId,
+      transferred: 0, total: message.fileSize, stage: 'downloading'
+    });
+    await this.relay.downloadCentralAttachment(message.fileId, {
+      onStart: (metadata) => {
+        const attachmentId = typeof metadata.attachmentId === 'string'
+          ? metadata.attachmentId
+          : '';
+        const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
+        const size = typeof metadata.size === 'number' ? metadata.size : -1;
+        const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
+        if (
+          attachmentId !== message.fileId ||
+          messageId !== message.messageId ||
+          size !== message.fileSize ||
+          sha256 !== message.fileSha256
+        ) {
+          throw new Error('Manifesto do anexo recebido do Relay não corresponde à mensagem.');
         }
-      });
-      await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
-    } finally {
-      this.canonicalAttachmentDownloadsInFlight.delete(message.messageId);
-    }
+      },
+      onChunk: (chunk) => {
+        const progress = this.fileTransfer.onChunk(chunk);
+        this.emitEvent({
+          type: 'transfer:progress', direction: 'receive', fileId: message.fileId!,
+          messageId: message.messageId, peerId: message.senderDeviceId,
+          transferred: progress.transferred, total: progress.total, stage: 'downloading'
+        });
+      }
+    });
+    await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
   }
 
   private enqueueIncomingFrame(frame: ProtocolFrame): void {
@@ -1261,30 +1358,39 @@ class LanternApp {
       if (!this.relay?.isConnected()) {
         throw new Error('Relay offline.');
       }
-      await this.relay.syncGroups({ [groupId]: 0 });
+      await this.getMessagesAndRecoverMissingAttachments(
+        conversationId,
+        80,
+        undefined,
+        { requireRelayPage: true }
+      );
       this.emitEvent({
         type: 'ui:toast',
         level: 'success',
-        message: 'Ressincronização do grupo solicitada ao Relay.'
+        message: 'Cache do grupo conferido e atualizado a partir do Relay.'
       });
       return;
     }
 
     if (!conversationId.startsWith('dm:')) {
-      throw new Error('Ressincronização disponível apenas para conversas diretas.');
+      throw new Error('O reparo de cache está disponível apenas para conversas.');
     }
 
     if (!conversationId.slice(3).trim()) {
-      throw new Error('Contato inválido para ressincronizar.');
+      throw new Error('Contato inválido para reparar o cache.');
     }
-    const relay = this.requireConnectedRelay();
-    relay.stop();
-    await relay.start();
+    this.requireConnectedRelay();
+    await this.getMessagesAndRecoverMissingAttachments(
+      conversationId,
+      80,
+      undefined,
+      { requireRelayPage: true }
+    );
 
     this.emitEvent({
       type: 'ui:toast',
       level: 'success',
-      message: 'Cache reconstruído a partir do histórico canônico do Relay.'
+      message: 'Cache da conversa conferido e atualizado a partir do Relay.'
     });
   }
 
@@ -1349,7 +1455,9 @@ class LanternApp {
     };
   }
 
-  private applyQueuedReactionsForMessage(message: Pick<DbMessage, 'messageId' | 'type'>): void {
+  private applyQueuedReactionsForMessage(
+    message: Pick<DbMessage, 'messageId' | 'type' | 'conversationId'>
+  ): void {
     const pendingReactions = this.db.consumePendingMessageReactions(message.messageId);
     if (pendingReactions.length === 0) {
       return;
@@ -1371,7 +1479,9 @@ class LanternApp {
     }
 
     this.emitEvent({
-      type: message.type === 'announcement' ? 'announcement:reactions' : 'message:reactions',
+      type: message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID
+        ? 'announcement:reactions'
+        : 'message:reactions',
       messageId: message.messageId,
       summary
     });
@@ -1410,7 +1520,12 @@ class LanternApp {
     });
   }
 
-  private markConversationRead(conversationId: string): void {
+  private async markConversationRead(conversationId: string): Promise<void> {
+    await this.authService.updateConversationPreference({
+      conversationId,
+      manualUnread: false,
+      readAt: Date.now()
+    });
     const readMessageIds = this.db.markConversationRead(conversationId);
     this.emitConversationUnread(conversationId);
 
@@ -1463,7 +1578,8 @@ class LanternApp {
     await this.relay?.markAnnouncementsRead(touched, readAt).catch(() => undefined);
   }
 
-  private markConversationUnread(conversationId: string): void {
+  private async markConversationUnread(conversationId: string): Promise<void> {
+    await this.authService.updateConversationPreference({ conversationId, manualUnread: true });
     this.db.markConversationUnread(conversationId);
     this.emitConversationUnread(conversationId);
   }
@@ -1476,7 +1592,7 @@ class LanternApp {
       this.mainWindow!.isFocused();
 
     if (this.activeConversationId === conversationId && isVisibleFocused) {
-      this.markConversationRead(conversationId);
+      void this.markConversationRead(conversationId).catch(() => undefined);
       return;
     }
     const before = this.db.getConversationUnreadCount(conversationId);
@@ -1535,6 +1651,15 @@ class LanternApp {
 
     if (message.type === 'file') {
       const fileLabel = (message.fileName || '').trim() || 'arquivo';
+      if (message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+        this.notifications.notifyAnnouncement(
+          `Novo anexo: ${fileLabel}`,
+          sender ? { emoji: sender.avatarEmoji, bg: sender.avatarBg } : undefined,
+          message.messageId,
+          message.createdAt
+        );
+        return;
+      }
       this.notifications.notifyMessage(
         sender?.displayName || 'Novo anexo',
         `Enviou um arquivo: ${fileLabel}`,
@@ -1622,17 +1747,6 @@ class LanternApp {
     this.knownOnlinePeerIds.delete(peerId);
     this.peerUnreachableFailures.delete(peerId);
     return this.presence.markPeerOffline(peerId);
-  }
-
-  private forgetPeerLocally(peerId: string): void {
-    const now = Date.now();
-    this.forgottenPeersById.set(peerId, {
-      waitingForOffline: true,
-      updatedAt: now
-    });
-    this.db.removePeerCache(peerId);
-    this.peersById.delete(peerId);
-    this.dropPeerRuntimeState(peerId);
   }
 
   private markPeerUnreachable(
@@ -1731,7 +1845,7 @@ class LanternApp {
           void this.downloadMissingCanonicalAttachment(source);
           throw new Error('Este anexo ainda está sendo recebido. Tente novamente em instantes.');
         }
-        throw new Error('Este anexo não está mais disponível neste dispositivo.');
+        throw new Error('Este anexo não está disponível no cache nem pôde ser recuperado do Relay.');
       }
       const sourceFilePath = source.filePath!;
       return this.messageService.sendFile(cleanTargetPeerId, sourceFilePath, undefined, {
@@ -1811,11 +1925,11 @@ class LanternApp {
     return targetMessage;
   }
 
-  private toggleMessageFavorite(
+  private async toggleMessageFavorite(
     conversationId: string,
     messageId: string,
     favorite: boolean
-  ): boolean {
+  ): Promise<boolean> {
     const existing = this.db.getMessageById(messageId);
     if (!existing || existing.deletedAt) {
       throw new Error('Mensagem não encontrada para favoritar.');
@@ -1824,7 +1938,10 @@ class LanternApp {
       throw new Error('Mensagem não pertence a esta conversa.');
     }
 
+    await this.authService.updateMessagePreference({ messageId, favorite: Boolean(favorite) });
     const nextFavorite = this.db.setMessageFavorite(messageId, Boolean(favorite));
+    if (nextFavorite) this.canonicalFavoriteMessageIds.add(messageId);
+    else this.canonicalFavoriteMessageIds.delete(messageId);
     this.emitEvent({
       type: 'message:favorite',
       conversationId: existing.conversationId,
@@ -1912,13 +2029,15 @@ class LanternApp {
     return updated || null;
   }
 
-  private deleteMessageForMe(conversationId: string, messageId: string): DbMessage | null {
+  private async deleteMessageForMe(conversationId: string, messageId: string): Promise<DbMessage | null> {
     const existing = this.db.getMessageById(messageId);
     if (!existing) return null;
     if (existing.conversationId !== conversationId) {
       throw new Error('Mensagem não pertence a esta conversa.');
     }
+    await this.authService.updateMessagePreference({ messageId, hidden: true });
     const hidden = this.db.hideMessageForMe(messageId);
+    this.canonicalHiddenMessageIds.add(messageId);
     if (!hidden) return null;
     this.notifications.closeMessageNotification(messageId);
     this.emitEvent({
@@ -1934,13 +2053,33 @@ class LanternApp {
     format: 'txt' | 'html'
   ): Promise<{ canceled: boolean; filePath: string | null }> {
     const normalizedFormat = format === 'html' ? 'html' : 'txt';
-    const messages = this.db.getExportMessages(conversationId);
-    const conversationName =
-      conversationId === ANNOUNCEMENTS_CONVERSATION_ID
-        ? 'Anuncios'
-        : this.getPeerFromConversationId(conversationId)?.displayName ||
-          this.db.getCachedPeerById(conversationId.replace(/^dm:/, ''))?.displayName ||
-          'Conversa';
+    if (!this.relay?.isConnected()) throw new Error('Conecte-se ao Relay para exportar o histórico completo.');
+    const canonicalExport = await this.authService.getConversationExport(conversationId);
+    const conversationName = canonicalExport.title;
+    const messages: DbMessage[] = canonicalExport.records.map((record) => ({
+      messageId: record.messageId,
+      conversationId,
+      direction: record.senderUserId === this.profile.deviceId ? 'out' : 'in',
+      senderDeviceId: record.senderUserId,
+      receiverDeviceId: null,
+      type: record.type,
+      bodyText: record.text || null,
+      fileId: null,
+      fileName: record.fileName || null,
+      fileSize: record.fileSize || null,
+      fileSha256: null,
+      filePath: null,
+      status: 'delivered',
+      reaction: null,
+      deletedAt: null,
+      replyToMessageId: null,
+      replyToSenderDeviceId: null,
+      replyToType: null,
+      replyToPreviewText: null,
+      replyToFileName: null,
+      editedAt: record.editedAt || null,
+      createdAt: record.createdAt
+    }));
     const safeName = conversationName.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'conversa';
     const defaultPath = path.join(
       app.getPath('documents'),
@@ -1963,25 +2102,26 @@ class LanternApp {
 
     const content =
       normalizedFormat === 'html'
-        ? this.renderConversationExportHtml(conversationName, messages)
-        : this.renderConversationExportText(conversationName, messages);
+        ? this.renderConversationExportHtml(conversationName, messages, canonicalExport.users)
+        : this.renderConversationExportText(conversationName, messages, canonicalExport.users);
     await fs.promises.writeFile(result.filePath, content, 'utf8');
     return { canceled: false, filePath: result.filePath };
   }
 
-  private senderNameForExport(message: DbMessage): string {
+  private senderNameForExport(message: DbMessage, userNames: Record<string, string> = {}): string {
     if (message.senderDeviceId === this.profile.deviceId) {
       return 'Você';
     }
+    if (userNames[message.senderDeviceId]) return userNames[message.senderDeviceId];
     const peer = this.peersById.get(message.senderDeviceId) || this.db.getCachedPeerById(message.senderDeviceId);
     return peer?.displayName || `Contato ${message.senderDeviceId.slice(0, 6)}`;
   }
 
-  private renderConversationExportText(title: string, messages: DbMessage[]): string {
+  private renderConversationExportText(title: string, messages: DbMessage[], userNames: Record<string, string> = {}): string {
     const lines = [`Lantern - ${title}`, `Exportado em ${new Date().toLocaleString('pt-BR')}`, ''];
     for (const message of messages) {
       const time = new Date(message.createdAt).toLocaleString('pt-BR');
-      const sender = this.senderNameForExport(message);
+      const sender = this.senderNameForExport(message, userNames);
       const edited = message.editedAt ? ' (editada)' : '';
       const body =
         message.type === 'file'
@@ -2005,11 +2145,11 @@ class LanternApp {
       .replace(/'/g, '&#39;');
   }
 
-  private renderConversationExportHtml(title: string, messages: DbMessage[]): string {
+  private renderConversationExportHtml(title: string, messages: DbMessage[], userNames: Record<string, string> = {}): string {
     const rows = messages
       .map((message) => {
         const time = new Date(message.createdAt).toLocaleString('pt-BR');
-        const sender = this.senderNameForExport(message);
+        const sender = this.senderNameForExport(message, userNames);
         const body =
           message.type === 'file'
             ? `[arquivo] ${message.fileName || 'Arquivo'} (${message.fileSize || 0} bytes)`
@@ -2111,12 +2251,14 @@ class LanternApp {
     let result: { ok: boolean; finalPath: string; messageId: string; peerId: string };
     try {
       result = await this.fileTransfer.finalize(fileId);
-    } catch {
-      const pending = this.db.getMessageByFileId(fileId);
-      if (pending?.senderDeviceId === senderDeviceId) {
-        void this.downloadMissingCanonicalAttachment(pending);
-      }
-      return;
+    } catch (error) {
+      // Propaga para downloadMissingCanonicalAttachment agendar a tentativa
+      // somente depois que o marcador in-flight for liberado no finally.
+      throw new Error(
+        error instanceof Error
+          ? `Falha ao finalizar anexo: ${error.message}`
+          : 'Falha ao finalizar anexo recebido.'
+      );
     }
 
     this.db.updateFilePath(fileId, result.finalPath, result.ok ? 'delivered' : 'failed');
@@ -2138,12 +2280,9 @@ class LanternApp {
       this.emitEvent({
         type: 'ui:toast',
         level: 'error',
-        message: 'Falha na validação do anexo recebido. O remetente irá reenviar.'
+        message: 'Falha na validação do anexo recebido. O Lantern tentará baixá-lo novamente do Relay.'
       });
-      if (updated?.senderDeviceId === senderDeviceId) {
-        void this.downloadMissingCanonicalAttachment(updated);
-      }
-      return;
+      throw new Error('Falha na validação de integridade do anexo recebido.');
     }
 
     const ackPeer =
@@ -2241,16 +2380,11 @@ class LanternApp {
     deliverySource: 'live' | 'sync' = 'live'
   ): Promise<void> {
     if (frame.from === this.profile.deviceId) {
+      // O identificador canônico representa o usuário, não uma instalação.
+      // Frames da própria conta podem ter sido enviados por outra sessão e
+      // precisam atualizar este dispositivo imediatamente.
+      await this.applyOwnCanonicalFrame(frame);
       return;
-    }
-
-    const forgottenState = this.forgottenPeersById.get(frame.from);
-    if (forgottenState?.waitingForOffline && frame.type !== 'announce') {
-      return;
-    }
-    if (forgottenState && !forgottenState.waitingForOffline) {
-      this.forgottenPeersById.delete(frame.from);
-      this.emitEvent({ type: 'peers:updated', peers: this.getVisibleOnlinePeers() });
     }
 
     const peer = this.peersById.get(frame.from) || this.resolvePeerForTransport(frame.from);
@@ -2310,10 +2444,12 @@ class LanternApp {
           replyToFileName: replyTo?.fileName || null,
           forwardedFromMessageId,
           editedAt: null,
+          serverSeq: frame.serverSeq ?? null,
           createdAt
         };
 
         const inserted = this.db.saveMessage(row);
+        this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
         if (inserted) {
           this.bumpUnreadIfBackground(conversationId, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
@@ -2381,10 +2517,12 @@ class LanternApp {
             typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)
               ? this.normalizeInboundCreatedAt(payload.editedAt)
               : null,
+          serverSeq: frame.serverSeq ?? null,
           createdAt
         };
 
         const inserted = this.db.saveMessage(row);
+        this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
         if (inserted) {
           this.bumpUnreadIfBackground(ANNOUNCEMENTS_CONVERSATION_ID, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
@@ -2457,7 +2595,7 @@ class LanternApp {
           break;
         }
 
-        const isAnnouncementReaction = target.type === 'announcement';
+        const isAnnouncementReaction = target.conversationId === ANNOUNCEMENTS_CONVERSATION_ID;
         const summary = this.db.setMessageReaction(
           payload.targetMessageId,
           frame.from,
@@ -2546,13 +2684,16 @@ class LanternApp {
       }
       case 'file:offer': {
         const payload = frame.payload as FileOfferPayload;
+        const isAnnouncementFile = frame.to === null;
         const replyTo = this.normalizeReplyPayload(payload.replyTo);
         const forwardedFromMessageId =
           typeof payload.forwardedFromMessageId === 'string' &&
           payload.forwardedFromMessageId.trim().length > 0
             ? payload.forwardedFromMessageId.trim()
             : null;
-        const conversationId = this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
+        const conversationId = isAnnouncementFile
+          ? ANNOUNCEMENTS_CONVERSATION_ID
+          : this.db.ensureDmConversation(frame.from, activePeer?.displayName || frame.from);
         const normalizedCreatedAt = this.normalizeInboundCreatedAt(frame.createdAt);
         const createdAt = this.db.reserveConversationTimestamp(
           conversationId,
@@ -2573,17 +2714,7 @@ class LanternApp {
               this.emitEvent({ type: 'message:updated', message: waiting });
             }
           }
-          this.fileTransfer.startIncoming(payload, frame.from);
-          this.emitEvent({
-            type: 'transfer:progress',
-            direction: 'receive',
-            fileId: payload.fileId,
-            messageId: payload.messageId,
-            peerId: frame.from,
-            transferred: 0,
-            total: payload.size
-          });
-        } else if (deliverySource === 'live') {
+        } else if (deliverySource === 'live' && !isAnnouncementFile) {
           await this.sendDeliveredAckBestEffort(frame.from, payload.messageId, activePeer);
         }
 
@@ -2592,7 +2723,7 @@ class LanternApp {
           conversationId,
           direction: 'in',
           senderDeviceId: frame.from,
-          receiverDeviceId: this.profile.deviceId,
+          receiverDeviceId: isAnnouncementFile ? null : this.profile.deviceId,
           type: 'file',
           bodyText: null,
           fileId: payload.fileId,
@@ -2613,10 +2744,12 @@ class LanternApp {
           forwardedFromMessageId:
             forwardedFromMessageId || existingMessage?.forwardedFromMessageId || null,
           editedAt: existingMessage?.editedAt || null,
+          serverSeq: frame.serverSeq ?? existingMessage?.serverSeq ?? null,
           createdAt
         };
 
         const inserted = this.db.saveMessage(row);
+        this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
         if (inserted) {
           this.bumpUnreadIfBackground(conversationId, row.createdAt);
           this.emitEvent({ type: 'message:received', message: row });
@@ -2626,7 +2759,7 @@ class LanternApp {
             deliverySource,
             activePeer
               ? {
-                  displayName: activePeer.displayName || 'Novo anexo',
+                  displayName: isAnnouncementFile ? 'Novo anúncio' : activePeer.displayName || 'Novo anexo',
                   avatarEmoji: activePeer.avatarEmoji,
                   avatarBg: activePeer.avatarBg
                 }
@@ -2683,16 +2816,19 @@ class LanternApp {
         replyToType: replyTo?.type || null, replyToPreviewText: replyTo?.previewText || null,
         replyToFileName: replyTo?.fileName || null,
         forwardedFromMessageId: payload.forwardedFromMessageId || null,
-        editedAt: null, createdAt: frame.createdAt
+        editedAt: null, serverSeq: frame.serverSeq ?? null, createdAt: frame.createdAt
       };
       const inserted = this.db.saveMessage(row);
+      this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: this.db.getMessageById(frame.messageId) || row });
       return;
     }
-    if (frame.type === 'file:offer' && frame.to) {
+    if (frame.type === 'file:offer') {
       const payload = frame.payload as FileOfferPayload;
       const replyTo = this.normalizeReplyPayload(payload.replyTo);
-      const conversationId = this.db.ensureDmConversation(frame.to, this.peersById.get(frame.to)?.displayName || frame.to);
+      const conversationId = frame.to === null
+        ? ANNOUNCEMENTS_CONVERSATION_ID
+        : this.db.ensureDmConversation(frame.to, this.peersById.get(frame.to)?.displayName || frame.to);
       const row: DbMessage = {
         messageId: frame.messageId, conversationId, direction: 'out',
         senderDeviceId: this.profile.deviceId, receiverDeviceId: frame.to, type: 'file',
@@ -2704,9 +2840,10 @@ class LanternApp {
         replyToType: replyTo?.type || null, replyToPreviewText: replyTo?.previewText || null,
         replyToFileName: replyTo?.fileName || null,
         forwardedFromMessageId: payload.forwardedFromMessageId || null,
-        editedAt: null, createdAt: frame.createdAt
+        editedAt: null, serverSeq: frame.serverSeq ?? null, createdAt: frame.createdAt
       };
       const inserted = this.db.saveMessage(row);
+      this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
       const stored = this.db.getMessageById(frame.messageId) || row;
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: stored });
       if (
@@ -2740,7 +2877,7 @@ class LanternApp {
       this.emitEvent({ type: 'message:reactions', messageId: payload.targetMessageId, summary });
       return;
     }
-    if ((frame.type === 'chat:clear' || frame.type === 'chat:forget') && frame.to) {
+    if (frame.type === 'chat:clear' && frame.to) {
       const conversationId = `dm:${frame.to}`;
       this.db.clearConversation(conversationId);
       this.emitEvent({ type: 'conversation:cleared', conversationId });
@@ -2761,7 +2898,6 @@ class LanternApp {
     }
     this.knownOnlinePeerIds.clear();
     this.peerUnreachableFailures.clear();
-    this.forgottenPeersById.clear();
     try {
       this.tray?.destroy();
     } catch {
@@ -2777,7 +2913,8 @@ class LanternApp {
   private clearCanonicalAttachmentRetries(): void {
     for (const timer of this.canonicalAttachmentRetryTimers.values()) clearTimeout(timer);
     this.canonicalAttachmentRetryTimers.clear();
-    this.canonicalAttachmentDownloadsInFlight.clear();
+    this.canonicalAttachmentRetryAttempts.clear();
+    this.canonicalAttachmentRecovery.clear();
   }
 
   private clearConversationLocal(conversationId: string): void {
@@ -2790,8 +2927,7 @@ class LanternApp {
 
   private async clearConversation(conversationId: string): Promise<void> {
     if (!conversationId.startsWith('dm:')) {
-      this.clearConversationLocal(conversationId);
-      return;
+      throw new Error('Limpar conversa está disponível apenas para conversas diretas.');
     }
     const peerId = conversationId.slice(3).trim();
     if (!peerId) throw new Error('Conversa canônica inválida.');
@@ -2800,24 +2936,6 @@ class LanternApp {
       createdAt: Date.now(), payload: { scope: 'dm' }
     } satisfies ProtocolFrame<ClearConversationPayload>);
     this.clearConversationLocal(conversationId);
-  }
-
-  private async forgetContactConversation(conversationId: string): Promise<void> {
-    if (!conversationId.startsWith('dm:')) {
-      this.clearConversationLocal(conversationId);
-      return;
-    }
-
-    const peerId = conversationId.slice(3);
-    await this.sendCanonicalFrame({
-      type: 'chat:forget', messageId: randomUUID(), from: this.profile.deviceId, to: peerId,
-      createdAt: Date.now(), payload: { scope: 'dm' }
-    } satisfies ProtocolFrame<ForgetPeerPayload>);
-    this.clearConversationLocal(conversationId);
-
-    this.db.removeConversation(conversationId);
-    this.forgetPeerLocally(peerId);
-    this.emitEvent({ type: 'peers:updated', peers: this.getVisibleOnlinePeers() });
   }
 
   private removeManagedAttachment(filePath: string): void {
@@ -2851,12 +2969,11 @@ class LanternApp {
   }
 
   private markGroupMissingOnRelay(groupId: string): void {
-    this.db.markGroupMissingOnRelay(groupId, true);
-    this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
+    this.deleteLocalGroup(groupId);
     this.emitEvent({
       type: 'ui:toast',
       level: 'warning',
-      message: 'Este grupo não existe mais no Relay. O envio foi bloqueado; você pode excluir a conversa localmente.'
+      message: 'O Relay não reconhece mais este grupo. O cache inválido foi removido automaticamente.'
     });
   }
 
@@ -2872,6 +2989,7 @@ class LanternApp {
 
   private getVisibleGroups(): GroupInfo[] {
     return this.db.getGroups().filter((group) => {
+      if (group.missingOnRelay) return false;
       const member = this.db
         .getGroupMembers(group.groupId)
         .find((candidate) => candidate.deviceId === this.profile.deviceId);
@@ -3349,17 +3467,10 @@ class LanternApp {
         detail: retryCount > 0 ? 'Baixando novamente' : 'Aguardando o Relay'
       });
 
-      const requestId = await this.relay?.requestGroupFile(fileId, nextChunkIndex).catch(() => null);
-      if (!requestId) {
-        this.scheduleGroupFileDownloadRetry(
-          { fileId, groupId, messageId, senderDeviceId },
-          'Relay indisponível durante a solicitação.'
-        );
-        completion.resolve();
-        await completion.promise;
-        return;
-      }
-
+      // Reserva o requestId e todo o rastreamento antes de enviar. Em uma LAN
+      // rápida, o Relay pode responder no mesmo tick do callback de send; se o
+      // registro vier depois, start/chunks/complete são descartados como órfãos.
+      const requestId = randomUUID();
       this.groupFileDownloadRequestIdByFileId.set(fileId, requestId);
       this.groupFileDownloadByRequestId.set(requestId, {
         fileId,
@@ -3386,6 +3497,20 @@ class LanternApp {
         updatedAt: Date.now()
       });
       this.scheduleGroupFileDownloadTimeout(requestId);
+
+      const requested = await this.relay
+        ?.requestGroupFile(fileId, nextChunkIndex, requestId)
+        .then(() => true)
+        .catch(() => false);
+      if (!requested) {
+        this.finishGroupFileDownloadTracking(requestId);
+        this.scheduleGroupFileDownloadRetry(
+          { fileId, groupId, messageId, senderDeviceId },
+          'Relay indisponível durante a solicitação.'
+        );
+        return;
+      }
+
       await completion.promise;
     } finally {
       if (this.groupFileDownloadCompletionByFileId.get(fileId) === completion) {
@@ -3503,6 +3628,15 @@ class LanternApp {
     }
     const previous = this.db.getGroupAttachmentDownload(download.fileId);
     const retryCount = Math.max(0, previous?.retryCount || 0) + 1;
+    if (retryCount > this.groupFileDownloadMaxRetries) {
+      this.markGroupFileDownloadFailed(
+        download.fileId,
+        download.groupId,
+        download.messageId,
+        `Falha após ${this.groupFileDownloadMaxRetries} tentativas: ${reason}`
+      );
+      return;
+    }
     this.db.upsertGroupAttachmentDownload({
       fileId: download.fileId,
       groupId: download.groupId,
@@ -3660,10 +3794,15 @@ class LanternApp {
   }
 
   private handleGroupFileStart(payload: { requestId: string; fileId: string; metadata: unknown }): void {
+    const tracked = this.groupFileDownloadByRequestId.get(payload.requestId);
+    if (!tracked || tracked.fileId !== payload.fileId) return;
     const metadata = (payload.metadata && typeof payload.metadata === 'object'
       ? payload.metadata
       : null) as Record<string, unknown> | null;
-    if (!metadata) return;
+    if (!metadata) {
+      this.failGroupFileDownload(payload.requestId, 'Manifesto do anexo de grupo não encontrado.');
+      return;
+    }
     const fileId = typeof metadata.fileId === 'string' ? metadata.fileId : payload.fileId;
     const groupId = typeof metadata.groupId === 'string' ? metadata.groupId : '';
     const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
@@ -3671,22 +3810,41 @@ class LanternApp {
     const filename = typeof metadata.fileName === 'string' ? metadata.fileName : 'arquivo';
     const size = typeof metadata.fileSize === 'number' ? metadata.fileSize : 0;
     const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
-    if (!fileId || !groupId || !messageId || !senderDeviceId) return;
-
-    const tracked = this.groupFileDownloadByRequestId.get(payload.requestId);
+    if (!fileId || !groupId || !messageId || !senderDeviceId || !sha256 || size < 0) {
+      this.failGroupFileDownload(payload.requestId, 'Manifesto do anexo de grupo inválido.');
+      return;
+    }
     if (
-      !tracked ||
       tracked.fileId !== fileId ||
       tracked.groupId !== groupId ||
       tracked.messageId !== messageId ||
+      tracked.senderDeviceId !== senderDeviceId ||
       this.groupFileDownloadRequestIdByFileId.get(fileId) !== payload.requestId
     ) {
+      this.failGroupFileDownload(
+        payload.requestId,
+        'Manifesto do anexo de grupo não corresponde à solicitação.'
+      );
+      return;
+    }
+
+    const expectedMessage = this.db.getMessageById(messageId);
+    if (
+      !expectedMessage ||
+      expectedMessage.fileId !== fileId ||
+      expectedMessage.fileSize !== size ||
+      expectedMessage.fileSha256 !== sha256
+    ) {
+      this.failGroupFileDownload(
+        payload.requestId,
+        'Tamanho inválido ou SHA-256 divergente no anexo de grupo.'
+      );
       return;
     }
 
     // A replayed request can arrive after a previous download already completed.
     // Do not truncate the verified local copy just because the Relay is replaying it.
-    const existingMessage = this.db.getMessageById(messageId);
+    const existingMessage = expectedMessage;
     if (this.hasUsableLocalAttachment(existingMessage)) {
       this.clearGroupFileDownloadRetry(fileId);
       this.finishGroupFileDownloadTracking(payload.requestId);
@@ -4582,7 +4740,7 @@ class LanternApp {
   }
 
   private handleRelayAnnouncementExpiry(messageIds: string[]): void {
-    const removedIds = this.db.purgeAnnouncementMessageIds(messageIds);
+    const removedIds = this.purgeLocalAnnouncementMessages(messageIds);
     for (const messageId of removedIds) {
       this.emitEvent({
         type: 'message:removed',
@@ -4592,13 +4750,23 @@ class LanternApp {
     }
   }
 
+  private purgeLocalAnnouncementMessages(messageIds: string[]): string[] {
+    for (const messageId of messageIds) {
+      const message = this.db.getMessageById(messageId);
+      if (message?.conversationId === ANNOUNCEMENTS_CONVERSATION_ID && message.filePath) {
+        this.removeManagedAttachment(message.filePath);
+      }
+    }
+    return this.db.purgeAnnouncementMessageIds(messageIds);
+  }
+
   private async handleRelayAnnouncementSnapshot(
     frames: ProtocolFrame[],
     reactions: Record<string, Record<string, '👍' | '👎' | '❤️' | '😢' | '😊' | '😂'>> = {},
     reads: Record<string, Record<string, number>> = {}
   ): Promise<void> {
     const announceFrames = frames
-      .filter((frame) => frame.type === 'announce')
+      .filter((frame) => frame.type === 'announce' || (frame.type === 'file:offer' && frame.to === null))
       .sort((a, b) => {
         if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
         return a.messageId.localeCompare(b.messageId);
@@ -4606,6 +4774,14 @@ class LanternApp {
     const snapshotIds = new Set(announceFrames.map((frame) => frame.messageId));
 
     for (const frame of announceFrames) {
+      if (frame.type === 'file:offer') {
+        if (frame.from === this.profile.deviceId) {
+          await this.applyOwnCanonicalFrame(frame);
+        } else {
+          await this.handleIncomingFrame(frame, 'sync');
+        }
+        continue;
+      }
       if (frame.from === this.profile.deviceId) {
         const existing = this.db.getMessageById(frame.messageId);
         if (!existing) {
@@ -4664,7 +4840,7 @@ class LanternApp {
     const localIds = this.db.getActiveAnnouncementMessageIds();
     const missingIds = localIds.filter((id) => !snapshotIds.has(id));
     if (missingIds.length > 0) {
-      const removedIds = this.db.purgeAnnouncementMessageIds(missingIds);
+      const removedIds = this.purgeLocalAnnouncementMessages(missingIds);
       for (const messageId of removedIds) {
         this.emitEvent({
           type: 'message:removed',
@@ -4751,12 +4927,11 @@ class LanternApp {
 const bootstrap = async (): Promise<void> => {
   const instanceTag = (process.env.LANTERN_INSTANCE || '').trim();
   const isMultiInstanceDev = Boolean(instanceTag);
-
-  if (instanceTag) {
-    const safeTag = instanceTag.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const defaultUserData = app.getPath('userData');
-    app.setPath('userData', path.join(defaultUserData, `instance-${safeTag}`));
-  }
+  app.setName('Lantern');
+  app.setPath(
+    'userData',
+    prepareLanternUserDataPath(app.getPath('appData'), instanceTag)
+  );
 
   if (!isMultiInstanceDev) {
     const gotLock = app.requestSingleInstanceLock();

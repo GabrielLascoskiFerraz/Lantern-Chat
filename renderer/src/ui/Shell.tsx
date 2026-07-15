@@ -1,4 +1,5 @@
 import { Button, Spinner, Text } from '@fluentui/react-components';
+import { ArrowLeft20Regular } from '@fluentui/react-icons';
 import { Component, ErrorInfo, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { ipcClient } from '../api/ipcClient';
 import { useLanternStore } from '../state/store';
@@ -84,6 +85,7 @@ export const Shell = () => {
     announcementReadsByMessage,
     favoriteByMessageId,
     archivedConversationIds,
+    pinnedConversationIds,
     conversationPreviewById,
     recentMessageIds,
     unreadByConversation,
@@ -94,6 +96,7 @@ export const Shell = () => {
     sendGroupText,
     sendTyping,
     sendAnnouncement,
+    sendAnnouncementFile,
     sendFile,
     sendGroupFile,
     forwardMessageToPeer,
@@ -108,8 +111,8 @@ export const Shell = () => {
     markConversationUnread,
     archiveConversation,
     unarchiveConversation,
+    setConversationPinned,
     clearConversation,
-    forgetContactConversation,
     createGroup,
     updateGroup,
     addGroupMembers,
@@ -207,6 +210,10 @@ export const Shell = () => {
           reactionsByMessageId={announcementReactionsByMessage}
           readsByMessageId={announcementReadsByMessage}
           onSend={(text, replyTo) => sendAnnouncement(text, replyTo)}
+          onSendFile={(filePath, replyTo) => sendAnnouncementFile(filePath, replyTo)}
+          transferByFileId={transferMap}
+          onOpenFile={openFile}
+          onSaveFileAs={saveFileAs}
           onEditMessage={(messageId, text) => editMessage(ANNOUNCEMENTS_ID, messageId, text)}
           relayConnected={Boolean(relaySettings?.connected)}
           onForwardMessage={async (targetPeerIds, sourceMessageId) => {
@@ -282,10 +289,10 @@ export const Shell = () => {
         isGroup={Boolean(group)}
         groupMemberCount={groupMembers.filter((member) => member.status === 'active').length}
         groupDescription={group?.description || ''}
-        groupUnavailable={Boolean(group?.missingOnRelay)}
         groupPinnedMessageIds={group ? groupPinnedMessageIdsById[group.groupId] || [] : []}
         senderProfilesById={senderProfilesById}
         peerOnline={peerOnline}
+        relayConnected={Boolean(relaySettings?.connected)}
         forwardTargets={forwardTargets}
         onlinePeerIds={onlinePeerIds}
         peerTyping={Boolean(typingByConversation[conversationId])}
@@ -298,9 +305,7 @@ export const Shell = () => {
         hasMoreOlder={hasMoreHistory}
         loadingOlder={loadingOlderHistory}
         onSend={(text, replyTo) =>
-          group?.missingOnRelay
-            ? Promise.resolve()
-            : group
+          group
             ? sendGroupText(group.groupId, text, replyTo)
             : peer
             ? sendText(peer.deviceId, text, replyTo)
@@ -314,9 +319,7 @@ export const Shell = () => {
             : Promise.resolve()
         }
         onSendFile={(filePath, replyTo) =>
-          group?.missingOnRelay
-            ? Promise.resolve()
-            : group
+          group
             ? sendGroupFile(group.groupId, filePath, replyTo)
             : peer
             ? sendFile(peer.deviceId, filePath, replyTo)
@@ -352,7 +355,6 @@ export const Shell = () => {
         onExportConversation={(format) => exportConversation(conversationId, format)}
         onResyncConversation={() => resyncConversation(conversationId)}
         onClearConversation={() => clearConversation(conversationId)}
-        onForgetContactConversation={() => forgetContactConversation(conversationId)}
         onOpenFile={openFile}
         onSaveFileAs={saveFileAs}
         recentMessageIds={recentMessageIds}
@@ -407,10 +409,10 @@ export const Shell = () => {
             Não foi possível carregar o Lantern
           </Text>
           <Text size={300}>
-            {startupError || 'O perfil local ainda não está disponível.'}
+            {startupError || 'O perfil da conta ainda não está disponível.'}
           </Text>
           <Text size={200} className="startup-error-help">
-            A conexão com o Relay não deve bloquear a abertura do app. Tente recarregar o estado local.
+            Tente novamente para restaurar a sessão e reconstruir o cache a partir do Relay.
           </Text>
           <div className="startup-error-actions">
             <Button appearance="primary" onClick={() => void loadInitial()}>
@@ -423,7 +425,7 @@ export const Shell = () => {
   }
 
   return (
-    <div className="shell">
+    <div className={`shell ${selectedConversationId ? 'conversation-open' : ''}`}>
       <Sidebar
         profile={profile}
         peers={peers}
@@ -435,14 +437,15 @@ export const Shell = () => {
         conversationPreviewById={conversationPreviewById}
         typingByConversation={typingByConversation}
         archivedConversationIds={archivedConversationIds}
+        pinnedConversationIds={pinnedConversationIds}
         onlinePeerIds={onlinePeerIds}
         onSearch={setSearch}
         onSelectConversation={(id) => void selectConversation(id)}
         onMarkConversationUnread={markConversationUnread}
         onArchiveConversation={archiveConversation}
         onUnarchiveConversation={unarchiveConversation}
+        onSetConversationPinned={setConversationPinned}
         onClearConversation={clearConversation}
-        onForgetContactConversation={forgetContactConversation}
         onResyncConversation={resyncConversation}
         onOpenGroupDetails={(groupId) => setGroupDetailsOpenId(groupId)}
         onLeaveGroup={leaveGroup}
@@ -475,6 +478,15 @@ export const Shell = () => {
       />
 
       <div className="pane-switcher">
+        {selectedConversationId && (
+          <Button
+            className="mobile-conversation-back"
+            appearance="subtle"
+            icon={<ArrowLeft20Regular />}
+            aria-label="Voltar para conversas"
+            onClick={() => void closeConversation()}
+          />
+        )}
         <PaneErrorBoundary key={selectedConversationId || 'empty'}>
           <PaneLayer conversationId={selectedConversationId} renderPane={renderConversationPane} />
         </PaneErrorBoundary>

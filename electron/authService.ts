@@ -7,7 +7,8 @@ import {
   AuthenticatedUser,
   ClientAuthState,
   ClientRelayConfig,
-  RelayConnectionMode
+  RelayConnectionMode,
+  UserPreferencesSnapshot
 } from './types';
 
 export type { AuthenticatedUser, ClientAuthState, ClientRelayConfig, RelayConnectionMode } from './types';
@@ -17,6 +18,7 @@ interface StoredClientConfig {
   encryptedToken?: string;
   endpoint?: string;
   deviceId: string;
+  rememberMe: boolean;
 }
 
 const DEFAULT_CONFIG: ClientRelayConfig = {
@@ -38,7 +40,7 @@ export class AuthService {
 
   constructor(private readonly userDataDir: string) {
     this.stored = this.load();
-    this.token = this.decryptToken(this.stored.encryptedToken || '');
+    this.token = this.stored.rememberMe ? this.decryptToken(this.stored.encryptedToken || '') : null;
   }
 
   getState(): ClientAuthState {
@@ -78,6 +80,7 @@ export class AuthService {
     relay: ClientRelayConfig;
     username: string;
     password: string;
+    rememberMe?: boolean;
   }): Promise<ClientAuthState> {
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);
@@ -100,6 +103,7 @@ export class AuthService {
     }
     this.stored.relay = relay;
     this.stored.endpoint = endpoint;
+    this.stored.rememberMe = input.rememberMe !== false;
     this.token = body.token;
     this.user = body.user;
     this.persist();
@@ -127,7 +131,7 @@ export class AuthService {
     });
     const body = (await response.json().catch(() => ({}))) as { message?: string };
     if (!response.ok) throw new Error(body.message || 'Não foi possível criar a conta.');
-    return this.login({ relay, username: input.username, password: input.password });
+    return this.login({ relay, username: input.username, password: input.password, rememberMe: true });
   }
 
   async logout(): Promise<void> {
@@ -138,6 +142,97 @@ export class AuthService {
       }).catch(() => undefined);
     }
     this.clearSession();
+  }
+
+  async completeProfileSetup(input: { avatarEmoji: string; avatarBg: string }): Promise<ClientAuthState> {
+    const body = await this.authenticatedRequest<{ user?: AuthenticatedUser; message?: string }>(
+      '/api/client/profile-setup',
+      'PATCH',
+      input
+    );
+    if (!body.user) throw new Error(body.message || 'O Relay não confirmou a configuração do perfil.');
+    this.user = body.user;
+    return this.getState();
+  }
+
+  async getUserPreferences(): Promise<UserPreferencesSnapshot> {
+    const body = await this.authenticatedRequest<{ preferences?: UserPreferencesSnapshot }>(
+      '/api/client/preferences',
+      'GET'
+    );
+    return body.preferences || { conversations: [], messages: [] };
+  }
+
+  async updateConversationPreference(input: {
+    conversationId: string;
+    pinned?: boolean;
+    archived?: boolean;
+    manualUnread?: boolean;
+    readAt?: number;
+  }): Promise<void> {
+    await this.authenticatedRequest('/api/client/preferences/conversation', 'PUT', input);
+  }
+
+  async updateMessagePreference(input: { messageId: string; favorite?: boolean; hidden?: boolean }): Promise<void> {
+    await this.authenticatedRequest('/api/client/preferences/message', 'PUT', input);
+  }
+
+  async getConversationExport(conversationId: string): Promise<{
+    title: string;
+    records: Array<{ messageId: string; senderUserId: string; type: 'text' | 'file'; text: string; fileName: string; fileSize: number; createdAt: number; editedAt: number }>;
+    users: Record<string, string>;
+  }> {
+    const query = encodeURIComponent(conversationId);
+    const body = await this.authenticatedRequest<{
+      title?: string;
+      records?: Array<{ messageId: string; senderUserId: string; type: 'text' | 'file'; text: string; fileName: string; fileSize: number; createdAt: number; editedAt: number }>;
+      users?: Record<string, string>;
+    }>(`/api/client/export?conversationId=${query}`, 'GET');
+    return {
+      title: body.title || 'Conversa',
+      records: Array.isArray(body.records) ? body.records : [],
+      users: body.users || {}
+    };
+  }
+
+  async changePassword(input: { currentPassword: string; newPassword: string }): Promise<void> {
+    await this.authenticatedRequest('/api/client/password', 'POST', input);
+  }
+
+  async requestPasswordReset(input: { relay: ClientRelayConfig; username: string }): Promise<{ requestToken: string }> {
+    const relay = this.normalizeRelay(input.relay);
+    const endpoint = await this.resolveEndpoint(relay);
+    const response = await fetch(`${this.httpBase(endpoint)}/api/client/password-reset/request`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: input.username.trim() })
+    });
+    const body = (await response.json().catch(() => ({}))) as { requestToken?: string; message?: string };
+    if (!response.ok || !body.requestToken) throw new Error(body.message || 'Não foi possível enviar a solicitação.');
+    this.stored.relay = relay;
+    this.stored.endpoint = endpoint;
+    this.persist();
+    return { requestToken: body.requestToken };
+  }
+
+  async getPasswordResetStatus(requestToken: string): Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'> {
+    if (!this.stored.endpoint) throw new Error('Conexão com o servidor indisponível.');
+    const query = encodeURIComponent(requestToken);
+    const response = await fetch(`${this.httpBase(this.stored.endpoint)}/api/client/password-reset/status?token=${query}`);
+    const body = (await response.json().catch(() => ({}))) as { status?: 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'; message?: string };
+    if (!response.ok || !body.status) throw new Error(body.message || 'Não foi possível consultar a solicitação.');
+    return body.status;
+  }
+
+  async completePasswordReset(input: { username: string; requestToken: string; newPassword: string }): Promise<void> {
+    if (!this.stored.endpoint) throw new Error('Conexão com o servidor indisponível.');
+    const response = await fetch(`${this.httpBase(this.stored.endpoint)}/api/client/password-reset/complete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input)
+    });
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    if (!response.ok) throw new Error(body.message || 'Não foi possível redefinir a senha.');
   }
 
   async discover(port = 43190): Promise<Array<{ host: string; port: number; secure: boolean }>> {
@@ -221,6 +316,25 @@ export class AuthService {
     return endpoint.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
   }
 
+  private async authenticatedRequest<T extends Record<string, unknown>>(
+    pathname: string,
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT',
+    body?: Record<string, unknown>
+  ): Promise<T> {
+    if (!this.token || !this.stored.endpoint) throw new Error('Sessão do Relay indisponível.');
+    const response = await fetch(`${this.httpBase(this.stored.endpoint)}${pathname}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        ...(body ? { 'content-type': 'application/json' } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const payload = (await response.json().catch(() => ({}))) as T & { message?: string };
+    if (!response.ok) throw new Error(payload.message || 'O Relay recusou a operação.');
+    return payload;
+  }
+
   private clearSession(): void {
     this.token = null;
     this.user = null;
@@ -236,10 +350,11 @@ export class AuthService {
         relay: this.normalizeRelay(parsed.relay || DEFAULT_CONFIG),
         encryptedToken: parsed.encryptedToken,
         endpoint: parsed.endpoint,
-        deviceId: parsed.deviceId || randomUUID()
+        deviceId: parsed.deviceId || randomUUID(),
+        rememberMe: parsed.rememberMe !== false
       };
     } catch {
-      return { relay: { ...DEFAULT_CONFIG }, deviceId: randomUUID() };
+      return { relay: { ...DEFAULT_CONFIG }, deviceId: randomUUID(), rememberMe: true };
     }
   }
 
@@ -247,7 +362,7 @@ export class AuthService {
     fs.mkdirSync(this.userDataDir, { recursive: true });
     const body: StoredClientConfig = {
       ...this.stored,
-      encryptedToken: this.token ? this.encryptToken(this.token) : undefined
+      encryptedToken: this.token && this.stored.rememberMe ? this.encryptToken(this.token) : undefined
     };
     const target = this.configFile();
     const temporary = `${target}.tmp`;

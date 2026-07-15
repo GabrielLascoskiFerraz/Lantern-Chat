@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   randomBytes,
   scryptSync,
   timingSafeEqual
@@ -112,5 +113,11 @@ export class EncryptedFields {
     const decipher = createDecipheriv('aes-256-gcm', this.key, iv);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  }
+
+  blindIndex(value: string): string {
+    return createHmac('sha256', this.key)
+      .update(`lantern-search-v1\0${value}`, 'utf8')
+      .digest('hex');
   }
 }

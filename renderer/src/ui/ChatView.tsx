@@ -17,8 +17,6 @@ import {
   DialogSurface,
   DialogTitle,
   Input,
-  ProgressBar,
-  Spinner,
   Text
 } from '@fluentui/react-components';
 import {
@@ -57,6 +55,11 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import {
+  isImageAttachmentName,
+  isStickerAttachmentName,
+  MessageAttachment
+} from './MessageAttachment';
 
 interface ChatViewProps {
   conversationId: string;
@@ -64,12 +67,12 @@ interface ChatViewProps {
   isGroup?: boolean;
   groupMemberCount?: number;
   groupDescription?: string;
-  groupUnavailable?: boolean;
   groupPinnedMessageIds?: string[];
   senderProfilesById?: Record<string, Pick<Peer, 'displayName' | 'avatarEmoji' | 'avatarBg'>>;
   forwardTargets: Peer[];
   onlinePeerIds: string[];
   peerOnline: boolean;
+  relayConnected: boolean;
   peerTyping: boolean;
   loading: boolean;
   localProfile: Profile;
@@ -106,7 +109,6 @@ interface ChatViewProps {
   onExportConversation: (format: 'txt' | 'html') => Promise<void>;
   onResyncConversation: () => Promise<void>;
   onClearConversation: () => Promise<void>;
-  onForgetContactConversation: () => Promise<void>;
   onOpenFile: (filePath: string) => Promise<void>;
   onSaveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   onSearchMessageIds: (query: string) => Promise<string[]>;
@@ -165,80 +167,13 @@ const renderOutgoingStatusIcon = (status: MessageRow['status']): ReactNode => {
   return <Checkmark20Regular className="bubble-time-icon delivered" />;
 };
 
-const formatBytes = (bytes: number | null | undefined): string => {
-  const safe = Number(bytes || 0);
-  if (!Number.isFinite(safe) || safe <= 0) return '0 B';
-  if (safe < 1024) return `${safe} B`;
-  if (safe < 1024 * 1024) return `${(safe / 1024).toFixed(1)} KB`;
-  if (safe < 1024 * 1024 * 1024) return `${(safe / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(safe / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-};
-
-const isImageName = (name: string | null): boolean => {
-  if (!name) return false;
-  return /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(name);
-};
-
-const isStickerName = (name: string | null): boolean => {
-  if (!name) return false;
-  // O envio preserva o nome da figurinha, mas adiciona UUIDs para evitar colisões locais.
-  // Portanto, o marcador pode não estar no começo nem imediatamente antes de `.gif`.
-  return (
-    /\.gif$/i.test(name) &&
-    (name.toLowerCase().includes('lantern-cat-sticker-') || name.toLowerCase().includes('lantern-sticker-'))
-  );
-};
+const isImageName = isImageAttachmentName;
 
 interface ImagePreviewState {
   dataUrl: string;
 }
 
 const imagePreviewStateCache = new Map<string, ImagePreviewState>();
-
-const transferStageLabel = (
-  message: MessageRow,
-  progressPercent: number | null,
-  progress?: {
-    stage?: 'pending' | 'reconnecting' | 'uploading' | 'downloading' | 'retrying' | 'complete' | 'failed';
-    attempt?: number;
-    detail?: string | null;
-  }
-): { label: string; tone: 'neutral' | 'active' | 'done' | 'error' } => {
-  if (progress?.stage === 'reconnecting') {
-    return { label: 'Aguardando reconexão', tone: 'neutral' };
-  }
-  if (progress?.stage === 'retrying') {
-    return {
-      label: `Baixando novamente${progress.attempt ? ` · tentativa ${progress.attempt}` : ''}`,
-      tone: 'active'
-    };
-  }
-  if (progress?.stage === 'pending') {
-    return { label: progress.detail || 'Aguardando o Relay', tone: 'neutral' };
-  }
-  if (progress?.stage === 'failed') {
-    return { label: progress.detail || 'Falha definitiva', tone: 'error' };
-  }
-  if (progress?.stage === 'complete') {
-    return { label: 'Concluído', tone: 'done' };
-  }
-  if (message.status === 'failed') {
-    return { label: 'Falha no envio', tone: 'error' };
-  }
-  if (typeof progressPercent === 'number' && progressPercent >= 0 && progressPercent < 100) {
-    return {
-      label: `${message.direction === 'out' ? 'Enviando' : 'Recebendo'} ${progressPercent}%`,
-      tone: 'active'
-    };
-  }
-  if (message.status === 'delivered' || message.status === 'read') {
-    return { label: 'Concluído', tone: 'done' };
-  }
-  if (message.status === 'sent') {
-    return { label: 'Preparando envio', tone: 'neutral' };
-  }
-  return { label: 'Processando', tone: 'neutral' };
-};
 
 const REACTIONS = ['👍', '👎', '❤️', '😂', '😊', '😢'] as const;
 type ReactionValue = (typeof REACTIONS)[number];
@@ -361,13 +296,13 @@ export const ChatView = ({
   isGroup = false,
   groupMemberCount = 0,
   groupDescription = '',
-  groupUnavailable = false,
   groupPinnedMessageIds = [],
   senderProfilesById = {},
   forwardTargets,
   onlinePeerIds,
   peerOnline,
   peerTyping,
+  relayConnected,
   loading,
   localProfile,
   messages,
@@ -394,7 +329,6 @@ export const ChatView = ({
   onExportConversation,
   onResyncConversation,
   onClearConversation,
-  onForgetContactConversation,
   onOpenFile,
   onSaveFileAs,
   onSearchMessageIds,
@@ -439,7 +373,6 @@ export const ChatView = ({
   const [matchedMessageIds, setMatchedMessageIds] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
-  const [confirmForgetOpen, setConfirmForgetOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [pendingDeleteForMeMessageId, setPendingDeleteForMeMessageId] = useState<string | null>(null);
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
@@ -532,19 +465,19 @@ export const ChatView = ({
       const isDeleted = Boolean(message.deletedAt);
       const isLocalOnly = Boolean(message.localOnly);
       const canReply = !isDeleted && !isLocalOnly;
-      const canEdit = canEditMessage(message);
+      const canEdit = relayConnected && canEditMessage(message);
       const hasForwardableAttachment = message.type !== 'file' || Boolean(message.filePath);
       const canForward =
         !isDeleted &&
         !isLocalOnly &&
         hasForwardableAttachment &&
         (message.type === 'text' || message.type === 'announcement' || message.type === 'file') &&
-        forwardTargets.length > 0;
-      const canFavorite = !isDeleted && !isLocalOnly;
+        forwardTargets.length > 0 && relayConnected;
+      const canFavorite = !isDeleted && !isLocalOnly && relayConnected;
       const isFavorite = canFavorite ? Boolean(favoriteByMessageId[message.messageId]) : false;
-      const canPin = isGroup && !isDeleted && !isLocalOnly && Boolean(onSetGroupMessagePinned);
+      const canPin = isGroup && !isDeleted && !isLocalOnly && Boolean(onSetGroupMessagePinned) && relayConnected;
       const isPinned = canPin ? groupPinnedMessageIds.includes(message.messageId) : false;
-      const canDelete = !isDeleted && !isLocalOnly;
+      const canDelete = !isDeleted && !isLocalOnly && relayConnected;
       const canDeleteForEveryone =
         canDelete &&
         message.direction === 'out' &&
@@ -593,6 +526,7 @@ export const ChatView = ({
       forwardTargets.length,
       localProfile.deviceId,
       favoriteByMessageId,
+      relayConnected,
       groupPinnedMessageIds,
       isGroup,
       onSetGroupMessagePinned
@@ -1625,6 +1559,7 @@ export const ChatView = ({
                 <button
                   type="button"
                   className="header-menu-item"
+                  disabled={!relayConnected}
                   onClick={() => {
                     setHeaderMenuOpen(false);
                     void onResyncConversation();
@@ -1633,11 +1568,12 @@ export const ChatView = ({
                   <span className="menu-item-icon">
                     <ArrowSync20Regular />
                   </span>
-                  <span>Ressincronizar conversa</span>
+                  <span>Reparar cache da conversa</span>
                 </button>
                 <button
                   type="button"
                   className="header-menu-item"
+                  disabled={!relayConnected}
                   onClick={() => {
                     setHeaderMenuOpen(false);
                     void onExportConversation('txt');
@@ -1651,6 +1587,7 @@ export const ChatView = ({
                 <button
                   type="button"
                   className="header-menu-item"
+                  disabled={!relayConnected}
                   onClick={() => {
                     setHeaderMenuOpen(false);
                     void onExportConversation('html');
@@ -1661,7 +1598,7 @@ export const ChatView = ({
                   </span>
                   <span>Exportar HTML</span>
                 </button>
-                <button
+                {!isGroup && <button
                   type="button"
                   className="header-menu-item"
                   onClick={() => {
@@ -1672,23 +1609,8 @@ export const ChatView = ({
                   <span className="menu-item-icon">
                     <Delete20Regular />
                   </span>
-                  <span>Limpar conversa</span>
-                </button>
-                {!isGroup && (
-                  <button
-                    type="button"
-                    className="header-menu-item danger"
-                    onClick={() => {
-                      setHeaderMenuOpen(false);
-                      setConfirmForgetOpen(true);
-                    }}
-                  >
-                    <span className="menu-item-icon">
-                      <Dismiss20Regular />
-                    </span>
-                    <span>Excluir contato e conversa</span>
-                  </button>
-                )}
+                  <span>Limpar conversa para mim</span>
+                </button>}
               </div>
             )}
           </div>
@@ -1745,15 +1667,11 @@ export const ChatView = ({
           const hasCounters = REACTIONS.some((reaction) => (summary.counts[reaction] || 0) > 0);
           const reactionPickerOpen = reactionPickerMessageId === message.messageId;
           const isImageFile = isFile && isImageName(message.fileName);
-          const isStickerFile = isFile && isStickerName(message.fileName);
+          const isStickerFile = isFile && isStickerAttachmentName(message.fileName);
           const previewState = previewStateByMessageId[message.messageId];
           const previewDataUrl = previewState?.dataUrl;
           const previewVisible = Boolean(previewDataUrl && visiblePreviewByMessageId[message.messageId]);
           const progress = message.fileId ? transferByFileId[message.fileId] : undefined;
-          const progressPercent =
-            progress && progress.total > 0
-              ? Math.min(100, Math.floor((progress.transferred / progress.total) * 100))
-              : null;
           const transferInProgress = Boolean(
             progress &&
               progress.total > 0 &&
@@ -1765,7 +1683,6 @@ export const ChatView = ({
             !transferInProgress &&
             (message.status === 'delivered' || message.status === 'read');
           const previewLoading = isImageFile && !previewDataUrl && !previewUnavailable;
-          const transferStage = isFile ? transferStageLabel(message, progressPercent, progress) : null;
           const hasReplyReference = Boolean(message.replyToMessageId);
           const replySenderLabel = message.replyToSenderDeviceId
             ? senderLabelForMessage(message.replyToSenderDeviceId)
@@ -1851,87 +1768,15 @@ export const ChatView = ({
                   {isDeleted ? (
                     <div className="message-deleted">Esta mensagem foi apagada.</div>
                   ) : isFile ? (
-                    <>
-                      {!isStickerFile && <div className="message-file-title">📎 {message.fileName}</div>}
-                      {isImageFile && Boolean(message.filePath) && (
-                        <button
-                          type="button"
-                          className={`message-image-preview-btn ${isStickerFile ? 'sticker-preview' : ''} ${previewDataUrl ? 'is-ready' : ''} ${
-                            previewVisible ? 'is-media-visible' : ''
-                          }`}
-                          onClick={() => void onOpenFile(message.filePath!)}
-                          disabled={!previewVisible}
-                        >
-                          {previewDataUrl && (
-                            <img
-                              src={previewDataUrl}
-                              alt={message.fileName || 'Imagem'}
-                              className="message-image-preview"
-                            />
-                          )}
-                          <div
-                            className={`message-image-preview-placeholder ${previewVisible ? 'hidden' : ''}`}
-                            aria-hidden
-                          >
-                            {previewUnavailable ? 'Pré-visualização indisponível' : 'Carregando imagem...'}
-                          </div>
-                        </button>
-                      )}
-                      {!isStickerFile && (
-                        <div className="message-file-meta">
-                          {((message.fileSize || 0) / 1024).toFixed(1)} KB · SHA-256 {message.fileSha256?.slice(0, 10)}...
-                        </div>
-                      )}
-                      {progressPercent !== null && !isStickerFile && (
-                        <div className="message-file-progress-wrap">
-                          <ProgressBar value={progressPercent / 100} thickness="medium" />
-                          <div className="message-file-progress">
-                            Transferência: {progressPercent}% · {formatBytes(progress?.transferred)} /{' '}
-                            {formatBytes(progress?.total)}
-                          </div>
-                        </div>
-                      )}
-                      {transferStage && (!isStickerFile || transferStage.tone !== 'done') && (
-                        <div className={`transfer-stage-pill ${transferStage.tone}`}>
-                          {transferStage.label}
-                        </div>
-                      )}
-                      {message.filePath && message.status !== 'failed' ? (
-                        isStickerFile ? null : (
-                        <div className="message-file-actions">
-                          <Button size="small" onClick={() => void onOpenFile(message.filePath!)}>
-                            Abrir
-                          </Button>
-                          <Button
-                            size="small"
-                            appearance="secondary"
-                            onClick={() => void onSaveFileAs(message.filePath!, message.fileName)}
-                          >
-                            Salvar como
-                          </Button>
-                        </div>
-                        )
-                      ) : message.status === 'failed' ? (
-                        <div className="inline-status error">
-                          <Caption1>Não foi possível enviar este anexo.</Caption1>
-                        </div>
-                      ) : message.status === 'delivered' || message.status === 'read' ? (
-                        <div className="inline-status pending">
-                          <Spinner size="tiny" />
-                          <Caption1>Recuperando anexo do Relay...</Caption1>
-                        </div>
-                      ) : outgoing && (message.status === 'sent' || message.status === null) ? (
-                        <div className="inline-status pending">
-                          <Clock20Regular className="bubble-time-icon pending" />
-                          <Caption1>Anexo pendente. Envia quando o contato voltar.</Caption1>
-                        </div>
-                      ) : (
-                        <div className="inline-status">
-                          <Spinner size="tiny" />
-                          <Caption1>aguardando arquivo completo...</Caption1>
-                        </div>
-                      )}
-                    </>
+                    <MessageAttachment
+                      message={message}
+                      outgoing={outgoing}
+                      previewDataUrl={previewDataUrl}
+                      previewVisible={previewVisible}
+                      transfer={progress}
+                      onOpenFile={onOpenFile}
+                      onSaveFileAs={onSaveFileAs}
+                    />
                   ) : (
                     <div className="message-text">
                       {renderMessageText(message.bodyText || '', searchQuery, (url) => {
@@ -2116,13 +1961,11 @@ export const ChatView = ({
         })}
       </div>
 
-      {(groupUnavailable || !peerOnline) && (
+      {(!relayConnected || (!isGroup && !peerOnline)) && (
         <div className="chat-offline-hint">
-          {groupUnavailable
-            ? 'Este grupo não existe mais no Relay. O envio está bloqueado, mas você pode excluir a conversa localmente.'
-            : isGroup
-            ? 'Sem conexão com o Relay. Não é possível enviar mensagens ou anexos neste grupo agora.'
-            : 'Este contato está offline. Suas mensagens e anexos ficarão pendentes e serão enviados quando ele voltar.'}
+          {!relayConnected
+            ? 'Sem conexão com o Relay. O envio fica disponível assim que a conexão for restabelecida.'
+            : 'Este contato está offline. O Relay guardará novas mensagens e entregará quando ele voltar.'}
         </div>
       )}
       {peerOnline && peerTyping && (
@@ -2138,7 +1981,7 @@ export const ChatView = ({
 
       <MessageComposer
         placeholder="Digite sua mensagem"
-        disabled={isGroup ? !peerOnline || groupUnavailable : false}
+        disabled={!relayConnected || (isGroup && !peerOnline)}
         autoFocusKey={peer.deviceId}
         onSend={async (text, replyTo) => {
           await onSend(text, replyTo);
@@ -2163,8 +2006,8 @@ export const ChatView = ({
 
       <ConfirmDialog
         open={confirmClearOpen}
-        title="Limpar conversa"
-        description="Esta ação remove toda a conversa e anexos salvos pelo Lantern neste dispositivo."
+        title="Limpar conversa para mim"
+        description="O histórico anterior será ocultado para a sua conta. A outra pessoa continuará com a conversa."
         confirmLabel="Excluir"
         onCancel={() => setConfirmClearOpen(false)}
         onConfirm={() => {
@@ -2190,7 +2033,7 @@ export const ChatView = ({
       <ConfirmDialog
         open={Boolean(pendingDeleteForMeMessageId)}
         title="Apagar para mim"
-        description="Esta mensagem será removida apenas deste dispositivo. A outra pessoa continuará vendo a mensagem."
+        description="Esta mensagem será ocultada para a sua conta em todos os dispositivos. Os demais participantes continuarão vendo a mensagem."
         confirmLabel="Apagar para mim"
         onCancel={() => setPendingDeleteForMeMessageId(null)}
         onConfirm={() => {
@@ -2248,18 +2091,6 @@ export const ChatView = ({
           </DialogBody>
         </DialogSurface>
       </Dialog>
-
-      <ConfirmDialog
-        open={confirmForgetOpen}
-        title="Excluir contato e conversa"
-        description="Isso remove o contato da sidebar e apaga a conversa/anexos para os dois usuários. O contato só volta a aparecer quando reconectar."
-        confirmLabel="Excluir"
-        onCancel={() => setConfirmForgetOpen(false)}
-        onConfirm={() => {
-          setConfirmForgetOpen(false);
-          void onForgetContactConversation();
-        }}
-      />
 
       {messageContextMenu && (
         <div

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -73,8 +73,8 @@ const restartRelay = async () => { await stopRelay(); return startRelay(); };
 
 const createWindow = () => {
   mainWindow = new BrowserWindow({
-    width: 820, height: 760, minWidth: 620, minHeight: 600, title: 'Lantern Relay',
-    backgroundColor: '#edf2fa', autoHideMenuBar: true,
+    width: 1120, height: 820, minWidth: 380, minHeight: 560, title: 'Lantern Relay',
+    backgroundColor: '#edf1f7', autoHideMenuBar: true,
     icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
@@ -88,6 +88,16 @@ ipcMain.handle('relay-ui:status', snapshot);
 ipcMain.handle('relay-ui:start', startRelay);
 ipcMain.handle('relay-ui:stop', stopRelay);
 ipcMain.handle('relay-ui:restart', restartRelay);
+ipcMain.handle('relay-ui:backup', async () => {
+  if (!relay) throw new Error('Inicie o Relay antes de criar um backup.');
+  return relay.createCanonicalBackup();
+});
+ipcMain.handle('relay-ui:openDashboard', async () => {
+  if (!relay) throw new Error('Inicie o Relay antes de abrir a administração.');
+  const settings = loadSettings();
+  const protocol = settings.tlsCertFile && settings.tlsKeyFile ? 'https' : 'http';
+  await shell.openExternal(`${protocol}://127.0.0.1:${settings.port}/`);
+});
 ipcMain.handle('relay-ui:updateSettings', async (_event, value) => { saveSettings(value); return relay ? restartRelay() : snapshot(); });
 const pickPem = async (title: string) => {
   const result = await dialog.showOpenDialog({ title, properties: ['openFile'], filters: [{ name: 'PEM', extensions: ['pem', 'crt', 'cer', 'key'] }] });

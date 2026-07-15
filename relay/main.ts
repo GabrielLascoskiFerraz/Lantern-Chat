@@ -8,9 +8,11 @@ import path from 'node:path';
 import BonjourService, { Service } from 'bonjour-service';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { GroupStore } from './groupStore';
+import { SessionRegistry } from './sessionRegistry';
 import { RelayGroupEvent, RelayGroupFileChunk } from './groupTypes';
 import { CentralStore } from './centralStore';
 import { RetentionPolicy } from './centralTypes';
+import { createSessionToken, hashToken } from './security';
 
 const RELAY_VERSION = '1.0.0';
 const RELAY_MDNS_TYPE = 'lanternrelay';
@@ -33,10 +35,10 @@ const resolveRelayDataDir = (): string => {
     : path.resolve(process.cwd(), 'dist-relay', 'main.js');
   return path.dirname(entryFile);
 };
-const ANNOUNCEMENT_STORE_FILE = process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE
+const LEGACY_ANNOUNCEMENT_STORE_FILE = process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE
   ? path.resolve(process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE)
   : path.join(resolveRelayDataDir(), 'announcements.json');
-const GROUP_STORE_FILE = process.env.LANTERN_RELAY_GROUPS_FILE
+const LEGACY_GROUP_STORE_FILE = process.env.LANTERN_RELAY_GROUPS_FILE
   ? path.resolve(process.env.LANTERN_RELAY_GROUPS_FILE)
   : path.join(resolveRelayDataDir(), 'groups.json');
 const GROUP_ATTACHMENTS_DIR = process.env.LANTERN_RELAY_GROUP_ATTACHMENTS_DIR
@@ -53,6 +55,8 @@ const RELAY_STICKER_MAX_BYTES = 20 * 1024 * 1024;
 
 const OPEN_READY_STATE = 1;
 const GROUP_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const ANNOUNCEMENT_STATE_KEY = 'announcements';
+const ANNOUNCEMENT_STATE_VERSION = 1;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -97,6 +101,7 @@ interface RelayHelloPayload {
 }
 
 interface RelayTransportFrame {
+  serverSeq?: number;
   type: string;
   messageId: string;
   from: string;
@@ -121,12 +126,14 @@ interface RelaySession {
   sessionId: string;
   socket: WebSocket;
   peer: RelayPeerInfo | null;
+  clientDeviceId: string | null;
   lastSeenAt: number;
   isAlive: boolean;
   messageQueue: Promise<void>;
   // Downloads stay ordered, but must not block this peer's commands while a
   // potentially large group attachment is being streamed.
   groupFileDownloadQueue: Promise<void>;
+  attachmentDownloadQueue: Promise<void>;
   authToken: string | null;
 }
 
@@ -489,37 +496,49 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LanternRelay</title>
+  <title>Lantern Relay</title>
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #eef3fb;
-      --bg-strong: #dfe9f7;
-      --surface: rgba(255, 255, 255, 0.82);
-      --surface-strong: rgba(255, 255, 255, 0.94);
-      --text: #142033;
-      --muted: #637188;
-      --line: rgba(88, 112, 146, 0.22);
-      --accent: #147ad6;
-      --accent-soft: rgba(20, 122, 214, 0.12);
+      --teams-bg: #edf1f7;
+      --teams-surface: #ffffff;
+      --teams-surface-2: #f4f7fd;
+      --teams-header: #f8faff;
+      --teams-border: #d4ddec;
+      --teams-text: #1a2230;
+      --teams-muted: #5e687c;
+      --teams-accent: #5b5fc7;
+      --teams-row-hover: #edf2ff;
+      --teams-row-active: #e4eaff;
+      --teams-shadow-soft: 0 8px 26px rgba(22, 39, 73, 0.07);
+      --bg: var(--teams-bg);
+      --bg-strong: var(--teams-surface-2);
+      --surface: var(--teams-surface);
+      --surface-strong: var(--teams-surface);
+      --text: var(--teams-text);
+      --muted: var(--teams-muted);
+      --line: var(--teams-border);
+      --accent: var(--teams-accent);
+      --accent-soft: color-mix(in srgb, var(--teams-accent) 12%, transparent);
       --good: #18a058;
       --warn: #d9822b;
-      --shadow: 0 22px 60px rgba(41, 66, 105, 0.16);
-      font-family: ui-rounded, "SF Pro Rounded", "Aptos", "Segoe UI", system-ui, sans-serif;
+      --shadow: var(--teams-shadow-soft);
+      font-family: "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
     }
 
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0d1420;
-        --bg-strong: #111d2d;
-        --surface: rgba(22, 34, 52, 0.78);
-        --surface-strong: rgba(27, 41, 62, 0.92);
-        --text: #edf4ff;
-        --muted: #9ba8bd;
-        --line: rgba(180, 202, 235, 0.16);
-        --accent: #6bb6ff;
-        --accent-soft: rgba(107, 182, 255, 0.13);
-        --shadow: 0 28px 80px rgba(0, 0, 0, 0.34);
+        --teams-bg: #141a26;
+        --teams-surface: #1c2433;
+        --teams-surface-2: #222d40;
+        --teams-header: #202a3b;
+        --teams-border: #33435f;
+        --teams-text: #f2f6ff;
+        --teams-muted: #c3cee4;
+        --teams-accent: #a4acff;
+        --teams-row-hover: #2a3951;
+        --teams-row-active: #324563;
+        --teams-shadow-soft: 0 8px 26px rgba(0, 0, 0, 0.34);
       }
     }
 
@@ -529,16 +548,53 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       min-height: 100vh;
       margin: 0;
       color: var(--text);
-      background:
-        radial-gradient(circle at 12% 4%, rgba(20, 122, 214, 0.20), transparent 30%),
-        radial-gradient(circle at 90% 10%, rgba(24, 160, 88, 0.15), transparent 28%),
-        linear-gradient(135deg, var(--bg), var(--bg-strong));
+      background: var(--teams-bg);
+      line-height: 1.35;
+      -webkit-font-smoothing: antialiased;
     }
 
+    .dashboard-shell {
+      display: grid;
+      min-height: 100vh;
+      grid-template-columns: 360px minmax(0, 1fr);
+    }
+
+    .dashboard-nav {
+      position: sticky;
+      top: 0;
+      display: flex;
+      height: 100vh;
+      flex-direction: column;
+      gap: 0;
+      padding: 0;
+      border-right: 1px solid var(--line);
+      background: var(--teams-surface);
+      box-shadow: var(--teams-shadow-soft);
+      z-index: 5;
+    }
+
+    .nav-brand { display: flex; min-height: 72px; align-items: center; gap: 11px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--teams-header); }
+    .nav-logo { width: 44px; height: 44px; object-fit: contain; }
+    .nav-brand strong { display: block; font-size: 17px; letter-spacing: -.02em; }
+    .nav-brand span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .dashboard-nav > div:nth-child(2) { min-height: 0; overflow: auto; }
+    .nav-caption { padding: 14px 14px 7px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .nav-links { display: grid; gap: 4px; }
+    .nav-link {
+      display: flex; min-height: 52px; align-items: center; gap: 10px; padding: 0 14px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 88%, transparent); color: var(--text); font-size: 14px; font-weight: 650; text-decoration: none;
+    }
+    .nav-link:hover { background: var(--teams-row-hover); }
+    .nav-link.active { color: var(--text); background: var(--teams-row-active); box-shadow: inset 3px 0 0 var(--teams-accent); }
+    .nav-icon { display: grid; width: 22px; place-items: center; font-size: 15px; }
+    .nav-footer { display: grid; gap: 10px; margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--line); background: var(--teams-header); }
+    .nav-footer .web-link { justify-content: center; }
+    .nav-version { color: var(--muted); font-size: 11px; line-height: 1.45; text-align: center; }
+
     .page {
-      width: min(1180px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 30px 0 42px;
+      width: 100%;
+      min-width: 0;
+      padding: 0 0 32px;
     }
 
     .hero {
@@ -546,7 +602,11 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 18px;
-      margin-bottom: 22px;
+      min-height: 72px;
+      margin-bottom: 0;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--teams-header);
     }
 
     .brand {
@@ -556,29 +616,22 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       min-width: 0;
     }
 
-    .mark {
-      display: grid;
-      width: 54px;
-      height: 54px;
-      place-items: center;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      background: linear-gradient(145deg, var(--surface-strong), var(--accent-soft));
-      box-shadow: var(--shadow);
-      font-size: 26px;
-    }
+    .hero-actions { display: flex; align-items: center; gap: 10px; }
+    .web-link { display: inline-flex; min-height: 34px; align-items: center; padding: 0 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 650; text-decoration: none; }
+
+    .mark { display: none; }
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 5vw, 44px);
-      letter-spacing: -0.055em;
-      line-height: 1;
+      font-size: 22px;
+      letter-spacing: -0.025em;
+      line-height: 1.15;
     }
 
     .subtitle {
-      margin: 7px 0 0;
+      margin: 3px 0 0;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 12px;
     }
 
     .live-pill {
@@ -587,10 +640,9 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       gap: 8px;
       padding: 9px 12px;
       border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--surface);
+      border-radius: 6px;
+      background: var(--teams-surface);
       color: var(--muted);
-      box-shadow: 0 12px 30px rgba(20, 122, 214, 0.10);
       white-space: nowrap;
     }
 
@@ -610,40 +662,39 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 14px;
-      margin-bottom: 16px;
+      gap: 10px;
+      margin: 0;
+      padding: 18px 24px 10px;
     }
 
     .card {
       border: 1px solid var(--line);
-      border-radius: 24px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(18px);
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--teams-surface) 92%, var(--teams-surface-2));
     }
 
     .metric {
-      padding: 18px;
-      min-height: 126px;
+      padding: 14px;
+      min-height: 104px;
     }
 
     .metric-label {
       color: var(--muted);
-      font-size: 13px;
+      font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.045em;
       text-transform: uppercase;
     }
 
     .metric-value {
-      margin-top: 12px;
-      font-size: 31px;
-      font-weight: 850;
-      letter-spacing: -0.05em;
+      margin-top: 9px;
+      font-size: 25px;
+      font-weight: 750;
+      letter-spacing: -0.035em;
     }
 
     .metric-note {
-      margin-top: 8px;
+      margin-top: 6px;
       color: var(--muted);
       font-size: 13px;
       overflow: hidden;
@@ -655,6 +706,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       display: grid;
       grid-template-columns: minmax(0, 1.06fr) minmax(340px, 0.94fr);
       gap: 16px;
+      padding: 6px 24px 0;
     }
 
     .section {
@@ -666,12 +718,14 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 18px 18px 10px;
+      min-height: 52px;
+      padding: 12px 14px 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
     }
 
     .section-title {
       margin: 0;
-      font-size: 18px;
+      font-size: 17px;
       letter-spacing: -0.025em;
     }
 
@@ -683,32 +737,25 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .list {
       display: grid;
       gap: 10px;
-      padding: 8px 12px 14px;
+      gap: 0;
+      padding: 0;
     }
 
     .peer,
     .announcement {
       display: grid;
       gap: 10px;
-      padding: 13px;
-      border: 1px solid var(--line);
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.34);
+      padding: 12px 14px;
+      border: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+      border-radius: 0;
+      background: transparent;
       transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      .peer,
-      .announcement {
-        background: rgba(255, 255, 255, 0.035);
-      }
     }
 
     .peer:hover,
     .announcement:hover {
-      transform: translateY(-1px);
-      border-color: rgba(20, 122, 214, 0.34);
-      background: var(--surface-strong);
+      background: var(--teams-row-hover);
     }
 
     .peer-main {
@@ -723,7 +770,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       width: 46px;
       height: 46px;
       place-items: center;
-      border-radius: 16px;
+      border-radius: 50%;
       color: #fff;
       font-size: 22px;
       box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 10px 22px rgba(0, 0, 0, 0.10);
@@ -801,7 +848,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       height: 28px;
       flex: 0 0 auto;
       place-items: center;
-      border-radius: 10px;
+      border-radius: 50%;
       color: #fff;
       font-size: 15px;
     }
@@ -814,7 +861,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     }
 
     .empty {
-      padding: 26px 18px 30px;
+      padding: 34px 18px;
       color: var(--muted);
       text-align: center;
     }
@@ -826,59 +873,110 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       text-align: center;
     }
 
-    .admin-section { margin-top: 16px; padding: 18px; }
-    .admin-grid { display: grid; grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr); gap: 14px; }
-    .admin-panel { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.2); }
+    .admin-section { margin: 16px 24px 0; padding: 14px; }
+    .admin-grid { display: grid; gap: 14px; }
+    .admin-primary { display: grid; grid-template-columns: minmax(280px, .68fr) minmax(0, 1.32fr); gap: 14px; align-items: start; }
+    .admin-operations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+    .admin-panel { padding: 12px; border: 1px solid color-mix(in srgb, var(--line) 86%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--teams-surface) 92%, var(--teams-surface-2)); }
     .admin-panel h3 { margin: 0 0 12px; font-size: 15px; }
     .admin-form { display: grid; gap: 9px; }
     .admin-form.two { grid-template-columns: 1fr 1fr; }
     .admin-form input, .admin-form select {
-      width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 12px;
-      padding: 0 11px; color: var(--text); background: var(--surface-strong); font: inherit;
+      width: 100%; min-height: 34px; border: 1px solid var(--line); border-radius: 5px;
+      padding: 0 10px; color: var(--text); background: var(--teams-surface); font: inherit;
     }
     .admin-form button, .admin-action {
-      min-height: 38px; border: 1px solid var(--line); border-radius: 12px; padding: 0 13px;
-      color: #fff; background: var(--accent); font: inherit; font-weight: 750; cursor: pointer;
+      min-height: 34px; border: 1px solid var(--line); border-radius: 6px; padding: 0 12px;
+      color: #fff; background: var(--accent); font: inherit; font-weight: 650; cursor: pointer;
     }
     .admin-action.secondary { color: var(--text); background: var(--surface-strong); }
     .admin-action.danger { color: #fff; background: #c43f3f; }
-    .admin-users { display: grid; gap: 9px; max-height: 430px; overflow: auto; }
-    .admin-user { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--line); border-radius: 15px; }
+    .admin-users { display: grid; gap: 9px; max-height: 520px; overflow: auto; padding-right: 2px; }
+    .admin-user { display: grid; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--teams-surface); }
     .admin-user-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .admin-user-fields { display: grid; grid-template-columns: minmax(120px,1fr) minmax(140px,1fr) repeat(3,auto); gap: 8px; }
-    .admin-user-fields input { min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 10px; padding: 0 9px; background: var(--surface-strong); color: var(--text); }
+    .admin-user-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .admin-user-fields input { grid-column: span 2; }
+    .admin-user-fields input { min-width: 0; min-height: 34px; border: 1px solid var(--line); border-radius: 5px; padding: 0 9px; background: var(--teams-surface); color: var(--text); }
+    .admin-user-fields button { width: 100%; min-width: 0; padding: 0 8px; }
+    .admin-sessions-list { max-height: 356px; }
     .admin-feedback { min-height: 18px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .admin-audit { display:grid; gap:7px; max-height:220px; overflow:auto; margin-top:10px; }
+    .admin-audit-row { display:grid; gap:2px; padding:8px 9px; border-bottom:1px solid var(--line); font-size:11px; }
+    .admin-audit-row span { color:var(--muted); }
     .hidden { display: none !important; }
 
     @media (max-width: 880px) {
+      .dashboard-shell { display: block; }
+      .dashboard-nav { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .dashboard-nav .nav-caption, .dashboard-nav .nav-footer { display: none; }
+      .dashboard-nav > div:nth-child(2) { overflow: hidden; }
+      .nav-links { display: flex; overflow-x: auto; }
+      .nav-link { flex: 0 0 auto; }
+      .page { width: 100%; }
       .hero {
         align-items: flex-start;
         flex-direction: column;
+        padding: 14px 16px;
       }
+      .hero-actions { width: 100%; justify-content: space-between; }
 
-      .grid,
       .content,
       .admin-grid,
+      .admin-primary,
+      .admin-operations,
       .admin-form.two,
       .admin-user-fields {
         grid-template-columns: 1fr;
       }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-inline: 16px; }
+      .content { padding-inline: 16px; }
+      .admin-section { margin-inline: 16px; }
+      .admin-user-fields input { grid-column: auto; }
+    }
+
+    @media (max-width: 560px) {
+      .nav-brand { min-height: 64px; }
+      .nav-link { min-height: 46px; padding-inline: 12px; font-size: 13px; }
+      .grid { grid-template-columns: 1fr; }
+      .hero-actions, .live-pill { width: 100%; }
+      .admin-section { padding: 12px; }
     }
   </style>
 </head>
 <body>
-  <main class="page">
+  <div class="dashboard-shell">
+    <aside class="dashboard-nav" aria-label="Navegação administrativa">
+      <div class="nav-brand">
+        <img class="nav-logo" src="/lantern-icon.png" alt="">
+        <div><strong>Lantern</strong><span>Administração do Relay</span></div>
+      </div>
+      <div>
+        <div class="nav-caption">Painel</div>
+        <nav class="nav-links">
+          <a class="nav-link active" href="#overview"><span class="nav-icon">⌂</span>Visão geral</a>
+          <a class="nav-link" href="#activity"><span class="nav-icon">◉</span>Atividade</a>
+          <a class="nav-link" href="#administration"><span class="nav-icon">♙</span>Contas e acesso</a>
+        </nav>
+      </div>
+      <div class="nav-footer">
+        <a class="web-link" href="/app/">Abrir Lantern</a>
+        <div class="nav-version">Relay local · dados persistidos neste servidor</div>
+      </div>
+    </aside>
+  <main class="page" id="overview">
     <header class="hero">
       <div class="brand">
-        <div class="mark" aria-hidden="true">✦</div>
+        <div class="mark" aria-hidden="true">L</div>
         <div>
-          <h1>LanternRelay</h1>
-          <p class="subtitle">Painel em tempo real do servidor de ponte Lantern</p>
+          <h1>Visão geral</h1>
+          <p class="subtitle">Saúde do Relay, atividade e administração do Lantern</p>
         </div>
       </div>
-      <div class="live-pill" aria-live="polite">
-        <span id="status-dot" class="dot"></span>
-        <span id="status-text">Atualizando...</span>
+      <div class="hero-actions">
+        <div class="live-pill" aria-live="polite">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">Atualizando...</span>
+        </div>
       </div>
     </header>
 
@@ -925,7 +1023,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </article>
     </section>
 
-    <section class="content">
+    <section class="content" id="activity">
       <article class="card section">
         <div class="section-header">
           <h2 class="section-title">Usuários conectados</h2>
@@ -943,7 +1041,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </article>
     </section>
 
-    <section class="card admin-section" aria-label="Administração do Relay">
+    <section class="card admin-section" id="administration" aria-label="Administração do Relay">
       <div class="section-header" style="padding:0 0 14px">
         <div>
           <h2 class="section-title">Administração</h2>
@@ -961,7 +1059,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </div>
 
       <div id="admin-content" class="admin-grid hidden">
-        <div style="display:grid;gap:14px;align-content:start">
+        <div class="admin-primary">
           <div class="admin-panel">
             <h3>Criar conta</h3>
             <form id="admin-create-user" class="admin-form">
@@ -976,6 +1074,12 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
             </form>
           </div>
           <div class="admin-panel">
+            <h3>Contas de usuário</h3>
+            <div id="admin-users" class="admin-users"></div>
+          </div>
+        </div>
+        <div class="admin-operations">
+          <div class="admin-panel">
             <h3>Retenção de mensagens</h3>
             <form id="retention-form" class="admin-form">
               <select id="retention-policy">
@@ -987,10 +1091,21 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
               <button type="submit">Salvar política</button>
             </form>
           </div>
-        </div>
-        <div class="admin-panel">
-          <h3>Contas de usuário</h3>
-          <div id="admin-users" class="admin-users"></div>
+          <div class="admin-panel">
+            <h3>Operação e auditoria</h3>
+            <button id="create-backup" class="admin-action secondary" type="button">Criar backup consistente</button>
+            <div id="admin-audit" class="admin-audit"></div>
+          </div>
+          <div class="admin-panel">
+            <h3>Sessões dos clientes</h3>
+            <div class="section-meta">Revogue dispositivos perdidos ou acessos que não reconhece.</div>
+            <div id="admin-sessions" class="admin-users admin-sessions-list"></div>
+          </div>
+          <div class="admin-panel">
+            <h3>Redefinições de senha</h3>
+            <div class="section-meta">Solicitações enviadas pela tela de acesso.</div>
+            <div id="admin-password-resets" class="admin-users"></div>
+          </div>
         </div>
       </div>
       <div id="admin-feedback" class="admin-feedback"></div>
@@ -998,9 +1113,22 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
     <footer id="store-path" class="footer"></footer>
   </main>
+  </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const dashboardNavLinks = Array.from(document.querySelectorAll('.nav-link'));
+    const setActiveDashboardSection = (hash) => {
+      const target = hash || '#overview';
+      for (const link of dashboardNavLinks) {
+        link.classList.toggle('active', link.getAttribute('href') === target);
+      }
+    };
+    for (const link of dashboardNavLinks) {
+      link.addEventListener('click', () => setActiveDashboardSection(link.getAttribute('href')));
+    }
+    window.addEventListener('hashchange', () => setActiveDashboardSection(window.location.hash));
+    setActiveDashboardSection(window.location.hash);
     const dateTime = new Intl.DateTimeFormat('pt-BR', {
       day: '2-digit',
       month: '2-digit',
@@ -1154,10 +1282,47 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       : '/api/status';
 
     let adminCsrf = sessionStorage.getItem('lantern.admin.csrf') || '';
+    const syncAdminSession = async () => {
+      const response = await fetch('/api/admin/session', {
+        method: 'GET', credentials: 'same-origin', cache: 'no-store'
+      });
+      if (!response.ok) {
+        adminCsrf = '';
+        sessionStorage.removeItem('lantern.admin.csrf');
+        return false;
+      }
+      const body = await response.json().catch(() => ({}));
+      adminCsrf = typeof body.csrfToken === 'string' ? body.csrfToken : '';
+      if (adminCsrf) sessionStorage.setItem('lantern.admin.csrf', adminCsrf);
+      return adminCsrf.length > 0;
+    };
     const adminFetch = async (url, options = {}) => {
-      const headers = { 'content-type': 'application/json', ...(options.headers || {}) };
-      if (adminCsrf && options.method && options.method !== 'GET') headers['x-lantern-csrf'] = adminCsrf;
-      return fetch(url, { ...options, headers, credentials: 'same-origin', cache: 'no-store' });
+      const headers = Object.assign(
+        { 'content-type': 'application/json' },
+        options.headers || {}
+      );
+      const method = options.method || 'GET';
+      if (method !== 'GET' && method !== 'HEAD') {
+        const sessionReady = await syncAdminSession();
+        if (!sessionReady) {
+          return new Response(JSON.stringify({ ok: false, error: 'UNAUTHORIZED' }), {
+            status: 401,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        headers['x-lantern-csrf'] = adminCsrf;
+      }
+      const requestOptions = Object.assign({}, options, {
+        headers,
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      const response = await fetch(url, requestOptions);
+      if (response.status === 401) {
+        adminCsrf = '';
+        sessionStorage.removeItem('lantern.admin.csrf');
+      }
+      return response;
     };
 
     const setAdminFeedback = (message) => setText('admin-feedback', message || '');
@@ -1184,10 +1349,19 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         password.placeholder = 'Nova senha';
         const save = make('button', 'admin-action secondary', 'Salvar setor');
         save.addEventListener('click', async () => {
+          save.disabled = true;
+          save.textContent = 'Salvando…';
           const response = await adminFetch('/api/admin/users/' + encodeURIComponent(user.userId), {
             method: 'PATCH', body: JSON.stringify({ department: department.value })
           });
-          setAdminFeedback(response.ok ? 'Setor atualizado.' : 'Não foi possível atualizar o setor.');
+          const body = await response.json().catch(() => ({}));
+          save.disabled = false;
+          save.textContent = 'Salvar setor';
+          setAdminFeedback(response.ok
+            ? 'Setor de ' + user.displayName + ' atualizado.'
+            : response.status === 401
+              ? 'A sessão administrativa expirou. Entre novamente para salvar o setor.'
+              : (body.message || 'Não foi possível atualizar o setor.'));
           if (response.ok) void loadAdmin();
         });
         const reset = make('button', 'admin-action secondary', 'Redefinir senha');
@@ -1198,6 +1372,17 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
           });
           password.value = '';
           setAdminFeedback(response.ok ? 'Senha redefinida; sessões anteriores foram encerradas.' : 'Falha ao redefinir senha.');
+        });
+        const toggle = make('button', 'admin-action ' + (user.disabled ? 'secondary' : 'danger'), user.disabled ? 'Reativar' : 'Desativar');
+        toggle.disabled = user.role === 'admin';
+        toggle.addEventListener('click', async () => {
+          const action = user.disabled ? 'reativar' : 'desativar';
+          if (!confirm('Deseja ' + action + ' a conta de ' + user.displayName + '?')) return;
+          const response = await adminFetch('/api/admin/users/' + encodeURIComponent(user.userId), {
+            method: 'PATCH', body: JSON.stringify({ disabled: !user.disabled })
+          });
+          setAdminFeedback(response.ok ? (user.disabled ? 'Conta reativada.' : 'Conta desativada e removida das listas de contatos.') : 'Não foi possível alterar o estado da conta.');
+          if (response.ok) void loadAdmin();
         });
         const remove = make('button', 'admin-action danger', 'Excluir');
         remove.disabled = user.role === 'admin';
@@ -1211,6 +1396,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         fields.appendChild(password);
         fields.appendChild(save);
         fields.appendChild(reset);
+        fields.appendChild(toggle);
         fields.appendChild(remove);
         item.appendChild(head);
         item.appendChild(fields);
@@ -1218,26 +1404,132 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       }
     };
 
+    const renderAudit = (entries) => {
+      const list = $('admin-audit');
+      if (!list) return;
+      clear(list);
+      for (const entry of entries || []) {
+        const item = make('div', 'admin-audit-row');
+        item.appendChild(make('strong', '', entry.action || 'evento'));
+        item.appendChild(make('span', '', formatTime(entry.createdAt) + ' · ' + (entry.actor || 'sistema')));
+        list.appendChild(item);
+      }
+      if (!entries || entries.length === 0) list.appendChild(make('span', 'section-meta', 'Nenhum evento registrado.'));
+    };
+
+    const renderSessions = (sessions) => {
+      const list = $('admin-sessions');
+      if (!list) return;
+      clear(list);
+      for (const session of sessions || []) {
+        const item = make('div', 'admin-user');
+        const head = make('div', 'admin-user-head');
+        const identity = make('div');
+        identity.appendChild(make('div', 'name', session.displayName || session.username));
+        identity.appendChild(make(
+          'div',
+          'status',
+          '@' + session.username + ' · dispositivo ' + String(session.deviceId || '').slice(0, 12)
+        ));
+        head.appendChild(identity);
+        head.appendChild(make('span', 'chip', 'Ativa'));
+        const fields = make('div', 'admin-user-fields');
+        fields.appendChild(make('span', 'section-meta', 'Último acesso: ' + formatTime(session.lastSeenAt)));
+        const revoke = make('button', 'admin-action danger', 'Revogar sessão');
+        revoke.addEventListener('click', async () => {
+          if (!confirm('Revogar esta sessão de ' + (session.displayName || session.username) + '?')) return;
+          const response = await adminFetch('/api/admin/sessions/' + encodeURIComponent(session.sessionId), {
+            method: 'DELETE'
+          });
+          setAdminFeedback(response.ok ? 'Sessão revogada e conexão encerrada.' : 'Falha ao revogar sessão.');
+          if (response.ok) void loadAdmin();
+        });
+        fields.appendChild(revoke);
+        item.appendChild(head);
+        item.appendChild(fields);
+        list.appendChild(item);
+      }
+      if (!sessions || sessions.length === 0) list.appendChild(make('span', 'section-meta', 'Nenhuma sessão ativa.'));
+    };
+
+    const renderPasswordResetRequests = (requests) => {
+      const list = $('admin-password-resets');
+      if (!list) return;
+      clear(list);
+      for (const request of requests || []) {
+        const item = make('div', 'admin-user');
+        const head = make('div', 'admin-user-head');
+        const identity = make('div');
+        identity.appendChild(make('div', 'name', request.displayName || request.username));
+        identity.appendChild(make('div', 'status', '@' + request.username + ' · solicitada em ' + formatTime(request.requestedAt)));
+        head.appendChild(identity);
+        head.appendChild(make('span', 'chip', request.status === 'approved' ? 'Aprovada' : 'Pendente'));
+        const fields = make('div', 'admin-user-fields');
+        if (request.status === 'pending') {
+          const approve = make('button', 'admin-action secondary', 'Aprovar');
+          approve.addEventListener('click', async () => {
+            const response = await adminFetch('/api/admin/password-reset-requests/' + encodeURIComponent(request.requestId), {
+              method: 'POST', body: JSON.stringify({ action: 'approve' })
+            });
+            setAdminFeedback(response.ok ? 'Redefinição aprovada por 30 minutos.' : 'Não foi possível aprovar a solicitação.');
+            if (response.ok) void loadAdmin();
+          });
+          const reject = make('button', 'admin-action danger', 'Rejeitar');
+          reject.addEventListener('click', async () => {
+            const response = await adminFetch('/api/admin/password-reset-requests/' + encodeURIComponent(request.requestId), {
+              method: 'POST', body: JSON.stringify({ action: 'reject' })
+            });
+            setAdminFeedback(response.ok ? 'Solicitação rejeitada.' : 'Não foi possível rejeitar a solicitação.');
+            if (response.ok) void loadAdmin();
+          });
+          fields.appendChild(approve);
+          fields.appendChild(reject);
+        } else {
+          fields.appendChild(make('span', 'section-meta', 'Válida até ' + formatTime(request.expiresAt)));
+        }
+        item.appendChild(head);
+        item.appendChild(fields);
+        list.appendChild(item);
+      }
+      if (!requests || requests.length === 0) list.appendChild(make('span', 'section-meta', 'Nenhuma solicitação pendente.'));
+    };
+
     const loadAdmin = async () => {
+      const sessionReady = await syncAdminSession();
+      if (!sessionReady) {
+        $('admin-login').classList.remove('hidden');
+        $('admin-content').classList.add('hidden');
+        setText('admin-state', 'Autenticação necessária');
+        return;
+      }
       const usersResponse = await adminFetch('/api/admin/users', { method: 'GET' });
       if (!usersResponse.ok) {
-        $('admin-login')?.classList.remove('hidden');
-        $('admin-content')?.classList.add('hidden');
+        $('admin-login').classList.remove('hidden');
+        $('admin-content').classList.add('hidden');
         setText('admin-state', 'Autenticação necessária');
         return;
       }
       const usersBody = await usersResponse.json();
       const retentionResponse = await adminFetch('/api/admin/retention', { method: 'GET' });
       const retentionBody = retentionResponse.ok ? await retentionResponse.json() : { policy: 'forever' };
-      $('admin-login')?.classList.add('hidden');
-      $('admin-content')?.classList.remove('hidden');
+      const auditResponse = await adminFetch('/api/admin/audit?limit=50', { method: 'GET' });
+      const auditBody = auditResponse.ok ? await auditResponse.json() : { entries: [] };
+      const sessionsResponse = await adminFetch('/api/admin/sessions', { method: 'GET' });
+      const sessionsBody = sessionsResponse.ok ? await sessionsResponse.json() : { sessions: [] };
+      const resetRequestsResponse = await adminFetch('/api/admin/password-reset-requests', { method: 'GET' });
+      const resetRequestsBody = resetRequestsResponse.ok ? await resetRequestsResponse.json() : { requests: [] };
+      $('admin-login').classList.add('hidden');
+      $('admin-content').classList.remove('hidden');
       setText('admin-state', 'Sessão administrativa ativa');
       const retention = $('retention-policy');
       if (retention) retention.value = retentionBody.policy || 'forever';
       renderAdminUsers(usersBody.users || []);
+      renderAudit(auditBody.entries || []);
+      renderSessions(sessionsBody.sessions || []);
+      renderPasswordResetRequests(resetRequestsBody.requests || []);
     };
 
-    $('admin-login-form')?.addEventListener('submit', async (event) => {
+    $('admin-login-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const response = await fetch('/api/admin/login', {
         method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
@@ -1252,7 +1544,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       void loadAdmin();
     });
 
-    $('admin-create-user')?.addEventListener('submit', async (event) => {
+    $('admin-create-user').addEventListener('submit', async (event) => {
       event.preventDefault();
       const response = await adminFetch('/api/admin/users', {
         method: 'POST',
@@ -1269,12 +1561,22 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       if (response.ok) { event.target.reset(); void loadAdmin(); }
     });
 
-    $('retention-form')?.addEventListener('submit', async (event) => {
+    $('retention-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const response = await adminFetch('/api/admin/retention', {
         method: 'PUT', body: JSON.stringify({ policy: $('retention-policy').value })
       });
       setAdminFeedback(response.ok ? 'Política de retenção atualizada.' : 'Falha ao atualizar retenção.');
+    });
+
+    $('create-backup').addEventListener('click', async () => {
+      setAdminFeedback('Criando backup consistente do banco canônico…');
+      const response = await adminFetch('/api/admin/backup', { method: 'POST', body: '{}' });
+      const body = await response.json().catch(() => ({}));
+      setAdminFeedback(response.ok
+        ? 'Backup criado em ' + body.backup.file
+        : (body.message || 'Falha ao criar backup.'));
+      if (response.ok) void loadAdmin();
     });
 
     const load = async () => {
@@ -1293,6 +1595,12 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     void load();
     void loadAdmin();
     setInterval(load, 3000);
+    setInterval(() => {
+      const adminContent = $('admin-content');
+      if (!adminContent.classList.contains('hidden') && !adminContent.contains(document.activeElement)) {
+        void loadAdmin();
+      }
+    }, 30000);
   </script>
 </body>
 </html>`;
@@ -1305,9 +1613,9 @@ export class LanternRelay {
   private readonly groupStore: GroupStore;
   private readonly centralStore: CentralStore;
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
-  private readonly sessionsByDeviceId = new Map<string, RelaySession>();
+  private readonly userSessions = new SessionRegistry<RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
-  private announcementPersistTimer: NodeJS.Timeout | null = null;
+  private stopPromise: Promise<void> | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private presenceBroadcastTimer: NodeJS.Timeout | null = null;
   private announcementSweepTimer: NodeJS.Timeout | null = null;
@@ -1370,10 +1678,17 @@ export class LanternRelay {
     });
     this.centralStore = new CentralStore(path.join(resolveRelayDataDir(), 'central'), logRelay);
     this.groupStore = new GroupStore(
-      GROUP_STORE_FILE,
+      LEGACY_GROUP_STORE_FILE,
       GROUP_ATTACHMENTS_DIR,
       logRelay,
-      this.centralStore.getEncryption()
+      this.centralStore.getEncryption(),
+      {
+        location: this.centralStore.getDatabaseFile(),
+        read: <T>(key: string, version?: number) =>
+          this.centralStore.readCanonicalState<T>(key, version),
+        write: <T>(key: string, value: T, version?: number) =>
+          this.centralStore.writeCanonicalState(key, value, version)
+      }
     );
     this.wsServer.on('connection', (socket) => this.handleConnection(socket));
     this.ensureStickerDirectory();
@@ -1401,7 +1716,7 @@ export class LanternRelay {
       version: RELAY_VERSION,
       mode: this.config.externalMode ? 'external' : 'local',
       tls: Boolean(this.config.tlsCertFile),
-      announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
+      announcementStoreFile: this.centralStore.getDatabaseFile(),
       groupStoreFile: this.groupStore.getStoreFile(),
       groupAttachmentsDir: this.groupStore.getAttachmentsDir(),
       stickersDir: RELAY_STICKERS_DIR,
@@ -1410,12 +1725,23 @@ export class LanternRelay {
     });
   }
 
+  createCanonicalBackup() {
+    return this.centralStore.createBackup([
+      { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
+      { name: 'stickers', source: RELAY_STICKERS_DIR }
+    ], 'relay-ui');
+  }
+
   async stop(reason = 'shutdown'): Promise<void> {
-    if (this.announcementPersistTimer) {
-      clearTimeout(this.announcementPersistTimer);
-      this.announcementPersistTimer = null;
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.performStop(reason);
+    return this.stopPromise;
+  }
+
+  private async performStop(reason: string): Promise<void> {
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('Falha ao persistir anúncios durante o encerramento do Relay.');
     }
-    this.persistAnnouncementStore();
 
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
@@ -1433,8 +1759,6 @@ export class LanternRelay {
       clearInterval(this.groupSweepTimer);
       this.groupSweepTimer = null;
     }
-    this.groupStore.close();
-    this.centralStore.close();
     if (this.udpSocket) {
       try {
         this.udpSocket.close();
@@ -1453,7 +1777,7 @@ export class LanternRelay {
     }
 
     this.sessionsBySocket.clear();
-    this.sessionsByDeviceId.clear();
+    this.userSessions.clear();
     this.announcementsById.clear();
 
     await new Promise<void>((resolve) => {
@@ -1463,6 +1787,11 @@ export class LanternRelay {
     await new Promise<void>((resolve) => {
       this.httpServer.close(() => resolve());
     });
+
+    // Mantém a persistência disponível até que HTTP, WebSocket e callbacks de
+    // encerramento não possam mais iniciar operações canônicas.
+    this.groupStore.close();
+    this.centralStore.close();
 
     if (this.published) {
       try {
@@ -1661,8 +1990,37 @@ export class LanternRelay {
         version: RELAY_VERSION,
         startedAt: this.startedAt,
         uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
-        peersOnline: this.sessionsByDeviceId.size
+        peersOnline: this.userSessions.userCount
       });
+      return;
+    }
+
+    if (requestUrl.pathname === '/lantern') {
+      res.writeHead(302, { location: '/app/' });
+      res.end();
+      return;
+    }
+
+    if (requestUrl.pathname === '/lantern-icon.png') {
+      this.serveDashboardIcon(method, res);
+      return;
+    }
+
+    if (requestUrl.pathname === '/app') {
+      res.writeHead(308, { location: '/app/' });
+      res.end();
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith('/app/')) {
+      this.serveWebClient(requestUrl.pathname, method, res);
+      return;
+    }
+
+    // Compatibilidade com documentos abertos anteriormente em /app sem a
+    // barra final, que podem resolver assets relativos a partir da raiz.
+    if (requestUrl.pathname.startsWith('/assets/')) {
+      this.serveWebClient(`/app${requestUrl.pathname}`, method, res);
       return;
     }
 
@@ -1760,6 +2118,223 @@ export class LanternRelay {
       return;
     }
 
+    if (requestUrl.pathname.startsWith('/api/client/') && !this.isClientTransportAllowed(req)) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'TLS_REQUIRED',
+        message: 'Conexões externas exigem HTTPS/WSS.'
+      }, 426);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/password-reset/request' && method === 'POST') {
+      const remoteAddress = this.normalizeRemoteAddress(req.socket.remoteAddress || 'unknown');
+      const rateLimitKey = `password-reset:${remoteAddress}`;
+      const previousAttempt = this.loginAttemptsByAddress.get(rateLimitKey);
+      if (previousAttempt && previousAttempt.blockedUntil > Date.now()) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'TOO_MANY_ATTEMPTS',
+          message: 'Muitas solicitações. Aguarde um minuto e tente novamente.'
+        }, 429);
+        return;
+      }
+      const body = await this.readJsonBody(req);
+      const request = this.centralStore.requestPasswordReset(asString(body.username) || '');
+      const failures = previousAttempt && previousAttempt.blockedUntil === 0
+        ? previousAttempt.failures + 1
+        : 1;
+      this.loginAttemptsByAddress.set(rateLimitKey, {
+        failures,
+        blockedUntil: failures >= 5 ? Date.now() + 60_000 : 0
+      });
+      this.writeJson(res, method, {
+        ok: true,
+        requestToken: request?.token || createSessionToken(),
+        message: 'Se o usuário estiver ativo, a solicitação aparecerá para o administrador.'
+      }, 202);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/password-reset/status' && method === 'GET') {
+      const token = requestUrl.searchParams.get('token') || '';
+      this.writeJson(res, method, {
+        ok: true,
+        status: this.centralStore.getPasswordResetStatus(token)
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/password-reset/complete' && method === 'POST') {
+      const body = await this.readJsonBody(req);
+      try {
+        this.centralStore.completePasswordReset(
+          asString(body.requestToken) || '',
+          asString(body.username) || '',
+          typeof body.newPassword === 'string' ? body.newPassword : ''
+        );
+        this.writeJson(res, method, { ok: true });
+      } catch (error) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'PASSWORD_RESET_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/password' && method === 'POST') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account || !token) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        this.centralStore.changePassword(
+          account.userId,
+          typeof body.currentPassword === 'string' ? body.currentPassword : '',
+          typeof body.newPassword === 'string' ? body.newPassword : '',
+          token
+        );
+        this.writeJson(res, method, { ok: true });
+      } catch (error) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'PASSWORD_CHANGE_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/profile-setup' && method === 'PATCH') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        const user = this.centralStore.completeProfileSetup(account.userId, {
+          avatarEmoji: asString(body.avatarEmoji) || '',
+          avatarBg: asString(body.avatarBg) || ''
+        });
+        this.writeJson(res, method, { ok: true, user });
+      } catch (error) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'INVALID_PROFILE_SETUP',
+          message: error instanceof Error ? error.message : String(error)
+        }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/preferences' && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      this.writeJson(
+        res,
+        method,
+        account
+          ? { ok: true, preferences: this.centralStore.getUserPreferences(account.userId) }
+          : { ok: false, error: 'UNAUTHORIZED' },
+        account ? 200 : 401
+      );
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/preferences/conversation' && method === 'PUT') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        this.centralStore.setUserConversationPreference(account.userId, {
+          conversationId: asString(body.conversationId) || '',
+          pinned: typeof body.pinned === 'boolean' ? body.pinned : undefined,
+          archived: typeof body.archived === 'boolean' ? body.archived : undefined,
+          manualUnread: typeof body.manualUnread === 'boolean' ? body.manualUnread : undefined,
+          readAt: typeof body.readAt === 'number' ? body.readAt : undefined
+        });
+        this.writeJson(res, method, { ok: true });
+      } catch (error) {
+        this.writeJson(res, method, { ok: false, error: 'INVALID_PREFERENCE', message: error instanceof Error ? error.message : String(error) }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/preferences/message' && method === 'PUT') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        this.centralStore.setUserMessagePreference(account.userId, {
+          messageId: asString(body.messageId) || '',
+          favorite: typeof body.favorite === 'boolean' ? body.favorite : undefined,
+          hidden: typeof body.hidden === 'boolean' ? body.hidden : undefined
+        });
+        this.writeJson(res, method, { ok: true });
+      } catch (error) {
+        this.writeJson(res, method, { ok: false, error: 'INVALID_PREFERENCE', message: error instanceof Error ? error.message : String(error) }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/export' && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        const conversationId = requestUrl.searchParams.get('conversationId') || '';
+        const preferences = this.centralStore.getUserPreferences(account.userId);
+        const hiddenIds = new Set(preferences.messages.filter((item) => item.hidden).map((item) => item.messageId));
+        let title = 'Conversa';
+        let records: Array<{ messageId: string; senderUserId: string; type: 'text' | 'file'; text: string; fileName: string; fileSize: number; createdAt: number; editedAt: number }>;
+        if (conversationId.startsWith('dm:')) {
+          const peerUserId = conversationId.slice(3).trim();
+          const peer = this.centralStore.getUser(peerUserId);
+          if (!peer) throw new Error('Contato não encontrado.');
+          title = peer.displayName;
+          records = this.centralStore.exportConversationMessages(account.userId, peerUserId);
+        } else if (conversationId.startsWith('group:')) {
+          const groupId = conversationId.slice('group:'.length).trim();
+          const group = this.groupStore.getGroup(groupId);
+          if (!group) throw new Error('Grupo não encontrado.');
+          title = group.name;
+          records = this.groupStore.exportMessagesForDevice(groupId, account.userId);
+        } else {
+          throw new Error('Esta conversa não pode ser exportada.');
+        }
+        const users = Object.fromEntries(
+          this.centralStore.listUsers().map((user) => [user.userId, user.displayName])
+        );
+        this.writeJson(res, method, {
+          ok: true,
+          title,
+          records: records.filter((record) => !hiddenIds.has(record.messageId)),
+          users
+        });
+      } catch (error) {
+        this.writeJson(res, method, { ok: false, error: 'EXPORT_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/client/logout' && method === 'POST') {
       const token = this.getBearerToken(req);
       if (token) this.centralStore.logout(token);
@@ -1807,13 +2382,48 @@ export class LanternRelay {
       const adminToken = this.getCookie(req, 'lantern_admin');
       const needsCsrf = method !== 'GET' && method !== 'HEAD';
       const csrfToken = needsCsrf ? String(req.headers['x-lantern-csrf'] || '') : undefined;
-      if (!this.centralStore.validateAdminSession(adminToken, csrfToken)) {
+      const adminSession = this.centralStore.getAdminSession(adminToken, csrfToken);
+      if (!adminSession) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/admin/session' && method === 'GET') {
+        this.writeJson(res, method, {
+          ok: true,
+          csrfToken: adminSession.csrfToken
+        });
         return;
       }
 
       if (requestUrl.pathname === '/api/admin/users' && method === 'GET') {
         this.writeJson(res, method, { ok: true, users: this.centralStore.listUsers() });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/password-reset-requests' && method === 'GET') {
+        this.writeJson(res, method, {
+          ok: true,
+          requests: this.centralStore.listPasswordResetRequests()
+        });
+        return;
+      }
+      const passwordResetRequestMatch = requestUrl.pathname.match(/^\/api\/admin\/password-reset-requests\/([^/]+)$/);
+      if (passwordResetRequestMatch && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        try {
+          const request = this.centralStore.reviewPasswordResetRequest(
+            decodeURIComponent(passwordResetRequestMatch[1]),
+            body.action === 'approve',
+            adminSession.userId
+          );
+          this.writeJson(res, method, { ok: true, request });
+        } catch (error) {
+          this.writeJson(res, method, {
+            ok: false,
+            error: 'PASSWORD_RESET_REVIEW_FAILED',
+            message: error instanceof Error ? error.message : String(error)
+          }, 400);
+        }
         return;
       }
       if (requestUrl.pathname === '/api/admin/users' && method === 'POST') {
@@ -1826,7 +2436,8 @@ export class LanternRelay {
             password: typeof body.password === 'string' ? body.password : '',
             role: body.role === 'admin' ? 'admin' : 'user',
             locale: body.locale === 'en' || body.locale === 'es' ? body.locale : 'pt-BR'
-          });
+          }, adminSession.userId);
+          this.broadcastDirectory();
           this.writeJson(res, method, { ok: true, user }, 201);
         } catch (error) {
           this.writeJson(res, method, { ok: false, error: 'INVALID_USER', message: error instanceof Error ? error.message : String(error) }, 400);
@@ -1837,13 +2448,18 @@ export class LanternRelay {
       if (userMatch && method === 'PATCH') {
         const body = await this.readJsonBody(req);
         try {
-          const user = this.centralStore.updateUser(decodeURIComponent(userMatch[1]), {
+          const userId = decodeURIComponent(userMatch[1]);
+          const user = this.centralStore.updateUser(userId, {
             displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
             department: typeof body.department === 'string' ? body.department : undefined,
             disabled: typeof body.disabled === 'boolean' ? body.disabled : undefined,
             locale: body.locale === 'en' || body.locale === 'es' || body.locale === 'pt-BR' ? body.locale : undefined
-          });
+          }, adminSession.userId);
           this.writeJson(res, method, { ok: true, user });
+          if (user.disabled) this.disconnectDisabledUser(userId);
+          this.broadcastDirectory();
+          this.bumpPresenceRevision('directory_updated');
+          this.broadcastPresence('directory_updated');
         } catch (error) {
           this.writeJson(res, method, { ok: false, error: 'UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
         }
@@ -1851,8 +2467,13 @@ export class LanternRelay {
       }
       if (userMatch && method === 'DELETE') {
         try {
-          this.centralStore.deleteUser(decodeURIComponent(userMatch[1]));
+          const userId = decodeURIComponent(userMatch[1]);
+          this.disconnectDisabledUser(userId);
+          this.centralStore.deleteUser(userId, adminSession.userId);
           this.writeJson(res, method, { ok: true });
+          this.broadcastDirectory();
+          this.bumpPresenceRevision('directory_updated');
+          this.broadcastPresence('directory_updated');
         } catch (error) {
           this.writeJson(res, method, { ok: false, error: 'DELETE_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
         }
@@ -1864,7 +2485,8 @@ export class LanternRelay {
         try {
           this.centralStore.resetPassword(
             decodeURIComponent(resetMatch[1]),
-            typeof body.password === 'string' ? body.password : ''
+            typeof body.password === 'string' ? body.password : '',
+            adminSession.userId
           );
           this.writeJson(res, method, { ok: true });
         } catch (error) {
@@ -1878,8 +2500,50 @@ export class LanternRelay {
       }
       if (requestUrl.pathname === '/api/admin/retention' && method === 'PUT') {
         const body = await this.readJsonBody(req);
-        const policy = this.centralStore.setRetentionPolicy(body.policy as RetentionPolicy);
+        const policy = this.centralStore.setRetentionPolicy(
+          body.policy as RetentionPolicy,
+          adminSession.userId
+        );
         this.writeJson(res, method, { ok: true, policy });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/audit' && method === 'GET') {
+        const limit = Math.max(1, Math.min(Number(requestUrl.searchParams.get('limit')) || 100, 500));
+        this.writeJson(res, method, { ok: true, entries: this.centralStore.listAudit(limit) });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/sessions' && method === 'GET') {
+        this.writeJson(res, method, { ok: true, sessions: this.centralStore.listSessions() });
+        return;
+      }
+      const sessionMatch = requestUrl.pathname.match(/^\/api\/admin\/sessions\/([a-f0-9]{64})$/);
+      if (sessionMatch && method === 'DELETE') {
+        const sessionId = sessionMatch[1];
+        const revoked = this.centralStore.revokeSession(sessionId, adminSession.userId);
+        if (revoked) {
+          for (const relaySession of Array.from(this.sessionsBySocket.values())) {
+            if (relaySession.authToken && hashToken(relaySession.authToken) === sessionId) {
+              this.dropSession(relaySession, 'session-revoked');
+            }
+          }
+        }
+        this.writeJson(res, method, { ok: true, revoked });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/backup' && method === 'POST') {
+        try {
+          const backup = await this.centralStore.createBackup([
+            { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
+            { name: 'stickers', source: RELAY_STICKERS_DIR }
+          ], adminSession.userId);
+          this.writeJson(res, method, { ok: true, backup }, 201);
+        } catch (error) {
+          this.writeJson(res, method, {
+            ok: false,
+            error: 'BACKUP_FAILED',
+            message: error instanceof Error ? error.message : String(error)
+          }, 500);
+        }
         return;
       }
     }
@@ -2171,6 +2835,86 @@ export class LanternRelay {
     fs.createReadStream(filePath).pipe(res);
   }
 
+  private serveWebClient(pathname: string, method: string, res: ServerResponse): void {
+    if (method !== 'GET' && method !== 'HEAD') {
+      this.writeJson(res, method, { ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+      return;
+    }
+    const rendererRoots = [
+      path.resolve(__dirname, '..', 'dist-renderer'),
+      path.resolve(process.cwd(), 'dist-renderer'),
+      path.resolve(path.dirname(process.execPath), 'dist-renderer')
+    ];
+    const rendererRoot = rendererRoots.find((candidate) => fs.existsSync(path.join(candidate, 'index.html')));
+    if (!rendererRoot) {
+      this.writeJson(res, method, {
+        ok: false,
+        error: 'WEB_CLIENT_NOT_BUILT',
+        message: 'O cliente web não foi encontrado. Execute npm run build:renderer.'
+      }, 503);
+      return;
+    }
+    let relativePath = pathname === '/app' || pathname === '/app/'
+      ? 'index.html'
+      : pathname.slice('/app/'.length);
+    try {
+      relativePath = decodeURIComponent(relativePath);
+    } catch {
+      relativePath = '';
+    }
+    const resolved = path.resolve(rendererRoot, relativePath || 'index.html');
+    const insideRoot = resolved === rendererRoot || resolved.startsWith(`${rendererRoot}${path.sep}`);
+    const filePath = insideRoot && fs.existsSync(resolved) && fs.statSync(resolved).isFile()
+      ? resolved
+      : path.join(rendererRoot, 'index.html');
+    const extension = path.extname(filePath).toLowerCase();
+    const contentTypes: Record<string, string> = {
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.ico': 'image/x-icon',
+      '.woff2': 'font/woff2'
+    };
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, {
+      'content-type': contentTypes[extension] || 'application/octet-stream',
+      'content-length': String(stat.size),
+      'cache-control': extension === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
+      'content-security-policy': "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer'
+    });
+    if (method === 'HEAD') {
+      res.end();
+      return;
+    }
+    fs.createReadStream(filePath).pipe(res);
+  }
+
+  private serveDashboardIcon(method: string, res: ServerResponse): void {
+    const candidates = [
+      path.resolve(__dirname, '..', 'assets', 'icon.png'),
+      path.resolve(process.cwd(), 'assets', 'icon.png'),
+      path.resolve(path.dirname(process.execPath), 'assets', 'icon.png')
+    ];
+    const iconFile = candidates.find((candidate) => fs.existsSync(candidate));
+    if (!iconFile) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(method === 'HEAD' ? undefined : 'Ícone não encontrado.');
+      return;
+    }
+    const stat = fs.statSync(iconFile);
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': stat.size,
+      'cache-control': 'public, max-age=86400'
+    });
+    if (method === 'HEAD') res.end();
+    else fs.createReadStream(iconFile).pipe(res);
+  }
+
   private writeJson(
     res: ServerResponse,
     method: string,
@@ -2208,7 +2952,7 @@ export class LanternRelay {
       peersOnline: peers.length,
       sessionsOpen: this.sessionsBySocket.size,
       presenceRevision: this.presenceRevision,
-      announcementStoreFile: ANNOUNCEMENT_STORE_FILE,
+      announcementStoreFile: this.centralStore.getDatabaseFile(),
       announcementsActive: announcements.length,
       stickersAvailable: this.listStickerCatalog().length,
       centralStore: this.centralStore.getStats(),
@@ -2237,7 +2981,7 @@ export class LanternRelay {
 
   private listDashboardPeers(now: number): RelayDashboardPeer[] {
     const peers: RelayDashboardPeer[] = [];
-    for (const session of this.sessionsByDeviceId.values()) {
+    for (const session of this.listPrimarySessions()) {
       const peer = session.peer;
       if (!peer) continue;
       const lastSeenAt = Math.max(peer.lastSeenAt || 0, session.lastSeenAt || 0);
@@ -2267,7 +3011,8 @@ export class LanternRelay {
       .filter((state) => !state.deletedAt && !state.expiredAt && state.expiresAt > now)
       .map((state) => {
         const payload = asRecord(state.frame.payload);
-        const text = asString(payload?.text) || asString(payload?.bodyText) || '(sem texto)';
+        const text = asString(payload?.text) || asString(payload?.bodyText) ||
+          (asString(payload?.filename) ? `📎 ${asString(payload?.filename)}` : '(sem texto)');
         const author = peersById.get(state.frame.from);
         const reactionsCount = Object.entries(state.reactionsByDeviceId || {}).filter((entry) =>
           ALLOWED_ANNOUNCEMENT_REACTIONS.has(entry[1])
@@ -2302,10 +3047,12 @@ export class LanternRelay {
       sessionId: randomUUID(),
       socket,
       peer: null,
+      clientDeviceId: null,
       lastSeenAt: Date.now(),
       isAlive: true,
       messageQueue: Promise.resolve(),
       groupFileDownloadQueue: Promise.resolve(),
+      attachmentDownloadQueue: Promise.resolve(),
       authToken: null
     };
 
@@ -2426,6 +3173,9 @@ export class LanternRelay {
       case 'relay:history:request':
         this.handleCanonicalHistoryRequest(session, envelope.payload);
         return;
+      case 'relay:search:request':
+        this.handleCanonicalSearchRequest(session, envelope.payload);
+        return;
       case 'relay:groups:sync':
         this.handleGroupSyncRequest(session, envelope.payload);
         return;
@@ -2467,7 +3217,16 @@ export class LanternRelay {
         this.handleCentralAttachmentComplete(session, envelope.payload);
         return;
       case 'relay:attachment:request':
-        this.handleCentralAttachmentRequest(session, envelope.payload);
+        session.attachmentDownloadQueue = session.attachmentDownloadQueue
+          .catch(() => undefined)
+          .then(() => this.handleCentralAttachmentRequest(session, envelope.payload))
+          .catch((error) => {
+            logRelay('attachment_download_queue_failed', {
+              sessionId: session.sessionId,
+              deviceId: session.peer?.deviceId || null,
+              message: error instanceof Error ? error.message : String(error)
+            }, { level: 'warn' });
+          });
         return;
       case 'relay:send':
         await this.handleRelaySend(session, envelope.payload);
@@ -2490,10 +3249,12 @@ export class LanternRelay {
       return;
     }
     const before = asFiniteNumber(record?.before) || Number.MAX_SAFE_INTEGER;
+    const beforeSeq = asFiniteNumber(record?.beforeSeq) || Number.MAX_SAFE_INTEGER;
     const limit = Math.max(1, Math.min(Math.trunc(asFiniteNumber(record?.limit) || 100), 500));
     const frames = this.centralStore
-      .listConversationFramesForUser(session.peer.deviceId, peerUserId, before, limit)
+      .listConversationFramesForUser(session.peer.deviceId, peerUserId, before, limit, beforeSeq)
       .map((frame) => ({
+        serverSeq: frame.serverSeq,
         type: frame.type,
         messageId: frame.messageId,
         from: frame.senderUserId,
@@ -2504,6 +3265,32 @@ export class LanternRelay {
     this.sendEnvelope(session.socket, {
       type: 'relay:history:page',
       payload: { requestId, frames, hasMore: frames.length === limit }
+    });
+  }
+
+  private handleCanonicalSearchRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Autenticação necessária.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    const peerUserId = asString(record?.peerUserId);
+    const query = asString(record?.query);
+    if (!requestId || !peerUserId || !query) {
+      this.sendError(session, 'INVALID_SEARCH_REQUEST', 'Pesquisa canônica inválida.');
+      return;
+    }
+    const messageIds = this.centralStore.searchConversationMessageIds(
+      session.peer.deviceId,
+      peerUserId,
+      query,
+      asFiniteNumber(record?.limit) || 500,
+      asFiniteNumber(record?.offset) || 0
+    );
+    this.sendEnvelope(session.socket, {
+      type: 'relay:search:results',
+      payload: { requestId, messageIds }
     });
   }
 
@@ -2577,7 +3364,7 @@ export class LanternRelay {
     }
   }
 
-  private handleCentralAttachmentRequest(session: RelaySession, payload: unknown): void {
+  private async handleCentralAttachmentRequest(session: RelaySession, payload: unknown): Promise<void> {
     if (!session.peer) return;
     const record = asRecord(payload);
     const requestId = asString(record?.requestId) || randomUUID();
@@ -2585,12 +3372,13 @@ export class LanternRelay {
     const startIndex = Math.max(0, Math.trunc(asFiniteNumber(record?.startIndex) || 0));
     try {
       const metadata = this.centralStore.getAttachmentMetadata(attachmentId, session.peer.deviceId);
-      this.sendEnvelope(session.socket, {
+      const started = await this.sendEnvelopeWithStatus(session.socket, {
         type: 'relay:attachment:start',
         payload: { requestId, ...metadata, startIndex }
       });
+      if (!started) throw new Error('Conexão encerrada durante o início do download.');
       for (let index = startIndex; index < metadata.totalChunks; index += 1) {
-        this.sendEnvelope(session.socket, {
+        const delivered = await this.sendEnvelopeWithStatus(session.socket, {
           type: 'relay:attachment:data',
           payload: {
             requestId,
@@ -2602,8 +3390,9 @@ export class LanternRelay {
               .toString('base64')
           }
         });
+        if (!delivered) throw new Error(`Conexão encerrada no bloco ${index}.`);
       }
-      this.sendEnvelope(session.socket, {
+      await this.sendEnvelopeWithStatus(session.socket, {
         type: 'relay:attachment:download:complete',
         payload: { requestId, attachmentId }
       });
@@ -2635,16 +3424,18 @@ export class LanternRelay {
     session.authToken = hello.sessionToken;
     const canonicalDeviceId = account.userId;
 
-    const existing = this.sessionsByDeviceId.get(canonicalDeviceId);
-    if (existing && existing !== session) {
-      this.sendEnvelope(existing.socket, {
-        type: 'relay:error',
-        payload: {
-          code: 'SESSION_REPLACED',
-          message: 'Sessão substituída por nova conexão.'
-        }
-      });
-      this.dropSession(existing, 'session-replaced', { suppressPresence: true });
+    const wasOnline = this.userSessions.hasUser(canonicalDeviceId);
+    for (const existing of this.getSessionsForUser(canonicalDeviceId)) {
+      if (existing !== session && existing.clientDeviceId === hello.deviceId) {
+        this.sendEnvelope(existing.socket, {
+          type: 'relay:error',
+          payload: {
+            code: 'SESSION_REPLACED',
+            message: 'Esta conexão foi substituída por uma reconexão do mesmo dispositivo.'
+          }
+        });
+        this.dropSession(existing, 'same-device-reconnected', { suppressPresence: true });
+      }
     }
 
     const now = Date.now();
@@ -2660,8 +3451,9 @@ export class LanternRelay {
       connectedAt: session.peer?.connectedAt || now,
       lastSeenAt: now
     };
+    session.clientDeviceId = hello.deviceId;
     session.lastSeenAt = now;
-    this.sessionsByDeviceId.set(canonicalDeviceId, session);
+    this.registerUserSession(canonicalDeviceId, session);
 
     this.sendEnvelope(session.socket, {
       type: 'relay:hello:ok',
@@ -2686,37 +3478,26 @@ export class LanternRelay {
         }))
       }
     });
-    this.sendEnvelope(session.socket, {
-      type: 'relay:directory',
-      payload: {
-        users: this.centralStore.listVisibleUsersForUser(canonicalDeviceId)
-          .map((user) => ({
-            deviceId: user.userId,
-            username: user.username,
-            displayName: user.displayName,
-            department: user.department,
-            avatarEmoji: user.avatarEmoji,
-            avatarBg: user.avatarBg,
-            statusMessage: user.statusMessage
-          }))
-      }
-    });
+    this.sendDirectory(session);
 
-    this.bumpPresenceRevision('peer_online');
+    if (!wasOnline) this.bumpPresenceRevision('peer_online');
     this.sendPresenceSnapshot(session);
     this.sendAnnouncementSnapshot(session, 'peer_online');
     this.sendGroupSnapshot(session, 'peer_online');
     this.sendKnownExpiredAnnouncements(session);
-    this.broadcastPresenceDelta({
-      op: 'upsert',
-      peer: this.clonePeerWithLiveSeen(session.peer)
-    }, 'peer_online');
+    if (!wasOnline) {
+      this.broadcastPresenceDelta({
+        op: 'upsert',
+        peer: this.clonePeerWithLiveSeen(session.peer)
+      }, 'peer_online');
+    }
     logRelay('peer_online', {
       deviceId: canonicalDeviceId,
       username: account.username,
       displayName: account.displayName,
       department: account.department,
-      totalOnline: this.sessionsByDeviceId.size
+      totalOnline: this.userSessions.userCount,
+      sessionsForUser: this.getSessionsForUser(canonicalDeviceId).length
     });
   }
 
@@ -2743,7 +3524,18 @@ export class LanternRelay {
       statusMessage: account.statusMessage,
       lastSeenAt: Date.now()
     };
-    this.sessionsByDeviceId.set(session.peer.deviceId, session);
+    for (const sibling of this.getSessionsForUser(session.peer.deviceId)) {
+      if (!sibling.peer) continue;
+      sibling.peer = {
+        ...sibling.peer,
+        displayName: account.displayName,
+        department: account.department,
+        avatarEmoji: account.avatarEmoji,
+        avatarBg: account.avatarBg,
+        statusMessage: account.statusMessage,
+        lastSeenAt: Date.now()
+      };
+    }
     logRelay('peer_profile_updated', {
       deviceId: session.peer.deviceId,
       displayName: session.peer.displayName,
@@ -2849,15 +3641,15 @@ export class LanternRelay {
       }
       const recipients = Array.from(recipientSet).filter(Boolean);
       for (const deviceId of recipients) {
-        const recipient = this.sessionsByDeviceId.get(deviceId);
-        if (!recipient) continue;
-        this.sendEnvelope(recipient.socket, {
-          type: 'relay:group:event',
-          payload: {
-            serverTime: Date.now(),
-            event
-          }
-        });
+        for (const recipient of this.getSessionsForUser(deviceId)) {
+          this.sendEnvelope(recipient.socket, {
+            type: 'relay:group:event',
+            payload: {
+              serverTime: Date.now(),
+              event
+            }
+          });
+        }
       }
       logRelay('group_event_broadcast', {
         groupId: event.groupId,
@@ -2888,13 +3680,33 @@ export class LanternRelay {
       let response: Record<string, unknown> = {};
       switch (action) {
         case 'history': {
-          const history = this.groupStore.historyForDevice(
+          const history = this.groupStore.historyPageForDevice(
             asString(data.groupId) || '',
             session.peer.deviceId,
             asFiniteNumber(data.before) || Number.MAX_SAFE_INTEGER,
             Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500))
           );
-          response = { events: history, hasMore: history.length === Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500)) };
+          response = history;
+          break;
+        }
+        case 'search': {
+          const groupId = asString(data.groupId) || '';
+          // A consulta ao GroupStore valida que o solicitante continua membro.
+          this.groupStore.searchMessageIdsForDevice(
+            groupId,
+            session.peer.deviceId,
+            asString(data.query) || '',
+            1,
+            0
+          );
+          response = {
+            messageIds: this.centralStore.searchGroupMessageIds(
+              groupId,
+              asString(data.query) || '',
+              asFiniteNumber(data.limit) || 500,
+              asFiniteNumber(data.offset) || 0
+            )
+          };
           break;
         }
         case 'create': {
@@ -3307,12 +4119,8 @@ export class LanternRelay {
       }
     }
 
-    if ((frame.type === 'chat:clear' || frame.type === 'chat:forget') && frame.to) {
-      this.centralStore.setConversationState(
-        session.peer.deviceId,
-        frame.to,
-        frame.type === 'chat:forget'
-      );
+    if (frame.type === 'chat:clear' && frame.to) {
+      this.centralStore.clearConversationForUser(session.peer.deviceId, frame.to);
       this.sendEnvelope(session.socket, {
         type: 'relay:send:ack',
         payload: { frameMessageId: frame.messageId, deliveredTo: [] }
@@ -3337,7 +4145,7 @@ export class LanternRelay {
     }
 
     let outboundFrame = frame;
-    if (frame.type === 'announce') {
+    if (frame.type === 'announce' || (frame.type === 'file:offer' && frame.to === null)) {
       this.trackAnnouncement(frame);
     } else if (frame.type === 'chat:edit' && frame.to === null) {
       const result = this.applyAnnouncementEdit(frame);
@@ -3355,7 +4163,7 @@ export class LanternRelay {
       }
     }
 
-    const deliveredTo = await this.routeFrame(outboundFrame, session.peer.deviceId);
+    const deliveredTo = await this.routeFrame(outboundFrame, session);
 
     logRelay('frame_routed', {
       type: outboundFrame.type,
@@ -3375,47 +4183,53 @@ export class LanternRelay {
     });
   }
 
-  private async routeFrame(frame: RelayTransportFrame, senderDeviceId: string | null): Promise<string[]> {
-    const deliveredTo: string[] = [];
+  private async routeFrame(frame: RelayTransportFrame, senderSession: RelaySession | null): Promise<string[]> {
+    const deliveredUsers = new Set<string>();
     if (frame.to === null) {
-      const recipients = Array.from(this.sessionsByDeviceId.entries())
-        .filter(([deviceId]) => !(senderDeviceId && deviceId === senderDeviceId));
+      const recipients = this.userSessions.entries()
+        .map(([userId, recipient]) => ({ userId, recipient }))
+        .filter(({ recipient }) => recipient !== senderSession);
       const results = await Promise.all(
-        recipients.map(async ([deviceId, recipient]) => {
+        recipients.map(async ({ userId, recipient }) => {
           const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
             type: 'relay:deliver',
             payload: { frame }
           });
-          return { deviceId, recipient, delivered };
+          return { userId, recipient, delivered };
         })
       );
 
       for (const result of results) {
-        const { deviceId, recipient, delivered } = result;
+        const { userId, recipient, delivered } = result;
         if (delivered) {
-          deliveredTo.push(deviceId);
+          if (userId !== senderSession?.peer?.deviceId) deliveredUsers.add(userId);
           continue;
         }
         this.dropSession(recipient, 'send-failed');
       }
-      return deliveredTo;
+      return Array.from(deliveredUsers);
     }
 
-    const recipient = this.sessionsByDeviceId.get(frame.to);
-    if (!recipient) {
-      return deliveredTo;
+    for (const recipient of this.getSessionsForUser(frame.to)) {
+      if (recipient === senderSession) continue;
+      const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
+        type: 'relay:deliver',
+        payload: { frame }
+      });
+      if (delivered) deliveredUsers.add(frame.to);
+      else this.dropSession(recipient, 'send-failed');
     }
-
-    const delivered = await this.sendEnvelopeWithStatus(recipient.socket, {
-      type: 'relay:deliver',
-      payload: { frame }
-    });
-    if (delivered) {
-      deliveredTo.push(frame.to);
-    } else {
-      this.dropSession(recipient, 'send-failed');
+    if (senderSession?.peer) {
+      for (const sibling of this.getSessionsForUser(senderSession.peer.deviceId)) {
+        if (sibling === senderSession) continue;
+        const delivered = await this.sendEnvelopeWithStatus(sibling.socket, {
+          type: 'relay:deliver',
+          payload: { frame }
+        });
+        if (!delivered) this.dropSession(sibling, 'send-failed');
+      }
     }
-    return deliveredTo;
+    return Array.from(deliveredUsers);
   }
 
   private trackAnnouncement(frame: RelayTransportFrame): void {
@@ -3438,7 +4252,11 @@ export class LanternRelay {
         createdAt
       }
     });
-    this.scheduleAnnouncementPersist();
+    // Persistência write-through: o ACK ao remetente só é enviado depois que
+    // o anúncio está confirmado em uma transação do SQLite.
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('O anúncio não pôde ser confirmado no armazenamento do Relay.');
+    }
     this.sweepAnnouncements('announce_received');
   }
 
@@ -3471,6 +4289,13 @@ export class LanternRelay {
         message: 'Somente o autor pode editar este anúncio.'
       };
     }
+    if (state.frame.type !== 'announce') {
+      return {
+        ok: false,
+        code: 'ANNOUNCEMENT_NOT_EDITABLE',
+        message: 'Anexos de anúncios não podem ser editados.'
+      };
+    }
 
     const now = Date.now();
     if (now - state.createdAt > ANNOUNCEMENT_EDIT_WINDOW_MS) {
@@ -3491,7 +4316,9 @@ export class LanternRelay {
       payload: persistedPayload
     };
     this.announcementsById.set(state.messageId, state);
-    this.scheduleAnnouncementPersist();
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('A edição do anúncio não pôde ser persistida.');
+    }
 
     return {
       ok: true,
@@ -3515,6 +4342,9 @@ export class LanternRelay {
         ? Math.trunc(deletedAtInput)
         : Date.now();
     if (state.deletedAt && state.deletedAt <= deletedAt) {
+      if (!this.persistAnnouncementStore()) {
+        throw new Error('A exclusão do anúncio não pôde ser persistida.');
+      }
       return;
     }
     state.deletedAt = deletedAt;
@@ -3522,8 +4352,11 @@ export class LanternRelay {
     state.reactionsByDeviceId = {};
     state.readByDeviceId = {};
     this.announcementsById.set(messageId, state);
-    this.scheduleAnnouncementPersist();
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('A exclusão do anúncio não pôde ser persistida.');
+    }
     this.broadcastAnnouncementExpiry([messageId], 'announcement_deleted');
+    this.centralStore.purgeAnnouncementFrames([messageId]);
   }
 
   private applyAnnouncementReaction(frame: RelayTransportFrame): void {
@@ -3544,7 +4377,9 @@ export class LanternRelay {
     }
 
     this.announcementsById.set(payload.targetMessageId, state);
-    this.scheduleAnnouncementPersist();
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('A reação do anúncio não pôde ser persistida.');
+    }
     this.broadcastAnnouncementReactions(payload.targetMessageId, state.reactionsByDeviceId, 'reaction_update');
   }
 
@@ -3582,7 +4417,9 @@ export class LanternRelay {
       return;
     }
 
-    this.scheduleAnnouncementPersist();
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('A leitura do anúncio não pôde ser persistida.');
+    }
     this.broadcastAnnouncementReads(touched, 'read_update');
   }
 
@@ -3612,10 +4449,11 @@ export class LanternRelay {
     }
 
     if (changed) {
-      this.scheduleAnnouncementPersist();
+      if (!this.persistAnnouncementStore()) return;
     }
     if (expiredNow.length > 0) {
       this.broadcastAnnouncementExpiry(expiredNow, reason);
+      this.centralStore.purgeAnnouncementFrames(expiredNow);
     }
   }
 
@@ -3805,19 +4643,8 @@ export class LanternRelay {
     }
   }
 
-  private scheduleAnnouncementPersist(): void {
-    if (this.announcementPersistTimer) return;
-    this.announcementPersistTimer = setTimeout(() => {
-      this.announcementPersistTimer = null;
-      this.persistAnnouncementStore();
-    }, 220);
-    this.announcementPersistTimer.unref?.();
-  }
-
-  private persistAnnouncementStore(): void {
+  private persistAnnouncementStore(): boolean {
     try {
-      const dir = path.dirname(ANNOUNCEMENT_STORE_FILE);
-      fs.mkdirSync(dir, { recursive: true });
       const payload = {
         version: 1,
         savedAt: Date.now(),
@@ -3832,31 +4659,40 @@ export class LanternRelay {
           frame: state.frame
         }))
       };
-      const tmpFile = `${ANNOUNCEMENT_STORE_FILE}.tmp`;
-      fs.writeFileSync(tmpFile, this.centralStore.protectJson(payload));
-      fs.renameSync(tmpFile, ANNOUNCEMENT_STORE_FILE);
+      this.centralStore.writeCanonicalState(
+        ANNOUNCEMENT_STATE_KEY,
+        payload,
+        ANNOUNCEMENT_STATE_VERSION
+      );
+      return true;
     } catch (error) {
       logRelay(
         'announcement_store_persist_failed',
         {
-          file: ANNOUNCEMENT_STORE_FILE,
+          file: this.centralStore.getDatabaseFile(),
           message: error instanceof Error ? error.message : String(error)
         },
         { level: 'warn', rateKey: 'announcement_store_persist_failed', rateLimitMs: 20_000 }
       );
+      return false;
     }
   }
 
   private loadAnnouncementStore(): void {
     try {
-      if (!fs.existsSync(ANNOUNCEMENT_STORE_FILE)) {
-        return;
+      let parsed = this.centralStore.readCanonicalState<{ announcements?: unknown[] }>(
+        ANNOUNCEMENT_STATE_KEY,
+        ANNOUNCEMENT_STATE_VERSION
+      );
+      let importedLegacy = false;
+      if (!parsed && fs.existsSync(LEGACY_ANNOUNCEMENT_STORE_FILE)) {
+        const raw = fs.readFileSync(LEGACY_ANNOUNCEMENT_STORE_FILE, 'utf8');
+        parsed = this.centralStore.unprotectJson<{ announcements?: unknown[] } | null>(raw);
+        importedLegacy = true;
       }
-
-      const raw = fs.readFileSync(ANNOUNCEMENT_STORE_FILE, 'utf8');
-      const parsed = this.centralStore.unprotectJson<{ announcements?: unknown[] } | null>(raw);
       const list = Array.isArray(parsed?.announcements) ? parsed!.announcements : [];
       let loaded = 0;
+      let recoveredFromFrames = 0;
 
       for (const item of list) {
         const record = asRecord(item);
@@ -3898,16 +4734,62 @@ export class LanternRelay {
         loaded += 1;
       }
 
+      // canonical_frames é uma segunda fonte durável. Ela permite reconstruir
+      // anúncios cujo estado relacional tenha sido apagado por uma interrupção
+      // ou por versões antigas do encerramento não idempotente.
+      const now = Date.now();
+      const staleFrameIds: string[] = [];
+      for (const storedFrame of this.centralStore.listAnnouncementFrames()) {
+        if (this.announcementsById.has(storedFrame.messageId)) continue;
+        const createdAt = Math.trunc(storedFrame.createdAt);
+        const expiresAt = createdAt + ANNOUNCEMENT_TTL_MS;
+        if (expiresAt <= now) {
+          staleFrameIds.push(storedFrame.messageId);
+          continue;
+        }
+        this.announcementsById.set(storedFrame.messageId, {
+          messageId: storedFrame.messageId,
+          createdAt,
+          expiresAt,
+          expiredAt: null,
+          deletedAt: null,
+          reactionsByDeviceId: {},
+          readByDeviceId: {},
+          frame: {
+            type: storedFrame.type,
+            messageId: storedFrame.messageId,
+            from: storedFrame.senderUserId,
+            to: null,
+            createdAt,
+            payload: storedFrame.payload
+          }
+        });
+        recoveredFromFrames += 1;
+      }
+      if (staleFrameIds.length > 0) {
+        this.centralStore.purgeAnnouncementFrames(staleFrameIds);
+      }
+
       this.sweepAnnouncements('store_load');
+      if (importedLegacy || recoveredFromFrames > 0) {
+        this.persistAnnouncementStore();
+        logRelay(importedLegacy ? 'announcement_store_migrated_to_sqlite' : 'announcement_store_recovered', {
+          legacyFile: LEGACY_ANNOUNCEMENT_STORE_FILE,
+          databaseFile: this.centralStore.getDatabaseFile(),
+          recoveredFromFrames
+        });
+      }
       logRelay('announcement_store_loaded', {
-        file: ANNOUNCEMENT_STORE_FILE,
-        loaded
+        file: this.centralStore.getDatabaseFile(),
+        loaded,
+        recoveredFromFrames,
+        importedLegacy
       });
     } catch (error) {
       logRelay(
         'announcement_store_load_failed',
         {
-          file: ANNOUNCEMENT_STORE_FILE,
+          file: this.centralStore.getDatabaseFile(),
           message: error instanceof Error ? error.message : String(error)
         },
         { level: 'warn' }
@@ -3927,15 +4809,13 @@ export class LanternRelay {
     this.sessionsBySocket.delete(session.socket);
     const peer = session.peer;
     if (peer) {
-      const mapped = this.sessionsByDeviceId.get(peer.deviceId);
-      if (mapped === session) {
-        this.sessionsByDeviceId.delete(peer.deviceId);
+      if (this.userSessions.remove(peer.deviceId, session)) {
         if (!suppressPresence) {
           logRelay('peer_offline', {
             deviceId: peer.deviceId,
             displayName: peer.displayName,
             reason,
-            totalOnline: this.sessionsByDeviceId.size
+            totalOnline: this.userSessions.userCount
           });
           this.bumpPresenceRevision('peer_offline');
           this.broadcastPresenceDelta(
@@ -3959,11 +4839,23 @@ export class LanternRelay {
   }
 
   private listPeers(): RelayPeerInfo[] {
-    return Array.from(this.sessionsByDeviceId.values())
+    return this.listPrimarySessions()
       .map((session) => session.peer)
       .filter((peer): peer is RelayPeerInfo => Boolean(peer))
       .map((peer) => this.clonePeerWithLiveSeen(peer))
       .sort((a, b) => a.displayName.localeCompare(b.displayName, 'pt-BR'));
+  }
+
+  private getSessionsForUser(userId: string): RelaySession[] {
+    return this.userSessions.forUser(userId);
+  }
+
+  private registerUserSession(userId: string, session: RelaySession): void {
+    this.userSessions.add(userId, session);
+  }
+
+  private listPrimarySessions(): RelaySession[] {
+    return this.userSessions.primarySessions();
   }
 
   private clonePeerWithLiveSeen(peer: RelayPeerInfo): RelayPeerInfo {
@@ -3971,6 +4863,41 @@ export class LanternRelay {
       ...peer,
       lastSeenAt: Date.now()
     };
+  }
+
+  private sendDirectory(session: RelaySession): void {
+    const viewerId = session.peer?.deviceId;
+    if (!viewerId) return;
+    this.sendEnvelope(session.socket, {
+      type: 'relay:directory',
+      payload: {
+        users: this.centralStore.listVisibleUsersForUser(viewerId).map((user) => ({
+          deviceId: user.userId,
+          username: user.username,
+          displayName: user.displayName,
+          department: user.department,
+          avatarEmoji: user.avatarEmoji,
+          avatarBg: user.avatarBg,
+          statusMessage: user.statusMessage
+        }))
+      }
+    });
+  }
+
+  private broadcastDirectory(): void {
+    for (const session of this.sessionsBySocket.values()) {
+      if (session.peer) this.sendDirectory(session);
+    }
+  }
+
+  private disconnectDisabledUser(userId: string): void {
+    for (const session of this.getSessionsForUser(userId)) {
+      this.sendEnvelope(session.socket, {
+        type: 'relay:error',
+        payload: { code: 'ACCOUNT_DISABLED', message: 'Esta conta foi desativada pelo administrador.' }
+      });
+      this.dropSession(session, 'account-disabled');
+    }
   }
 
   private sendPresenceSnapshot(session: RelaySession): void {

@@ -200,16 +200,49 @@ export class MessageService {
     options?: { forwardedFromMessageId?: string | null }
   ): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
+    return this.sendFileToConversation({
+      targetUserId: peerId,
+      conversationId: this.db.ensureDmConversation(
+        peerId,
+        peer?.displayName || `Contato ${peerId.slice(0, 6)}`
+      ),
+      filePath,
+      replyTo,
+      forwardedFromMessageId: options?.forwardedFromMessageId || null
+    });
+  }
+
+  async sendAnnouncementFile(
+    filePath: string,
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage> {
+    return this.sendFileToConversation({
+      targetUserId: null,
+      conversationId: ANNOUNCEMENTS_CONVERSATION_ID,
+      filePath,
+      replyTo,
+      forwardedFromMessageId: null
+    });
+  }
+
+  private async sendFileToConversation(input: {
+    targetUserId: string | null;
+    conversationId: string;
+    filePath: string;
+    replyTo?: MessageReplyPayload | null;
+    forwardedFromMessageId?: string | null;
+  }): Promise<DbMessage> {
+    const { targetUserId, conversationId, filePath, replyTo } = input;
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
 
     const messageId = randomUUID();
-    const conversationId = this.db.ensureDmConversation(
-      peerId,
-      peer?.displayName || `Contato ${peerId.slice(0, 6)}`
-    );
     const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
     const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
-    const { offer } = await this.fileTransfer.createOffer(peerId, managedFilePath, messageId);
+    const { offer } = await this.fileTransfer.createOffer(
+      targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
+      managedFilePath,
+      messageId
+    );
     this.deleteEphemeralOutgoingFile(filePath);
 
     if (offer.size > MAX_FILE_SIZE_BYTES) {
@@ -221,7 +254,7 @@ export class MessageService {
       conversationId,
       direction: 'out',
       senderDeviceId: this.profile.deviceId,
-      receiverDeviceId: peerId,
+      receiverDeviceId: targetUserId,
       type: 'file',
       bodyText: null,
       fileId: offer.fileId,
@@ -237,7 +270,7 @@ export class MessageService {
       replyToType: sanitizedReply?.type || null,
       replyToPreviewText: sanitizedReply?.previewText || null,
       replyToFileName: sanitizedReply?.fileName || null,
-      forwardedFromMessageId: options?.forwardedFromMessageId || null,
+      forwardedFromMessageId: input.forwardedFromMessageId || null,
       editedAt: null,
       createdAt
     };
@@ -248,7 +281,7 @@ export class MessageService {
       direction: 'send',
       fileId: offer.fileId,
       messageId,
-      peerId,
+      peerId: targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
       transferred: 0,
       total: offer.size
     });
@@ -264,10 +297,13 @@ export class MessageService {
         filePath: managedFilePath,
         onProgress: (transferred) => this.emitEvent({
           type: 'transfer:progress', direction: 'send', fileId: offer.fileId,
-          messageId, peerId, transferred, total: offer.size
+          messageId,
+          peerId: targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
+          transferred,
+          total: offer.size
         })
       }).then(() => this.sendCanonicalFrame(
-        this.fileTransfer.buildOfferFrame(peerId, offerWithMeta, message.createdAt)
+        this.fileTransfer.buildOfferFrame(targetUserId, offerWithMeta, message.createdAt)
       )).then(() => {
         this.db.updateMessageStatus(messageId, 'delivered');
         const updated = this.db.getMessageById(messageId);

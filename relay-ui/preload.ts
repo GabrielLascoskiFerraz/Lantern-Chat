@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('relayUi', {
   start: () => ipcRenderer.invoke('relay-ui:start'),
   stop: () => ipcRenderer.invoke('relay-ui:stop'),
   restart: () => ipcRenderer.invoke('relay-ui:restart'),
+  backup: () => ipcRenderer.invoke('relay-ui:backup'),
+  openDashboard: () => ipcRenderer.invoke('relay-ui:openDashboard'),
   updateSettings: (input: { port?: number; tlsCertFile?: string; tlsKeyFile?: string }) =>
     ipcRenderer.invoke('relay-ui:updateSettings', input),
   pickCertificate: () => ipcRenderer.invoke('relay-ui:pickCertificate'),

@@ -9,7 +9,6 @@ export const localeLabels: Record<ClientLocale, string> = {
 const messages = {
   'pt-BR': {
     welcome: 'Conecte-se ao seu espaço Lantern',
-    subtitle: 'Informe onde o Relay está e entre com a conta criada pelo administrador.',
     relay: 'Conexão com o Relay', localAuto: 'Local automático', localManual: 'Local manual',
     external: 'Externo', host: 'Endereço', port: 'Porta', secure: 'Conexão segura (WSS)',
     discover: 'Procurar na rede', searching: 'Procurando...', found: 'Relay encontrado',
@@ -19,7 +18,6 @@ const messages = {
   },
   en: {
     welcome: 'Connect to your Lantern workspace',
-    subtitle: 'Choose the Relay and sign in with the account created by your administrator.',
     relay: 'Relay connection', localAuto: 'Local automatic', localManual: 'Local manual',
     external: 'External', host: 'Address', port: 'Port', secure: 'Secure connection (WSS)',
     discover: 'Search network', searching: 'Searching...', found: 'Relay found',
@@ -29,7 +27,6 @@ const messages = {
   },
   es: {
     welcome: 'Conéctate a tu espacio Lantern',
-    subtitle: 'Indica dónde está el Relay e inicia sesión con la cuenta creada por el administrador.',
     relay: 'Conexión con Relay', localAuto: 'Local automático', localManual: 'Local manual',
     external: 'Externo', host: 'Dirección', port: 'Puerto', secure: 'Conexión segura (WSS)',
     discover: 'Buscar en la red', searching: 'Buscando...', found: 'Relay encontrado',

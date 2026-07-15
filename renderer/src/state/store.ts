@@ -14,6 +14,10 @@ import {
   RelaySettings,
   StartupSettings
 } from '../api/ipcClient';
+import {
+  mergeFetchedMessagesWithLiveUpdates,
+  mergeRepairedConversationPage
+} from './messageMerge';
 
 interface TransferProgress {
   direction: 'send' | 'receive';
@@ -51,6 +55,7 @@ interface LanternState {
   announcementReadsByMessage: Record<string, AnnouncementReadSummary>;
   favoriteByMessageId: Record<string, boolean>;
   archivedConversationIds: string[];
+  pinnedConversationIds: string[];
   conversationPreviewById: Record<string, string>;
   unreadByConversation: Record<string, number>;
   openedUnreadCountByConversation: Record<string, number>;
@@ -72,8 +77,9 @@ interface LanternState {
   setThemeMode: (mode: 'system' | 'light' | 'dark') => void;
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
-  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<void>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<void>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<void>;
+  completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<void>;
   logout: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
   closeConversation: () => Promise<void>;
@@ -94,6 +100,10 @@ interface LanternState {
   ) => Promise<void>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  sendAnnouncementFile: (
+    filePath: string,
+    replyTo?: MessageReplyReference | null
+  ) => Promise<void>;
   sendFile: (
     peerId: string,
     filePath: string,
@@ -148,8 +158,8 @@ interface LanternState {
   markConversationUnread: (conversationId: string) => Promise<void>;
   archiveConversation: (conversationId: string) => Promise<void>;
   unarchiveConversation: (conversationId: string) => Promise<void>;
+  setConversationPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   clearConversation: (conversationId: string) => Promise<void>;
-  forgetContactConversation: (conversationId: string) => Promise<void>;
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) => Promise<void>;
   updateRelaySettings: (input: { automatic: boolean; host?: string; port?: number }) => Promise<void>;
   forceRelayRediscovery: () => Promise<void>;
@@ -158,7 +168,6 @@ interface LanternState {
     downloadsDir?: string;
     doNotDisturbUntil?: number;
   }) => Promise<void>;
-  addManualPeer: (address: string, port: number) => Promise<void>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   dismissToast: (id: string) => void;
@@ -356,6 +365,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   announcementReadsByMessage: {},
   favoriteByMessageId: {},
   archivedConversationIds: [],
+  pinnedConversationIds: [],
   conversationPreviewById: {},
   unreadByConversation: {},
   openedUnreadCountByConversation: {},
@@ -406,7 +416,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         groups,
         onlinePeers,
         unreadByConversation,
-        archivedConversationIds
+        archivedConversationIds,
+        pinnedConversationIds
       ] =
         await Promise.all([
           ipcClient.getProfile(),
@@ -416,7 +427,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ipcClient.getGroups(),
           ipcClient.getOnlinePeers(),
           ipcClient.getConversations(),
-          ipcClient.getArchivedConversationIds()
+          ipcClient.getArchivedConversationIds(),
+          ipcClient.getPinnedConversationIds()
         ]);
 
       const [groupMembersEntries, groupPinnedEntries] = await Promise.all([
@@ -455,6 +467,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       groupPinnedMessageIdsById: Object.fromEntries(groupPinnedEntries),
       onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
       archivedConversationIds,
+      pinnedConversationIds,
       unreadByConversation,
       openedUnreadCountByConversation: {
         [selectedAtLoad]: selectedUnreadAtLoad
@@ -876,9 +889,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             };
           }
 
-          const nextRows = updateExistingMessageOnly(rows, event.message);
-          const exists = nextRows !== rows;
-          if (!exists) {
+          const updatedRows = updateExistingMessageOnly(rows, event.message);
+          const nextRows = updatedRows !== rows
+            ? updatedRows
+            : state.selectedConversationId === conversationId
+              ? appendUniqueMessage(rows, event.message)
+              : rows;
+          if (nextRows === rows) {
             return state;
           }
 
@@ -1163,6 +1180,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     await ipcClient.register(input);
     await get().loadInitial();
   },
+  completeFirstLoginSetup: async (input) => {
+    const authState = await ipcClient.completeFirstLoginSetup(input);
+    set({ authState });
+    await get().loadInitial();
+  },
   logout: async () => {
     await ipcClient.logout();
     const authState = await ipcClient.getAuthState();
@@ -1171,6 +1193,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       profile: null,
       peers: [],
       groups: [],
+      pinnedConversationIds: [],
       onlinePeerIds: [],
       messagesByConversation: {},
       unreadByConversation: {},
@@ -1204,6 +1227,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
     }));
     try {
+      // Ativa primeiro para que o processo principal possa iniciar a recuperação
+      // sob demanda enquanto a página canônica é carregada.
+      await ipcClient.setActiveConversation(conversationId);
       const rows = normalizeMessageOrder(
         await ipcClient.getMessages(conversationId, MESSAGES_PAGE_SIZE)
       );
@@ -1222,7 +1248,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             ])
           : [{}, {}, {}];
       await ipcClient.markConversationRead(conversationId);
-      await ipcClient.setActiveConversation(conversationId);
 
       const fetchedAnchorMessageId =
         unreadCountAtOpen > 0 && rows.length > 0
@@ -1230,10 +1255,19 @@ export const useLanternStore = create<LanternState>((set, get) => ({
               ?.messageId || null
           : null;
 
-      set((state) => ({
+      set((state) => {
+        // Um download rápido pode emitir message:updated durante os awaits
+        // acima. A resposta de getMessages é um snapshot anterior e nunca deve
+        // apagar um filePath que já chegou pelo canal de eventos.
+        const mergedRows = mergeFetchedMessagesWithLiveUpdates(
+          rows,
+          existingRows,
+          state.messagesByConversation[conversationId] || []
+        );
+        return {
         messagesByConversation: {
           ...state.messagesByConversation,
-          [conversationId]: rows
+          [conversationId]: mergedRows
         },
         hasMoreHistoryByConversation: {
           ...state.hasMoreHistoryByConversation,
@@ -1245,7 +1279,9 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         },
         conversationPreviewById: {
           ...state.conversationPreviewById,
-          [conversationId]: rows.length > 0 ? previewFromMessage(rows[rows.length - 1]) : ''
+          [conversationId]: mergedRows.length > 0
+            ? previewFromMessage(mergedRows[mergedRows.length - 1])
+            : ''
         },
         unreadByConversation: {
           ...state.unreadByConversation,
@@ -1267,7 +1303,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         },
         loadingConversationId:
           state.loadingConversationId === conversationId ? null : state.loadingConversationId
-      }));
+        };
+      });
     } catch {
       set((state) => ({
         loadingOlderByConversation: {
@@ -1313,6 +1350,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     await ipcClient.unarchiveConversation(conversationId);
     set((state) => ({
       archivedConversationIds: state.archivedConversationIds.filter((id) => id !== conversationId)
+    }));
+  },
+  setConversationPinned: async (conversationId, pinned) => {
+    await ipcClient.setConversationPinned(conversationId, pinned);
+    set((state) => ({
+      pinnedConversationIds: pinned
+        ? [conversationId, ...state.pinnedConversationIds.filter((id) => id !== conversationId)]
+        : state.pinnedConversationIds.filter((id) => id !== conversationId)
     }));
   },
   loadOlderMessages: async (conversationId, limit = MESSAGES_PAGE_SIZE) => {
@@ -1615,6 +1660,29 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
+  sendAnnouncementFile: async (filePath, replyTo) => {
+    try {
+      const message = await ipcClient.sendAnnouncementFile(filePath, replyTo);
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [ANNOUNCEMENTS_ID]: appendUniqueMessage(
+            state.messagesByConversation[ANNOUNCEMENTS_ID] || [],
+            message
+          )
+        },
+        conversationPreviewById: {
+          ...state.conversationPreviewById,
+          [ANNOUNCEMENTS_ID]: previewFromMessage(message)
+        }
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Falha ao enviar anexo no anúncio.';
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({ toasts: [...state.toasts, { id, level: 'error', message }] }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
   sendFile: async (peerId, filePath, replyTo) => {
     try {
       const message = await ipcClient.sendFile(peerId, filePath, replyTo);
@@ -1733,8 +1801,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   reactToMessage: async (conversationId, messageId, reaction) => {
     try {
       await ipcClient.reactToMessage(conversationId, messageId, reaction);
-    } catch {
-      // O main já envia toast amigável; aqui evitamos rejeição não tratada no renderer.
+    } catch (error) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const message = error instanceof Error ? error.message : 'Não foi possível atualizar a reação.';
+      set((state) => ({
+        toasts: [...state.toasts, { id, level: 'error', message }]
+      }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
   toggleMessageFavorite: async (conversationId, messageId, favorite) => {
@@ -1879,11 +1952,59 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }
   },
   resyncConversation: async (conversationId) => {
+    const baselineRows = get().messagesByConversation[conversationId] || [];
     try {
       await ipcClient.resyncConversation(conversationId);
+      const rows = normalizeMessageOrder(
+        await ipcClient.getMessages(conversationId, MESSAGES_PAGE_SIZE)
+      );
+      const messageIds = rows.map((row) => row.messageId);
+      const [reactionMap, favoritesMap, announcementReads] = messageIds.length > 0
+        ? await Promise.all([
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReactions(messageIds)
+              : ipcClient.getMessageReactions(messageIds),
+            ipcClient.getMessageFavorites(messageIds),
+            conversationId === ANNOUNCEMENTS_ID
+              ? ipcClient.getAnnouncementReadSummary(messageIds)
+              : Promise.resolve({})
+          ])
+        : [{}, {}, {}];
+      set((state) => {
+        const refreshedRows = mergeRepairedConversationPage(
+          rows,
+          baselineRows,
+          state.messagesByConversation[conversationId] || []
+        );
+        return {
+          messagesByConversation: {
+            ...state.messagesByConversation,
+            [conversationId]: refreshedRows
+          },
+          hasMoreHistoryByConversation: {
+            ...state.hasMoreHistoryByConversation,
+            [conversationId]: rows.length === MESSAGES_PAGE_SIZE
+          },
+          conversationPreviewById: {
+            ...state.conversationPreviewById,
+            [conversationId]: refreshedRows.length > 0
+              ? previewFromMessage(refreshedRows[refreshedRows.length - 1])
+              : ''
+          },
+          announcementReactionsByMessage: {
+            ...state.announcementReactionsByMessage,
+            ...reactionMap
+          },
+          announcementReadsByMessage: {
+            ...state.announcementReadsByMessage,
+            ...announcementReads
+          },
+          favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap)
+        };
+      });
     } catch (error) {
       const toastMessage =
-        error instanceof Error ? error.message : 'Não foi possível ressincronizar a conversa.';
+        error instanceof Error ? error.message : 'Não foi possível reparar o cache da conversa.';
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set((state) => ({
         toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
@@ -1935,62 +2056,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         }
       };
     });
-  },
-  forgetContactConversation: async (conversationId) => {
-    const wasSelected = get().selectedConversationId === conversationId;
-    const peerId = conversationId.startsWith('dm:') ? conversationId.slice(3) : null;
-
-    await ipcClient.forgetContactConversation(conversationId);
-
-    set((state) => {
-      const messageIdsToDrop = (state.messagesByConversation[conversationId] || []).map(
-        (row) => row.messageId
-      );
-      const nextMessages = { ...state.messagesByConversation };
-      delete nextMessages[conversationId];
-
-      const nextHasMore = { ...state.hasMoreHistoryByConversation };
-      delete nextHasMore[conversationId];
-
-      const nextLoadingOlder = { ...state.loadingOlderByConversation };
-      delete nextLoadingOlder[conversationId];
-
-      const nextPreview = { ...state.conversationPreviewById };
-      delete nextPreview[conversationId];
-
-      const nextUnread = { ...state.unreadByConversation };
-      delete nextUnread[conversationId];
-      const nextUnreadAnchor = { ...state.unreadAnchorMessageIdByConversation };
-      delete nextUnreadAnchor[conversationId];
-
-      const nextTyping = { ...state.typingByConversation };
-      delete nextTyping[conversationId];
-      const nextFavorites = { ...state.favoriteByMessageId };
-      for (const messageId of messageIdsToDrop) {
-        delete nextFavorites[messageId];
-      }
-
-      return {
-        peers: peerId ? state.peers.filter((peer) => peer.deviceId !== peerId) : state.peers,
-        onlinePeerIds: peerId
-          ? state.onlinePeerIds.filter((id) => id !== peerId)
-          : state.onlinePeerIds,
-        selectedConversationId: wasSelected ? ANNOUNCEMENTS_ID : state.selectedConversationId,
-        messagesByConversation: nextMessages,
-        hasMoreHistoryByConversation: nextHasMore,
-        loadingOlderByConversation: nextLoadingOlder,
-        conversationPreviewById: nextPreview,
-        unreadByConversation: nextUnread,
-        unreadAnchorMessageIdByConversation: nextUnreadAnchor,
-        typingByConversation: nextTyping,
-        favoriteByMessageId: nextFavorites,
-        archivedConversationIds: state.archivedConversationIds.filter((id) => id !== conversationId)
-      };
-    });
-
-    if (wasSelected) {
-      await get().selectConversation(ANNOUNCEMENTS_ID);
-    }
   },
   updateProfile: async (input) => {
     const profile = await ipcClient.updateProfile(input);
@@ -2208,9 +2273,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   updateStartupSettings: async (input) => {
     const startupSettings = await ipcClient.updateStartupSettings(input);
     set({ startupSettings });
-  },
-  addManualPeer: async (address, port) => {
-    await ipcClient.addManualPeer(address, port);
   },
   openFile: async (filePath) => {
     await ipcClient.openFile(filePath);

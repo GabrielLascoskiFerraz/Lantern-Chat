@@ -1,16 +1,228 @@
 <!doctype html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lantern Relay</title><link rel="stylesheet" href="./styles.css"></head>
-<body><main class="app-shell">
-  <header class="hero"><div><p class="eyebrow">LANTERN RELAY</p><h1>Relay canônico</h1><p id="connection-summary">Carregando estado…</p></div><span id="status-pill" class="status-pill offline">Offline</span></header>
-  <section class="action-row"><button id="start" class="primary">Iniciar Relay</button><button id="restart">Reiniciar</button><button id="stop" class="danger">Parar</button></section>
-  <section class="metrics"><article><span>Usuários conectados</span><strong id="metric-peers">0</strong></article><article><span>Anúncios ativos</span><strong id="metric-announcements">0</strong></article><article><span>Frames canônicos</span><strong id="metric-frames">0</strong></article><article><span>Tempo ativo</span><strong id="metric-uptime">--</strong></article></section>
-  <section class="card"><div class="section-title"><h2>Conexão do Relay</h2><span id="port-label">Porta 43190</span></div><p>WSS é recomendado e obrigatório para acesso externo. Sem certificado, o Relay aceita WS somente na rede local.</p><div id="addresses" class="addresses"></div></section>
-  <section class="card settings"><div class="section-title"><h2>Configuração segura</h2><span>Certificado obrigatório</span></div>
-    <label>Porta<input id="port-input" type="number" min="1" max="65535"></label>
-    <label>Certificado TLS (opcional no modo local)<div class="file-row"><input id="cert-input" readonly><button id="pick-cert">Selecionar</button></div></label>
-    <label>Chave privada<div class="file-row"><input id="key-input" readonly type="password"><button id="pick-key">Selecionar</button></div></label>
-    <button id="save-settings" class="primary">Aplicar configuração</button><p id="feedback" class="feedback" role="alert"></p>
-  </section>
-  <section class="card"><div class="section-title"><h2>Usuários conectados</h2><span id="users-count">0 online</span></div><div id="users" class="users"><p class="empty">Nenhum usuário conectado.</p></div></section>
-</main><script src="./app.js"></script></body></html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lantern Relay</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="dashboard-shell">
+    <aside class="dashboard-nav" aria-label="Navegação do Relay">
+      <div class="nav-brand">
+        <img class="nav-logo" src="../../assets/icon.png" alt="">
+        <div>
+          <strong>Lantern</strong>
+          <span>Relay</span>
+        </div>
+      </div>
+
+      <div class="nav-scroll">
+        <div class="nav-caption">Servidor</div>
+        <nav class="nav-links">
+          <a class="nav-link active" href="#overview" data-section="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+            <span>Visão geral</span>
+          </a>
+          <a class="nav-link" href="#activity" data-section="activity">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16l4-4 3 2 5-7"/></svg>
+            <span>Atividade</span>
+          </a>
+          <a class="nav-link" href="#connection" data-section="connection">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5a10 10 0 0 1 14 0M8 16a6 6 0 0 1 8 0M11 19.5a1.5 1.5 0 0 1 2 0"/></svg>
+            <span>Conexão</span>
+          </a>
+        </nav>
+      </div>
+
+      <div class="nav-footer">
+        <button id="dashboard" class="button primary wide" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M19 14v5H5V5h5"/></svg>
+          Abrir dashboard
+        </button>
+        <div class="nav-version">
+          <span id="nav-version">Lantern Relay</span>
+          <span id="nav-store">Dados locais persistentes</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="page">
+      <header class="topbar">
+        <div>
+          <h1>Visão geral do Relay</h1>
+          <p id="connection-summary">Carregando estado do servidor…</p>
+        </div>
+        <div id="status-pill" class="live-pill offline" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="status-label">Offline</span>
+        </div>
+      </header>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+
+      <section id="overview" class="page-section overview-section" aria-labelledby="overview-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">Servidor</span>
+            <h2 id="overview-title">Operação</h2>
+          </div>
+          <span id="last-update" class="section-meta">Atualizando…</span>
+        </div>
+
+        <div class="operation-card card">
+          <div class="operation-state">
+            <div id="operation-icon" class="operation-icon offline" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 5h14v5H5V5Zm0 9h14v5H5v-5Zm3-6h.01M8 17h.01"/></svg>
+            </div>
+            <div>
+              <strong id="operation-title">Relay parado</strong>
+              <span id="operation-detail">Inicie o servidor para aceitar conexões.</span>
+            </div>
+          </div>
+          <div class="operation-actions">
+            <button id="start" class="button primary" type="button">Iniciar</button>
+            <button id="restart" class="button" type="button">Reiniciar</button>
+            <button id="stop" class="button danger" type="button">Parar</button>
+            <button id="backup" class="button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>
+              Criar backup
+            </button>
+          </div>
+        </div>
+
+        <div class="metrics" aria-label="Métricas do Relay">
+          <article class="metric-card card">
+            <div class="metric-head"><span>Usuários online</span><i class="metric-icon">●</i></div>
+            <strong id="metric-peers">0</strong>
+            <small id="metric-sessions">0 sessões ativas</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span>Contas</span><i class="metric-icon">♙</i></div>
+            <strong id="metric-accounts">0</strong>
+            <small id="metric-retention">Retenção —</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span>Frames</span><i class="metric-icon">↕</i></div>
+            <strong id="metric-frames">0</strong>
+            <small>Eventos persistidos</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span>Anexos</span><i class="metric-icon">⌁</i></div>
+            <strong id="metric-attachments">0</strong>
+            <small id="metric-storage">0 B armazenados</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span>Transferências</span><i class="metric-icon">⇅</i></div>
+            <strong id="metric-transfers">0</strong>
+            <small id="metric-transfer-health">Nenhuma falha</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span>Tempo ativo</span><i class="metric-icon">◷</i></div>
+            <strong id="metric-uptime">—</strong>
+            <small id="metric-started">Servidor parado</small>
+          </article>
+        </div>
+      </section>
+
+      <section id="activity" class="page-section" aria-labelledby="activity-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">Tempo real</span>
+            <h2 id="activity-title">Atividade</h2>
+          </div>
+        </div>
+
+        <div class="activity-grid">
+          <article class="card list-card">
+            <div class="card-header">
+              <div>
+                <h3>Usuários conectados</h3>
+                <p>Uma entrada por conta ativa no Relay.</p>
+              </div>
+              <span id="users-count" class="count-badge">0</span>
+            </div>
+            <div id="users" class="entity-list">
+              <div class="empty-state"><span>○</span><strong>Ninguém online</strong><small>As conexões aparecerão aqui.</small></div>
+            </div>
+          </article>
+
+          <article class="card list-card">
+            <div class="card-header">
+              <div>
+                <h3>Anúncios ativos</h3>
+                <p>Publicações disponíveis nas próximas 24 horas.</p>
+              </div>
+              <span id="announcements-count" class="count-badge">0</span>
+            </div>
+            <div id="announcements" class="entity-list">
+              <div class="empty-state"><span>◇</span><strong>Nenhum anúncio</strong><small>Novos anúncios aparecerão aqui.</small></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="connection" class="page-section" aria-labelledby="connection-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">Rede</span>
+            <h2 id="connection-title">Conexão e segurança</h2>
+          </div>
+          <span id="transport-badge" class="transport-badge">WS local</span>
+        </div>
+
+        <div class="connection-grid">
+          <article class="card endpoint-card">
+            <div class="card-header compact">
+              <div>
+                <h3>Endereços disponíveis</h3>
+                <p>Selecione um endereço para copiá-lo.</p>
+              </div>
+              <span id="port-label" class="section-meta">Porta 43190</span>
+            </div>
+            <div id="addresses" class="addresses"></div>
+            <div class="security-note">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/></svg>
+              <div><strong id="security-title">Acesso local</strong><span id="security-detail">WS é aceito somente na rede local quando não há certificado.</span></div>
+            </div>
+          </article>
+
+          <article class="card settings-card">
+            <div class="card-header compact">
+              <div>
+                <h3>Configuração do servidor</h3>
+                <p>Alterações reiniciam o Relay quando ele está ativo.</p>
+              </div>
+            </div>
+            <div class="settings-form">
+              <label class="field port-field">
+                <span>Porta</span>
+                <input id="port-input" type="number" min="1" max="65535" inputmode="numeric">
+              </label>
+              <label class="field">
+                <span>Certificado TLS</span>
+                <div class="file-row">
+                  <input id="cert-input" readonly placeholder="Nenhum certificado selecionado">
+                  <button id="pick-cert" class="button" type="button">Selecionar</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>Chave privada</span>
+                <div class="file-row">
+                  <input id="key-input" readonly type="password" placeholder="Nenhuma chave selecionada">
+                  <button id="pick-key" class="button" type="button">Selecionar</button>
+                </div>
+              </label>
+              <div class="settings-footer">
+                <span id="settings-state">Configuração salva</span>
+                <button id="save-settings" class="button primary" type="button">Aplicar configuração</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

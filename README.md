@@ -7,7 +7,7 @@ Mensageiro desktop para redes locais ou ambientes externos, com um **Relay canô
 ```text
 ┌──────────────────┐        WS/WSS         ┌──────────────────────────┐
 │ Clientes Lantern │ ◀──────────────────▶  │ Lantern Relay canônico  │
-│ macOS / Windows  │                       │ SQLite + anexos cifrados │
+│ macOS/Win/Web    │                       │ SQLite + anexos cifrados │
 └──────────────────┘                       └──────────────────────────┘
                                                    ▲
                                                    │ localhost
@@ -19,8 +19,9 @@ Mensageiro desktop para redes locais ou ambientes externos, com um **Relay canô
 - O Relay valida e persiste todas as operações duráveis.
 - O banco SQLite do cliente é cache de interface, não uma fonte concorrente de verdade.
 - Envios só são confirmados localmente depois da confirmação do Relay.
-- Limpar ou esquecer uma conversa é persistido por usuário no servidor.
+- Limpar uma conversa é persistido por usuário no servidor. Contatos só deixam o diretório quando a conta é desativada ou excluída pela administração.
 - Mensagens de chats e grupos são carregadas em páginas sob demanda.
+- A pesquisa de mensagens consulta o histórico canônico no Relay; o cache local é usado apenas quando o servidor está offline.
 - No login, o cliente recebe apenas um índice leve: o último item de cada chat e o estado atual/última mensagem de cada grupo.
 - Anexos são baixados somente para as páginas abertas. Se uma cópia local desaparecer, ela é recuperada novamente do Relay quando a mensagem voltar a ficar visível.
 - Downloads interrompidos têm retomada e novas tentativas automáticas, com validação de tamanho e SHA-256.
@@ -28,16 +29,19 @@ Mensageiro desktop para redes locais ou ambientes externos, com um **Relay canô
 ## Funcionalidades
 
 - Contas centralizadas administradas pelo Relay.
+- Múltiplos dispositivos podem permanecer conectados à mesma conta; cada sessão recebe as entregas sem duplicar a confirmação lógica do usuário.
 - Login automático nas próximas aberturas usando token protegido pelo `safeStorage` do Electron.
 - Conversas diretas, respostas, encaminhamento, edição, exclusão, reações e favoritos locais.
 - Grupos com membros, administradores, transferência de propriedade, mensagens fixadas e anexos.
-- Anúncios com expiração, leitura e reações.
+- Anúncios com expiração, leitura, reações, GIFs e anexos carregados sob demanda.
 - Presença e diretório canônicos, inclusive para usuários offline.
 - Descoberta automática do Relay por mDNS e UDP, além de endereço manual.
 - Figurinhas distribuídas pelo Relay.
 - Inicialização automática opcional do cliente com o sistema.
 - Interface em português, inglês e espanhol.
+- O mesmo cliente Lantern é servido pelo próprio Relay em `/app`. Desktop e navegador compartilham o renderer, a linguagem visual e as operações canônicas; somente integrações exclusivas do sistema operacional são adaptadas pela ponte web.
 - Política de retenção permanente, 1 mês, 6 meses ou 1 ano.
+- Backup consistente do SQLite e trilha administrativa cifrada.
 
 ## Segurança
 
@@ -112,6 +116,14 @@ Dashboard administrativa local:
 http://127.0.0.1:43190/
 ```
 
+Cliente Lantern pelo navegador:
+
+```text
+http://<endereço-do-relay>:43190/app/
+```
+
+Em modo externo, use obrigatoriamente `https://` e um certificado confiável. O cliente web usa a mesma conta e o mesmo histórico canônico dos aplicativos desktop.
+
 ## Conta administrativa inicial
 
 No primeiro início, o Relay cria a conta administrativa `admin`. Para desenvolvimento, a credencial padrão é:
@@ -185,7 +197,9 @@ A Relay UI permite:
 - iniciar, parar e reiniciar o Relay;
 - configurar porta, certificado e chave;
 - copiar endereços locais disponíveis;
-- acompanhar usuários conectados, anúncios, frames e tempo ativo.
+- acompanhar usuários, sessões, armazenamento, transferências, anúncios, frames e tempo ativo;
+- abrir a administração completa de contas e sessões no navegador local;
+- criar um backup restaurável sem interromper o Relay.
 
 Certificado e chave são opcionais juntos no modo local. Para rede externa, use o Relay em modo externo com TLS obrigatório.
 
@@ -193,12 +207,13 @@ Certificado e chave são opcionais juntos no modo local. Para rede externa, use 
 
 Na dashboard web local é possível:
 
-- criar, editar, ativar e excluir contas;
+- criar, editar, desativar, reativar e excluir contas;
 - definir nome, setor, idioma e função;
 - redefinir senhas e revogar sessões;
 - acompanhar usuários conectados e métricas do Relay;
 - administrar anúncios;
-- configurar a política de retenção.
+- configurar a política de retenção;
+- criar backups consistentes e consultar a trilha de auditoria.
 
 ## Persistência e backup
 
@@ -211,24 +226,28 @@ Estrutura principal:
 ├── central/
 │   ├── lantern-relay.db
 │   ├── master.key
-│   └── attachments/
-├── groups.json
+│   ├── attachments/
+│   └── backups/
+│       └── lantern-relay-<data>/
+│           ├── manifest.json
+│           ├── central/
+│           ├── group-attachments/
+│           └── stickers/
 ├── group-attachments/
-├── announcements.json
 └── stickers/
 ```
 
-Faça backup consistente do diretório inteiro, principalmente de `central/master.key`, `central/lantern-relay.db`, `groups.json` e dos diretórios de anexos. O cache SQLite dos clientes não substitui esse backup e pode ser reconstruído a partir do Relay.
+Contas, sessões, mensagens diretas, anúncios, grupos, eventos e metadados de anexos são persistidos em tabelas relacionais cifradas de `central/lantern-relay.db`. A busca usa índices cegos HMAC: o Relay pesquisa sem manter o texto em claro no índice. Os arquivos `groups.json` e `announcements.json` de instalações anteriores são importados automaticamente uma única vez e deixam de ser fontes ativas.
+
+Use a Relay UI ou a dashboard administrativa para criar um pacote em `central/backups`. Cada pacote contém uma cópia consistente do SQLite, a chave mestra, anexos diretos, anexos de grupos, stickers e um manifesto SHA-256. Ele pode ser restaurado copiando seu conteúdo de volta para o diretório de dados com o Relay parado. O cache SQLite dos clientes não substitui esse backup e pode ser reconstruído sob demanda a partir do Relay.
 
 ## Verificação
 
 ```bash
-npm run lint
-npm run build:renderer
-npm run build:electron
-npm run build:relay
-npm run build:relay-ui
+npm run verify
 ```
+
+O comando executa lint, typecheck dos quatro processos, testes de migração, persistência cifrada, cursor canônico, busca indexada, backup/restauração, transferência imediata de anexos diretos e de grupo e sessões multi-device, além de todos os builds de desenvolvimento. A mesma verificação roda no CI da branch.
 
 ## Builds
 

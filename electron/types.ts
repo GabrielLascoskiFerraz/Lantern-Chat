@@ -5,7 +5,6 @@ export type MessageType =
   | 'chat:delete'
   | 'chat:edit'
   | 'chat:clear'
-  | 'chat:forget'
   | 'group:event'
   | 'announce'
   | 'file:offer'
@@ -43,6 +42,24 @@ export interface AuthenticatedUser {
   statusMessage: string;
   locale: ClientLocale;
   role: 'admin' | 'user';
+  profileSetupCompleted: boolean;
+}
+
+export interface UserPreferencesSnapshot {
+  conversations: Array<{
+    conversationId: string;
+    pinned: boolean;
+    archived: boolean;
+    manualUnread: boolean;
+    readAt: number;
+    updatedAt: number;
+  }>;
+  messages: Array<{
+    messageId: string;
+    favorite: boolean;
+    hidden: boolean;
+    updatedAt: number;
+  }>;
 }
 
 export interface ClientAuthState {
@@ -68,6 +85,7 @@ export interface Peer {
 }
 
 export interface ProtocolFrame<T = unknown> {
+  serverSeq?: number;
   type: MessageType;
   messageId: string;
   from: string;
@@ -103,10 +121,6 @@ export interface EditMessagePayload {
 }
 
 export interface ClearConversationPayload {
-  scope: 'dm';
-}
-
-export interface ForgetPeerPayload {
   scope: 'dm';
 }
 
@@ -146,6 +160,7 @@ export interface FileChunkPayload {
 }
 
 export interface DbMessage {
+  serverSeq?: number | null;
   messageId: string;
   conversationId: string;
   direction: 'in' | 'out';

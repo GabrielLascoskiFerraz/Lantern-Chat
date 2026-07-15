@@ -23,8 +23,13 @@ import {
 export interface IpcBindings {
   getAuthState: () => ClientAuthState;
   discoverRelays: (port?: number) => Promise<Array<{ host: string; port: number; secure: boolean }>>;
-  login: (input: { relay: ClientRelayConfig; username: string; password: string }) => Promise<ClientAuthState>;
+  login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<ClientAuthState>;
+  requestPasswordReset: (input: { relay: ClientRelayConfig; username: string }) => Promise<{ requestToken: string }>;
+  getPasswordResetStatus: (requestToken: string) => Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'>;
+  completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => Promise<void>;
+  changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<ClientAuthState>;
+  completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<ClientAuthState>;
   logout: () => Promise<void>;
   getProfile: () => Profile;
   updateProfile: (input: Pick<Profile, 'displayName' | 'avatarEmoji' | 'avatarBg' | 'statusMessage'>) => Profile;
@@ -106,6 +111,10 @@ export interface IpcBindings {
   ) => Promise<DbMessage>;
   sendTyping: (peerId: string, isTyping: boolean) => Promise<void>;
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) => Promise<DbMessage>;
+  sendAnnouncementFile: (
+    filePath: string,
+    replyTo?: MessageReplyPayload | null
+  ) => Promise<DbMessage>;
   sendFile: (
     peerId: string,
     filePath: string,
@@ -144,7 +153,7 @@ export interface IpcBindings {
     query: string,
     limit?: number,
     offset?: number
-  ) => string[];
+  ) => Promise<string[]> | string[];
   getConversationPreviews: (conversationIds: string[]) => Record<string, string>;
   getMessageReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
   getAnnouncementReactions: (messageIds: string[]) => Record<string, AnnouncementReactionSummary>;
@@ -155,16 +164,16 @@ export interface IpcBindings {
   getRelayStickers: () => Promise<StickerCatalogItem[]>;
   prepareRelayStickerFile: (relativePath: string) => Promise<string | null>;
   exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<{ canceled: boolean; filePath: string | null }>;
-  setActiveConversation: (conversationId: string) => void;
-  markConversationRead: (conversationId: string) => void;
-  markConversationUnread: (conversationId: string) => void;
-  archiveConversation: (conversationId: string) => number;
-  unarchiveConversation: (conversationId: string) => number;
+  setActiveConversation: (conversationId: string) => Promise<void> | void;
+  markConversationRead: (conversationId: string) => Promise<void>;
+  markConversationUnread: (conversationId: string) => Promise<void>;
+  archiveConversation: (conversationId: string) => Promise<number>;
+  unarchiveConversation: (conversationId: string) => Promise<number>;
+  getPinnedConversationIds: () => string[];
+  setConversationPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   clearConversation: (conversationId: string) => void;
-  forgetContactConversation: (conversationId: string) => Promise<void>;
   getConversations: () => Record<string, number>;
   getArchivedConversationIds: () => string[];
-  addManualPeer: (address: string, port: number) => void;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
 }
 
@@ -178,7 +187,14 @@ export const registerIpc = (
 
   ipcMain.handle('lantern:getAuthState', () => bindings.getAuthState());
   ipcMain.handle('lantern:discoverRelays', (_event, port?: number) => bindings.discoverRelays(port));
+  ipcMain.handle('lantern:completeFirstLoginSetup', (_event, input) =>
+    bindings.completeFirstLoginSetup(input)
+  );
   ipcMain.handle('lantern:login', (_event, input) => bindings.login(input));
+  ipcMain.handle('lantern:requestPasswordReset', (_event, input) => bindings.requestPasswordReset(input));
+  ipcMain.handle('lantern:getPasswordResetStatus', (_event, requestToken) => bindings.getPasswordResetStatus(requestToken));
+  ipcMain.handle('lantern:completePasswordReset', (_event, input) => bindings.completePasswordReset(input));
+  ipcMain.handle('lantern:changePassword', (_event, input) => bindings.changePassword(input));
   ipcMain.handle('lantern:register', (_event, input) => bindings.register(input));
   ipcMain.handle('lantern:logout', () => bindings.logout());
 
@@ -478,6 +494,11 @@ export const registerIpc = (
       bindings.sendAnnouncement(text, replyTo)
   );
   ipcMain.handle(
+    'lantern:sendAnnouncementFile',
+    (_event, filePath: string, replyTo?: MessageReplyPayload | null) =>
+      bindings.sendAnnouncementFile(filePath, replyTo)
+  );
+  ipcMain.handle(
     'lantern:sendFile',
     (
       _event,
@@ -592,18 +613,16 @@ export const registerIpc = (
   ipcMain.handle('lantern:unarchiveConversation', (_event, conversationId: string) =>
     bindings.unarchiveConversation(conversationId)
   );
+  ipcMain.handle('lantern:getPinnedConversationIds', () => bindings.getPinnedConversationIds());
+  ipcMain.handle('lantern:setConversationPinned', (_event, conversationId: string, pinned: boolean) =>
+    bindings.setConversationPinned(conversationId, pinned)
+  );
   ipcMain.handle('lantern:clearConversation', (_event, conversationId: string) =>
     bindings.clearConversation(conversationId)
-  );
-  ipcMain.handle('lantern:forgetContactConversation', (_event, conversationId: string) =>
-    bindings.forgetContactConversation(conversationId)
   );
   ipcMain.handle('lantern:getConversations', () => bindings.getConversations());
   ipcMain.handle('lantern:getArchivedConversationIds', () =>
     bindings.getArchivedConversationIds()
-  );
-  ipcMain.handle('lantern:addManualPeer', (_event, address: string, port: number) =>
-    bindings.addManualPeer(address, port)
   );
   ipcMain.handle('lantern:saveFileAs', (_event, filePath: string, fileName?: string) =>
     bindings.saveFileAs(filePath, fileName)

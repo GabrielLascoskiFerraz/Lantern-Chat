@@ -67,6 +67,8 @@ export class PresenceService {
       existingOnline.avatarEmoji !== next.avatarEmoji ||
       existingOnline.avatarBg !== next.avatarBg ||
       existingOnline.statusMessage !== next.statusMessage ||
+      existingOnline.username !== next.username ||
+      existingOnline.department !== next.department ||
       existingOnline.source !== next.source
     );
   }
@@ -112,6 +114,8 @@ export class PresenceService {
       avatarEmoji: incoming.avatarEmoji || existing?.avatarEmoji || '🙂',
       avatarBg: incoming.avatarBg || existing?.avatarBg || '#5b5fc7',
       statusMessage: incoming.statusMessage || existing?.statusMessage || 'Disponível',
+      username: incoming.username || existing?.username || '',
+      department: incoming.department !== undefined ? incoming.department : existing?.department || '',
       appVersion: incoming.appVersion || existing?.appVersion || 'unknown',
       address: incoming.address || existing?.address || '',
       port: incoming.port || existing?.port || 0,

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EncryptedFields } from './security';
+import { EncryptedChunkStore } from './encryptedChunkStore';
 import {
   GroupReactionValue,
   RelayGroup,
@@ -16,7 +17,6 @@ import {
 } from './groupTypes';
 
 const GROUP_UPLOAD_STALE_MS = 2 * 60 * 60 * 1000;
-const GROUP_EVENTS_MAX_PER_GROUP = 10_000;
 const GROUP_FILE_CHUNK_SIZE_BYTES = 64 * 1024;
 const GROUP_FILE_MAX_BYTES = 200 * 1024 * 1024;
 const GROUP_MESSAGE_EDIT_WINDOW_MS = 10 * 60 * 1000;
@@ -34,9 +34,17 @@ interface PersistedGroupStore {
   attachments: RelayGroupAttachmentMetadata[];
 }
 
+export interface CanonicalStatePersistence {
+  location: string;
+  read<T>(key: string, version?: number): T | null;
+  write<T>(key: string, value: T, version?: number): void;
+}
+
+const GROUP_STATE_KEY = 'groups';
+const GROUP_STATE_VERSION = 1;
+
 interface ActiveUpload {
   metadata: RelayGroupAttachmentMetadata;
-  chunksDir: string;
   nextIndex: number;
   totalChunks: number;
   receivedBytes: number;
@@ -95,15 +103,19 @@ export class GroupStore {
   private readonly eventsByGroupId = new Map<string, RelayGroupEvent[]>();
   private readonly attachmentsByFileId = new Map<string, RelayGroupAttachmentMetadata>();
   private readonly uploadsByFileId = new Map<string, ActiveUpload>();
+  private readonly chunks: EncryptedChunkStore;
   private saveTimer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly storeFile: string,
+    private readonly legacyStoreFile: string,
     private readonly attachmentsDir: string,
     private readonly log: GroupStoreLog,
-    private readonly encrypted?: EncryptedFields
+    private readonly encrypted?: EncryptedFields,
+    private readonly canonicalState?: CanonicalStatePersistence
   ) {
-    fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
+    if (!encrypted) throw new Error('A persistência canônica de grupos exige criptografia.');
+    this.chunks = new EncryptedChunkStore(attachmentsDir, encrypted);
+    fs.mkdirSync(path.dirname(this.legacyStoreFile), { recursive: true });
     fs.mkdirSync(this.attachmentsDir, { recursive: true });
     this.load();
   }
@@ -118,7 +130,7 @@ export class GroupStore {
   }
 
   getStoreFile(): string {
-    return this.storeFile;
+    return this.canonicalState?.location || this.legacyStoreFile;
   }
 
   getAttachmentsDir(): string {
@@ -127,14 +139,20 @@ export class GroupStore {
 
   private load(): void {
     try {
-      if (!fs.existsSync(this.storeFile)) {
-        return;
+      let parsed = this.canonicalState?.read<Partial<PersistedGroupStore>>(
+        GROUP_STATE_KEY,
+        GROUP_STATE_VERSION
+      ) || null;
+      let importedLegacy = false;
+      if (!parsed && fs.existsSync(this.legacyStoreFile)) {
+        const stored = fs.readFileSync(this.legacyStoreFile, 'utf8');
+        const plain = stored.startsWith('gcm-v1.') && this.encrypted
+          ? this.encrypted.decrypt(stored)
+          : stored;
+        parsed = JSON.parse(plain) as Partial<PersistedGroupStore>;
+        importedLegacy = Boolean(this.canonicalState);
       }
-      const stored = fs.readFileSync(this.storeFile, 'utf8');
-      const plain = stored.startsWith('gcm-v1.') && this.encrypted
-        ? this.encrypted.decrypt(stored)
-        : stored;
-      const parsed = JSON.parse(plain) as Partial<PersistedGroupStore>;
+      if (!parsed) return;
       if (parsed.version !== 1) {
         return;
       }
@@ -150,7 +168,7 @@ export class GroupStore {
           .filter((event): event is RelayGroupEvent => Boolean(event))
           .sort((a, b) => a.seq - b.seq || a.eventId.localeCompare(b.eventId));
         if (normalizedEvents.length > 0) {
-          this.eventsByGroupId.set(groupId, normalizedEvents.slice(-GROUP_EVENTS_MAX_PER_GROUP));
+          this.eventsByGroupId.set(groupId, normalizedEvents);
         }
       }
       for (const metadata of parsed.attachments || []) {
@@ -160,15 +178,23 @@ export class GroupStore {
         }
       }
       this.log('group_store_loaded', {
-        file: this.storeFile,
+        file: this.getStoreFile(),
         groups: this.groupsById.size,
-        attachments: this.attachmentsByFileId.size
+        attachments: this.attachmentsByFileId.size,
+        importedLegacy
       });
+      if (importedLegacy) {
+        this.persist();
+        this.log('group_store_migrated_to_sqlite', {
+          legacyFile: this.legacyStoreFile,
+          databaseFile: this.canonicalState?.location
+        });
+      }
     } catch (error) {
       this.log(
         'group_store_load_failed',
         {
-          file: this.storeFile,
+          file: this.getStoreFile(),
           message: error instanceof Error ? error.message : String(error)
         },
         { level: 'warn' }
@@ -187,22 +213,26 @@ export class GroupStore {
 
   private persist(): void {
     try {
-      fs.mkdirSync(path.dirname(this.storeFile), { recursive: true });
       const body: PersistedGroupStore = {
         version: 1,
         groups: Array.from(this.groupsById.values()),
         eventsByGroupId: Object.fromEntries(this.eventsByGroupId.entries()),
         attachments: Array.from(this.attachmentsByFileId.values())
       };
-      const tempFile = `${this.storeFile}.tmp`;
+      if (this.canonicalState) {
+        this.canonicalState.write(GROUP_STATE_KEY, body, GROUP_STATE_VERSION);
+        return;
+      }
+      fs.mkdirSync(path.dirname(this.legacyStoreFile), { recursive: true });
+      const tempFile = `${this.legacyStoreFile}.tmp`;
       const serialized = JSON.stringify(body);
       fs.writeFileSync(tempFile, this.encrypted ? this.encrypted.encrypt(serialized) : serialized);
-      fs.renameSync(tempFile, this.storeFile);
+      fs.renameSync(tempFile, this.legacyStoreFile);
     } catch (error) {
       this.log(
         'group_store_persist_failed',
         {
-          file: this.storeFile,
+          file: this.getStoreFile(),
           message: error instanceof Error ? error.message : String(error)
         },
         { level: 'warn' }
@@ -389,7 +419,7 @@ export class GroupStore {
     this.groupsById.set(group.groupId, group);
     const list = this.eventsByGroupId.get(group.groupId) || [];
     list.push(event);
-    this.eventsByGroupId.set(group.groupId, list.slice(-GROUP_EVENTS_MAX_PER_GROUP));
+    this.eventsByGroupId.set(group.groupId, list);
     this.schedulePersist();
     return event;
   }
@@ -452,20 +482,22 @@ export class GroupStore {
     });
   }
 
-  historyForDevice(
+  historyPageForDevice(
     groupId: string,
     deviceId: string,
     before = Number.MAX_SAFE_INTEGER,
     limit = 100
-  ): RelayGroupEvent[] {
+  ): { events: RelayGroupEvent[]; hasMore: boolean } {
     const group = this.getRequiredGroup(groupId);
     this.assertActiveMember(group, deviceId);
     const safeBefore = Number.isFinite(before) ? Math.max(1, Math.trunc(before)) : Number.MAX_SAFE_INTEGER;
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
     const allEvents = this.eventsByGroupId.get(group.groupId) || [];
-    const createdPage = allEvents
+    const createdCandidates = allEvents
       .filter((event) => event.type === 'group.message.created' && event.createdAt < safeBefore)
-      .slice(-safeLimit);
+      .slice(-(safeLimit + 1));
+    const hasMore = createdCandidates.length > safeLimit;
+    const createdPage = createdCandidates.slice(-safeLimit);
     const messageIds = new Set(
       createdPage
         .map((event) => {
@@ -479,8 +511,8 @@ export class GroupStore {
         })
         .filter(Boolean)
     );
-    if (messageIds.size === 0) return [];
-    return allEvents.filter((event) => {
+    if (messageIds.size === 0) return { events: [], hasMore: false };
+    const events = allEvents.filter((event) => {
       if (createdPage.some((created) => created.eventId === event.eventId)) return true;
       const payload = event.payload && typeof event.payload === 'object'
         ? event.payload as Record<string, unknown>
@@ -497,6 +529,90 @@ export class GroupStore {
         : {};
       return typeof metadata.messageId === 'string' && messageIds.has(metadata.messageId);
     });
+    return { events, hasMore };
+  }
+
+  exportMessagesForDevice(groupId: string, deviceId: string): Array<{
+    messageId: string; senderUserId: string; type: 'text' | 'file'; text: string;
+    fileName: string; fileSize: number; createdAt: number; editedAt: number;
+  }> {
+    const group = this.getRequiredGroup(groupId);
+    this.assertActiveMember(group, deviceId);
+    const messages = new Map<string, {
+      messageId: string; senderUserId: string; type: 'text' | 'file'; text: string;
+      fileName: string; fileSize: number; createdAt: number; editedAt: number;
+    }>();
+    for (const event of this.eventsByGroupId.get(group.groupId) || []) {
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+      if (event.type === 'group.message.created') {
+        const value = payload.message && typeof payload.message === 'object' ? payload.message as Record<string, unknown> : {};
+        const messageId = typeof value.messageId === 'string' ? value.messageId : '';
+        if (!messageId) continue;
+        const isFile = value.type === 'file';
+        messages.set(messageId, {
+          messageId,
+          senderUserId: typeof value.senderDeviceId === 'string' ? value.senderDeviceId : event.actorDeviceId,
+          type: isFile ? 'file' : 'text',
+          text: typeof value.bodyText === 'string' ? value.bodyText : typeof value.text === 'string' ? value.text : '',
+          fileName: typeof value.fileName === 'string' ? value.fileName : '',
+          fileSize: typeof value.fileSize === 'number' ? value.fileSize : 0,
+          createdAt: typeof value.createdAt === 'number' ? value.createdAt : event.createdAt,
+          editedAt: typeof value.editedAt === 'number' ? value.editedAt : 0
+        });
+      } else if (event.type === 'group.message.edited') {
+        const target = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+        const message = messages.get(target);
+        if (message && typeof payload.text === 'string') {
+          message.text = payload.text;
+          message.editedAt = typeof payload.editedAt === 'number' ? payload.editedAt : event.createdAt;
+        }
+      } else if (event.type === 'group.message.deletedForEveryone') {
+        const target = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+        messages.delete(target);
+      }
+    }
+    return Array.from(messages.values()).sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+  }
+
+  searchMessageIdsForDevice(
+    groupId: string,
+    deviceId: string,
+    query: string,
+    limit = 500,
+    offset = 0
+  ): string[] {
+    const group = this.getRequiredGroup(groupId);
+    this.assertActiveMember(group, deviceId);
+    const needle = query.trim().toLocaleLowerCase('pt-BR');
+    if (!needle) return [];
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 2_000));
+    const safeOffset = Math.max(0, Math.trunc(offset) || 0);
+    const messages = new Map<string, string>();
+    for (const event of this.eventsByGroupId.get(group.groupId) || []) {
+      const payload = event.payload && typeof event.payload === 'object'
+        ? event.payload as Record<string, unknown>
+        : {};
+      if (event.type === 'group.message.created') {
+        const message = payload.message && typeof payload.message === 'object'
+          ? payload.message as Record<string, unknown>
+          : {};
+        const messageId = typeof message.messageId === 'string' ? message.messageId : '';
+        const text = [message.bodyText, message.text, message.fileName, message.filename]
+          .filter((item): item is string => typeof item === 'string')
+          .join('\n');
+        if (messageId) messages.set(messageId, text);
+      } else if (event.type === 'group.message.edited') {
+        const target = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+        if (target && typeof payload.text === 'string') messages.set(target, payload.text);
+      } else if (event.type === 'group.message.deletedForEveryone') {
+        const target = typeof payload.targetMessageId === 'string' ? payload.targetMessageId : '';
+        if (target) messages.delete(target);
+      }
+    }
+    return Array.from(messages.entries())
+      .filter(([, text]) => text.toLocaleLowerCase('pt-BR').includes(needle))
+      .map(([messageId]) => messageId)
+      .slice(safeOffset, safeOffset + safeLimit);
   }
 
   getActiveRecipientIds(groupId: string, includeSender = false, senderDeviceId?: string): string[] {
@@ -856,15 +972,10 @@ export class GroupStore {
       deletedAt: null
     };
 
-    const dir = this.attachmentDirectory(metadata.groupId, metadata.fileId);
-    fs.mkdirSync(dir, { recursive: true });
-    const chunksDir = path.join(dir, 'chunks');
-    fs.rmSync(chunksDir, { recursive: true, force: true });
-    fs.mkdirSync(chunksDir, { recursive: true });
+    this.chunks.reset(metadata.groupId, metadata.fileId, 'chunks');
     const totalChunks = Math.max(1, Math.ceil(metadata.fileSize / GROUP_FILE_CHUNK_SIZE_BYTES));
     const upload: ActiveUpload = {
       metadata,
-      chunksDir,
       nextIndex: 0,
       totalChunks,
       receivedBytes: 0,
@@ -893,8 +1004,12 @@ export class GroupStore {
     if (upload.metadata.senderDeviceId !== actorDeviceId) {
       throw new Error('Upload de grupo pertence a outro usuário.');
     }
-    const existingChunkPath = path.join(upload.chunksDir, `${chunk.index}.bin`);
-    if (chunk.index < upload.nextIndex && fs.existsSync(existingChunkPath)) {
+    if (chunk.index < upload.nextIndex && this.chunks.has(
+      chunk.index,
+      upload.metadata.groupId,
+      upload.metadata.fileId,
+      'chunks'
+    )) {
       return;
     }
     if (chunk.index !== upload.nextIndex) {
@@ -917,9 +1032,13 @@ export class GroupStore {
       throw new Error('Upload de grupo excedeu o tamanho esperado.');
     }
     upload.hash.update(buffer);
-    const chunkPath = existingChunkPath;
-    const stored = this.encrypted ? this.encrypted.encryptBytes(buffer) : buffer;
-    await fs.promises.writeFile(chunkPath, stored);
+    this.chunks.write(
+      chunk.index,
+      buffer,
+      upload.metadata.groupId,
+      upload.metadata.fileId,
+      'chunks'
+    );
     upload.nextIndex += 1;
   }
 
@@ -976,10 +1095,13 @@ export class GroupStore {
     }
     const total = Math.max(1, Math.ceil(metadata.fileSize / GROUP_FILE_CHUNK_SIZE_BYTES));
     const normalizedStartIndex = Math.max(0, Math.min(Math.trunc(startIndex || 0), total));
-    const chunksDir = path.join(this.attachmentDirectory(metadata.groupId, metadata.fileId), 'chunks');
     for (let index = normalizedStartIndex; index < total; index += 1) {
-      const stored = await fs.promises.readFile(path.join(chunksDir, `${index}.bin`));
-      const buffer = this.encrypted ? this.encrypted.decryptBytes(stored) : stored;
+      const buffer = await this.chunks.readAsync(
+        index,
+        metadata.groupId,
+        metadata.fileId,
+        'chunks'
+      );
       yield { fileId, index, total, dataBase64: buffer.toString('base64') };
     }
   }

@@ -52,14 +52,15 @@ interface SidebarProps {
   conversationPreviewById: Record<string, string>;
   typingByConversation: Record<string, boolean>;
   archivedConversationIds: string[];
+  pinnedConversationIds: string[];
   onlinePeerIds: string[];
   onSearch: (value: string) => void;
   onSelectConversation: (id: string) => void;
   onMarkConversationUnread: (id: string) => Promise<void>;
   onArchiveConversation: (id: string) => Promise<void>;
   onUnarchiveConversation: (id: string) => Promise<void>;
+  onSetConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   onClearConversation: (id: string) => Promise<void>;
-  onForgetContactConversation: (id: string) => Promise<void>;
   onResyncConversation: (id: string) => Promise<void>;
   onOpenGroupDetails: (groupId: string) => void;
   onLeaveGroup: (groupId: string) => Promise<void>;
@@ -108,14 +109,15 @@ export const Sidebar = ({
   conversationPreviewById,
   typingByConversation,
   archivedConversationIds,
+  pinnedConversationIds,
   onlinePeerIds,
   onSearch,
   onSelectConversation,
   onMarkConversationUnread,
   onArchiveConversation,
   onUnarchiveConversation,
+  onSetConversationPinned,
   onClearConversation,
-  onForgetContactConversation,
   onResyncConversation,
   onOpenGroupDetails,
   onLeaveGroup,
@@ -132,28 +134,12 @@ export const Sidebar = ({
   relayEndpoint,
   syncActive
 }: SidebarProps) => {
-  const pinnedStorageKey = 'lantern.sidebar.pinnedConversations';
   const filtered = useMemo(
     () => peers.filter((peer) => peer.displayName.toLowerCase().includes(search.toLowerCase())),
     [peers, search]
   );
-  const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>(() => {
-    try {
-      if (typeof window === 'undefined') return [];
-      const raw = window.localStorage.getItem(pinnedStorageKey);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed.filter(
-        (value): value is string => typeof value === 'string' && value.startsWith('dm:')
-      );
-    } catch {
-      return [];
-    }
-  });
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; conversationId: string } | null>(null);
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
-  const [pendingForgetConversationId, setPendingForgetConversationId] = useState<string | null>(null);
   const [pendingLeaveGroupId, setPendingLeaveGroupId] = useState<string | null>(null);
   const [pendingDeleteGroupId, setPendingDeleteGroupId] = useState<string | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -287,14 +273,6 @@ export const Sidebar = ({
   const contactBottomSpacerHeight = shouldVirtualizeContacts
     ? Math.max(0, (orderedFiltered.length - contactVisibleEnd) * CONTACT_ITEM_HEIGHT)
     : 0;
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(pinnedStorageKey, JSON.stringify(pinnedConversationIds));
-    } catch {
-      // ignore
-    }
-  }, [pinnedConversationIds]);
 
   const closeQuickStatusMenu = (): void => {
     if (!quickStatusOpen || quickStatusClosing) return;
@@ -481,7 +459,7 @@ export const Sidebar = ({
           (member) => member.deviceId === profile.deviceId && member.status === 'active'
         )
       : null;
-    const canDeleteGroup = Boolean(group?.missingOnRelay || localMember?.role === 'owner');
+    const canDeleteGroup = Boolean(localMember?.role === 'owner');
     const actionCount = isDm ? 5 : group ? 5 + (canDeleteGroup ? 1 : 0) : 2;
     const menuHeight = Math.max(112, Math.min(actionCount * 46 + 16, window.innerHeight - 24));
     const x = Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth - 12));
@@ -501,7 +479,7 @@ export const Sidebar = ({
       )
     : null;
   const canDeleteContextGroup = Boolean(
-    contextGroup?.missingOnRelay || contextGroupMembership?.role === 'owner'
+    contextGroupMembership?.role === 'owner'
   );
 
   const isConversationPinned = (conversationId: string): boolean =>
@@ -512,12 +490,7 @@ export const Sidebar = ({
 
   const toggleConversationPinned = (conversationId: string): void => {
     if (!conversationId.startsWith('dm:')) return;
-    setPinnedConversationIds((current) => {
-      if (current.includes(conversationId)) {
-        return current.filter((id) => id !== conversationId);
-      }
-      return [conversationId, ...current];
-    });
+    void onSetConversationPinned(conversationId, !isConversationPinned(conversationId));
   };
 
   const handleConversationKeyDown = (
@@ -927,7 +900,7 @@ export const Sidebar = ({
               <span>Detalhes do grupo</span>
             </button>
           )}
-          {contextGroup && !contextGroup.missingOnRelay && (
+          {contextGroup && (
             <button
               type="button"
               className="chat-context-item"
@@ -940,7 +913,7 @@ export const Sidebar = ({
               <span className="menu-item-icon">
                 <ArrowSync20Regular />
               </span>
-              <span>Ressincronizar grupo</span>
+              <span>Reparar cache do grupo</span>
             </button>
           )}
           {contextMenu.conversationId.startsWith('dm:') &&
@@ -1004,7 +977,7 @@ export const Sidebar = ({
             </span>
             <span>Marcar como não lida</span>
           </button>
-          <button
+          {contextMenu.conversationId.startsWith('dm:') && <button
             type="button"
             className="chat-context-item danger"
             onClick={() => {
@@ -1015,24 +988,9 @@ export const Sidebar = ({
             <span className="menu-item-icon">
               <Delete20Regular />
             </span>
-            <span>{contextGroup ? 'Limpar conversa local' : 'Limpar conversa'}</span>
-          </button>
-          {contextMenu.conversationId.startsWith('dm:') && (
-            <button
-              type="button"
-              className="chat-context-item danger"
-              onClick={() => {
-                setPendingForgetConversationId(contextMenu.conversationId);
-                setContextMenu(null);
-              }}
-            >
-              <span className="menu-item-icon">
-                <Dismiss20Regular />
-              </span>
-              <span>Excluir contato e conversa</span>
-            </button>
-          )}
-          {contextGroup && !contextGroup.missingOnRelay && (
+            <span>Limpar conversa para mim</span>
+          </button>}
+          {contextGroup && (
             <button
               type="button"
               className="chat-context-item danger"
@@ -1059,7 +1017,7 @@ export const Sidebar = ({
               <span className="menu-item-icon">
                 <Delete20Regular />
               </span>
-              <span>{contextGroup.missingOnRelay ? 'Remover grupo local' : 'Excluir grupo'}</span>
+              <span>Excluir grupo</span>
             </button>
           )}
         </div>
@@ -1210,8 +1168,8 @@ export const Sidebar = ({
 
       <ConfirmDialog
         open={Boolean(pendingClearConversationId)}
-        title="Limpar conversa"
-        description="Esta ação remove toda a conversa e anexos salvos pelo Lantern neste dispositivo."
+        title="Limpar conversa para mim"
+        description="O histórico anterior será ocultado para a sua conta. A outra pessoa continuará com a conversa."
         confirmLabel="Excluir"
         onCancel={() => setPendingClearConversationId(null)}
         onConfirm={() => {
@@ -1219,19 +1177,6 @@ export const Sidebar = ({
             void onClearConversation(pendingClearConversationId);
           }
           setPendingClearConversationId(null);
-        }}
-      />
-      <ConfirmDialog
-        open={Boolean(pendingForgetConversationId)}
-        title="Excluir contato e conversa"
-        description="Isto remove a conversa para ambos e oculta o contato até ele aparecer novamente no Relay."
-        confirmLabel="Excluir"
-        onCancel={() => setPendingForgetConversationId(null)}
-        onConfirm={() => {
-          if (pendingForgetConversationId) {
-            void onForgetContactConversation(pendingForgetConversationId);
-          }
-          setPendingForgetConversationId(null);
         }}
       />
       <ConfirmDialog
@@ -1250,11 +1195,7 @@ export const Sidebar = ({
       <ConfirmDialog
         open={Boolean(pendingDeleteGroupId)}
         title="Excluir grupo"
-        description={
-          groups.find((group) => group.groupId === pendingDeleteGroupId)?.missingOnRelay
-            ? 'O grupo já não existe no Relay. Esta ação remove apenas os dados locais desta conversa.'
-            : 'Esta ação exclui o grupo para todos os participantes e não pode ser desfeita.'
-        }
+        description="Esta ação exclui o grupo para todos os participantes e não pode ser desfeita."
         confirmLabel="Excluir"
         onCancel={() => setPendingDeleteGroupId(null)}
         onConfirm={() => {

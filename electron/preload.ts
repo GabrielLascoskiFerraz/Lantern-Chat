@@ -7,10 +7,20 @@ const api = {
   getPlatform: () => process.platform,
   getAuthState: () => ipcRenderer.invoke('lantern:getAuthState'),
   discoverRelays: (port?: number) => ipcRenderer.invoke('lantern:discoverRelays', port),
-  login: (input: { relay: ClientRelayConfig; username: string; password: string }) =>
+  login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) =>
     ipcRenderer.invoke('lantern:login', input),
+  requestPasswordReset: (input: { relay: ClientRelayConfig; username: string }) =>
+    ipcRenderer.invoke('lantern:requestPasswordReset', input),
+  getPasswordResetStatus: (requestToken: string) =>
+    ipcRenderer.invoke('lantern:getPasswordResetStatus', requestToken),
+  completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) =>
+    ipcRenderer.invoke('lantern:completePasswordReset', input),
+  changePassword: (input: { currentPassword: string; newPassword: string }) =>
+    ipcRenderer.invoke('lantern:changePassword', input),
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) =>
     ipcRenderer.invoke('lantern:register', input),
+  completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) =>
+    ipcRenderer.invoke('lantern:completeFirstLoginSetup', input),
   logout: () => ipcRenderer.invoke('lantern:logout'),
   getProfile: () => ipcRenderer.invoke('lantern:getProfile'),
   updateProfile: (input: { displayName: string; avatarEmoji: string; avatarBg: string; statusMessage: string }) =>
@@ -65,6 +75,8 @@ const api = {
     ipcRenderer.invoke('lantern:sendTyping', peerId, isTyping),
   sendAnnouncement: (text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
+  sendAnnouncementFile: (filePath: string, replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendAnnouncementFile', filePath, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
   sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
@@ -126,14 +138,13 @@ const api = {
     ipcRenderer.invoke('lantern:archiveConversation', conversationId),
   unarchiveConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:unarchiveConversation', conversationId),
+  getPinnedConversationIds: () => ipcRenderer.invoke('lantern:getPinnedConversationIds'),
+  setConversationPinned: (conversationId: string, pinned: boolean) =>
+    ipcRenderer.invoke('lantern:setConversationPinned', conversationId, pinned),
   clearConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:clearConversation', conversationId),
-  forgetContactConversation: (conversationId: string) =>
-    ipcRenderer.invoke('lantern:forgetContactConversation', conversationId),
   getConversations: () => ipcRenderer.invoke('lantern:getConversations'),
   getArchivedConversationIds: () => ipcRenderer.invoke('lantern:getArchivedConversationIds'),
-  addManualPeer: (address: string, port: number) =>
-    ipcRenderer.invoke('lantern:addManualPeer', address, port),
   pickFile: (): Promise<string | null> => ipcRenderer.invoke('lantern:pickFile'),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke('lantern:pickFiles'),
   pickDirectory: (defaultPath?: string): Promise<string | null> =>
