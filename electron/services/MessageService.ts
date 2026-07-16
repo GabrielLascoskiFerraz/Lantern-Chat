@@ -20,6 +20,7 @@ import {
   Profile,
   ProtocolFrame
 } from '../types';
+import { retryDelayMs, sleep } from '../reliability';
 
 interface MessageServiceDeps {
   db: DbService;
@@ -129,10 +130,17 @@ export class MessageService {
       createdAt
     };
 
-    await this.sendCanonicalFrame(frame);
     this.db.saveMessage(message);
+    try {
+      await this.sendCanonicalFrame(frame);
+    } catch (error) {
+      this.db.updateMessageStatus(message.messageId, 'failed');
+      const updated = this.db.getMessageById(message.messageId);
+      if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      throw error;
+    }
 
-    return message;
+    return this.db.getMessageById(message.messageId) || message;
   }
 
   async sendAnnouncement(
@@ -182,15 +190,16 @@ export class MessageService {
       createdAt
     };
 
+    this.db.saveMessage(message);
     try {
       await this.sendCanonicalFrame(frame);
-    } catch {
-      throw new Error('Não foi possível publicar o anúncio no Relay.');
+    } catch (error) {
+      this.db.updateMessageStatus(message.messageId, 'failed');
+      const updated = this.db.getMessageById(message.messageId);
+      if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      throw error;
     }
-
-    this.db.saveMessage(message);
-
-    return message;
+    return this.db.getMessageById(message.messageId) || message;
   }
 
   async sendFile(
@@ -291,24 +300,23 @@ export class MessageService {
       const offerWithMeta = message.forwardedFromMessageId
         ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
         : offerWithReply;
-      void this.uploadCanonicalAttachment({
+      void this.uploadAndPublishWithRetry({
         message,
         offer,
         filePath: managedFilePath,
-        onProgress: (transferred) => this.emitEvent({
-          type: 'transfer:progress', direction: 'send', fileId: offer.fileId,
-          messageId,
-          peerId: targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
-          transferred,
-          total: offer.size
-        })
-      }).then(() => this.sendCanonicalFrame(
-        this.fileTransfer.buildOfferFrame(targetUserId, offerWithMeta, message.createdAt)
-      )).then(() => {
-        this.db.updateMessageStatus(messageId, 'delivered');
+        targetUserId,
+        offerWithMeta
+      }).then(() => {
+        // Em conversa direta, o destinatário promove para "delivered" via chat:ack.
+        // Anúncios não possuem um destinatário único, então a persistência no Relay
+        // conclui o envio.
+        this.db.updateMessageStatus(messageId, targetUserId ? 'sent' : 'delivered');
         const updated = this.db.getMessageById(messageId);
         if (updated) this.emitEvent({ type: 'message:updated', message: updated });
       }).catch((error) => {
+        this.db.updateMessageStatus(messageId, 'failed');
+        const updated = this.db.getMessageById(messageId);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
         this.emitEvent({
           type: 'ui:toast', level: 'warning',
           message: error instanceof Error ? error.message : 'Não foi possível armazenar o anexo no Relay.'
@@ -317,6 +325,49 @@ export class MessageService {
     });
 
     return message;
+  }
+
+  private async uploadAndPublishWithRetry(input: {
+    message: DbMessage;
+    offer: FileOfferPayload;
+    filePath: string;
+    targetUserId: string | null;
+    offerWithMeta: FileOfferPayload;
+  }): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await this.uploadCanonicalAttachment({
+          message: input.message,
+          offer: input.offer,
+          filePath: input.filePath,
+          onProgress: (transferred) => this.emitEvent({
+            type: 'transfer:progress', direction: 'send', fileId: input.offer.fileId,
+            messageId: input.message.messageId,
+            peerId: input.targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
+            transferred,
+            total: input.offer.size,
+            stage: attempt > 0 ? 'retrying' : 'uploading',
+            attempt
+          })
+        });
+        await this.sendCanonicalFrame(
+          this.fileTransfer.buildOfferFrame(
+            input.targetUserId,
+            input.offerWithMeta,
+            input.message.createdAt
+          )
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 4) break;
+        await sleep(retryDelayMs(attempt, 1_000, 30_000));
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Não foi possível armazenar o anexo no Relay.');
   }
 
   private isEphemeralOutgoingFile(filePath: string): boolean {

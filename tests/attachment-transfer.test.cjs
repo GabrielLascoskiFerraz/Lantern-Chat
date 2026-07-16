@@ -199,6 +199,23 @@ test('anexos diretos, de anúncios e de grupos baixam imediatamente do Relay', a
     }, (item) => item.type === 'relay:group:ack' && item.payload?.requestId === createId);
     assert.equal(createAck.payload.ok, true);
     const groupId = createAck.payload.group.groupId;
+    const createAckCount = sender.messages.filter((item) =>
+      item.type === 'relay:group:ack' && item.payload?.requestId === createId
+    ).length;
+    sender.socket.send(JSON.stringify({
+      type: 'relay:group:request',
+      payload: {
+        requestId: createId, action: 'create',
+        data: { name: 'Grupo de anexos', memberDeviceIds: [recipientUser.userId] }
+      }
+    }));
+    const replayedCreateAck = await waitFor(() => {
+      const matches = sender.messages.filter((item) =>
+        item.type === 'relay:group:ack' && item.payload?.requestId === createId
+      );
+      return matches.length > createAckCount ? matches.at(-1) : null;
+    });
+    assert.equal(replayedCreateAck.payload.group.groupId, groupId);
     const groupBytes = Buffer.from('anexo de grupo recuperado imediatamente do relay');
     const groupFileId = randomUUID();
     const groupMessageId = randomUUID();

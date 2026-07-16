@@ -14,6 +14,13 @@ import {
   Profile,
   ProtocolFrame
 } from './types';
+import {
+  PriorityTaskQueue,
+  RelayOperationError,
+  retryDelayMs,
+  Semaphore,
+  sleep
+} from './reliability';
 
 interface RelayPeerSnapshot {
   deviceId: string;
@@ -161,7 +168,7 @@ interface RelayEndpointSettings {
 
 interface RelayClientCallbacks {
   onFrame: (frame: ProtocolFrame) => void;
-  onHistorySnapshot?: (frames: ProtocolFrame[]) => void;
+  onHistorySnapshot?: (frames: ProtocolFrame[], serverHighWaterSeq: number) => void;
   onDirectory?: (peers: RelayPeerSnapshot[]) => void;
   onPresence: (peers: RelayPeerSnapshot[]) => void;
   onGroupSnapshot?: (snapshots: GroupSnapshot[]) => void;
@@ -227,6 +234,7 @@ const LAST_HEALTHY_RETRY_WINDOW_MS = 14_000;
 const PRESENCE_STALE_TIMEOUT_MS = 90_000;
 const HELLO_ACK_TIMEOUT_MS = 12_000;
 const UDP_DISCOVERY_TIMEOUT_MS = 1_600;
+const PERSISTENT_SEND_MAX_ATTEMPTS = 5;
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -535,6 +543,9 @@ export class RelayClient {
   private sessionToken: string;
   private lastPresenceAt = 0;
   private lastPresenceRevision = -1;
+  private readonly outboundQueue = new PriorityTaskQueue(4);
+  private readonly uploadSemaphore = new Semaphore(2);
+  private readonly downloadSemaphore = new Semaphore(3);
 
   constructor(profile: Profile, callbacks: RelayClientCallbacks, sessionToken = '') {
     this.profile = { ...profile };
@@ -644,27 +655,32 @@ export class RelayClient {
     chunks: AsyncIterable<FileChunkPayload>;
     onProgress?: (transferred: number) => void;
   }): Promise<void> {
-    await this.waitUntilReady(8_000);
-    await this.centralRequest('relay:attachment:init', {
-      attachmentId: input.attachmentId,
-      messageId: input.messageId,
-      conversationId: input.conversationId,
-      fileName: input.fileName,
-      mimeType: input.mimeType || 'application/octet-stream',
-      size: input.size,
-      sha256: input.sha256
-    });
-    let transferred = 0;
-    for await (const chunk of input.chunks) {
-      await this.centralRequest('relay:attachment:chunk', {
+    return this.uploadSemaphore.run(async () => {
+      await this.waitUntilReady(12_000);
+      const initialized = await this.centralRequest('relay:attachment:init', {
         attachmentId: input.attachmentId,
-        index: chunk.index,
-        dataBase64: chunk.dataBase64
+        messageId: input.messageId,
+        conversationId: input.conversationId,
+        fileName: input.fileName,
+        mimeType: input.mimeType || 'application/octet-stream',
+        size: input.size,
+        sha256: input.sha256
       });
-      transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
-      input.onProgress?.(Math.min(input.size, transferred));
-    }
-    await this.centralRequest('relay:attachment:complete', { attachmentId: input.attachmentId });
+      const nextIndex = Math.max(0, Math.trunc(Number(initialized.nextIndex) || 0));
+      let transferred = Math.min(input.size, nextIndex * 64 * 1024);
+      if (transferred > 0) input.onProgress?.(transferred);
+      for await (const chunk of input.chunks) {
+        if (chunk.index < nextIndex) continue;
+        await this.centralRequest('relay:attachment:chunk', {
+          attachmentId: input.attachmentId,
+          index: chunk.index,
+          dataBase64: chunk.dataBase64
+        });
+        transferred += Buffer.byteLength(chunk.dataBase64, 'base64');
+        input.onProgress?.(Math.min(input.size, transferred));
+      }
+      await this.centralRequest('relay:attachment:complete', { attachmentId: input.attachmentId });
+    });
   }
 
   async downloadCentralAttachment(
@@ -672,26 +688,29 @@ export class RelayClient {
     handlers: {
       onStart: (metadata: Record<string, unknown>) => void | Promise<void>;
       onChunk: (chunk: FileChunkPayload) => void | Promise<void>;
-    }
+    },
+    startIndex = 0
   ): Promise<void> {
-    await this.waitUntilReady(8_000);
-    const requestId = randomUUID();
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingCentralDownloads.delete(requestId);
-        reject(new Error('Timeout ao baixar anexo do Relay.'));
-      }, 120_000);
-      timeout.unref?.();
-      this.pendingCentralDownloads.set(requestId, {
-        ...handlers,
-        resolve,
-        reject,
-        chain: Promise.resolve(),
-        timeout
-      });
-      this.sendEnvelope({
-        type: 'relay:attachment:request',
-        payload: { requestId, attachmentId, startIndex: 0 }
+    return this.downloadSemaphore.run(async () => {
+      await this.waitUntilReady(12_000);
+      const requestId = randomUUID();
+      return new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.pendingCentralDownloads.delete(requestId);
+          reject(new RelayOperationError('TIMEOUT', 'Tempo esgotado ao baixar anexo do Relay.'));
+        }, 120_000);
+        timeout.unref?.();
+        this.pendingCentralDownloads.set(requestId, {
+          ...handlers,
+          resolve,
+          reject,
+          chain: Promise.resolve(),
+          timeout
+        });
+        this.sendEnvelope({
+          type: 'relay:attachment:request',
+          payload: { requestId, attachmentId, startIndex: Math.max(0, Math.trunc(startIndex) || 0) }
+        });
       });
     });
   }
@@ -714,6 +733,30 @@ export class RelayClient {
           (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
         )
       : [];
+  }
+
+  async requestIncrementalHistory(
+    afterSeq: number,
+    limit = 500
+  ): Promise<{ frames: ProtocolFrame[]; hasMore: boolean; nextServerSeq: number }> {
+    const normalizedAfterSeq = Math.max(0, Math.trunc(afterSeq) || 0);
+    const result = await this.centralRequest('relay:sync:request', {
+      afterSeq: normalizedAfterSeq,
+      limit: Math.max(1, Math.min(Math.trunc(limit) || 500, 1_000))
+    });
+    const frames = Array.isArray(result.frames)
+      ? result.frames.filter(
+          (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
+        )
+      : [];
+    const nextServerSeq = Number(result.nextServerSeq);
+    return {
+      frames,
+      hasMore: result.hasMore === true,
+      nextServerSeq: Number.isFinite(nextServerSeq)
+        ? Math.max(normalizedAfterSeq, Math.trunc(nextServerSeq))
+        : frames.reduce((max, frame) => Math.max(max, frame.serverSeq || 0), normalizedAfterSeq)
+    };
   }
 
   async searchConversationMessageIds(
@@ -759,12 +802,34 @@ export class RelayClient {
     };
   }
 
-  private centralRequest(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async centralRequest(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.outboundQueue.enqueue(async () => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await this.waitUntilReady(12_000);
+          return await this.centralRequestOnce(type, payload);
+        } catch (error) {
+          lastError = error;
+          if (!this.started || attempt === 3) break;
+          await sleep(retryDelayMs(attempt, 350, 5_000));
+        }
+      }
+      throw new RelayOperationError(
+        'OPERATION_PENDING',
+        'A operação ficou pendente e será retomada quando o Relay responder.',
+        true,
+        lastError
+      );
+    }, type.includes('attachment') ? 20 : 60);
+  }
+
+  private centralRequestOnce(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingCentralAcks.delete(requestId);
-        reject(new Error('Timeout aguardando confirmação do anexo pelo Relay.'));
+        reject(new RelayOperationError('TIMEOUT', 'Tempo esgotado aguardando o Relay.'));
       }, 20_000);
       timeout.unref?.();
       this.pendingCentralAcks.set(requestId, { resolve, reject, timeout });
@@ -910,10 +975,40 @@ export class RelayClient {
   }
 
   async sendFrame(frame: ProtocolFrame): Promise<RelaySendResult> {
-    await this.waitUntilReady(8_000);
+    const persistent = frame.type !== 'typing';
+    if (!persistent && this.outboundQueue.size > 40) {
+      throw new RelayOperationError('RATE_LIMITED', 'Indicador de digitação descartado durante alta atividade.');
+    }
+    return this.outboundQueue.enqueue(
+      () => this.sendFrameWithRetry(frame, persistent ? PERSISTENT_SEND_MAX_ATTEMPTS : 1),
+      persistent ? 100 : -20
+    );
+  }
+
+  private async sendFrameWithRetry(frame: ProtocolFrame, maxAttempts: number): Promise<RelaySendResult> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        await this.waitUntilReady(12_000);
+        return await this.sendFrameOnce(frame);
+      } catch (error) {
+        lastError = error;
+        if (!this.started || attempt + 1 >= maxAttempts) break;
+        await sleep(retryDelayMs(attempt, 500, 10_000));
+      }
+    }
+    throw new RelayOperationError(
+      'OPERATION_PENDING',
+      'O Relay ainda não confirmou a operação. Ela permanecerá pendente para nova tentativa.',
+      true,
+      lastError
+    );
+  }
+
+  private async sendFrameOnce(frame: ProtocolFrame): Promise<RelaySendResult> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Relay indisponível.');
+      throw new RelayOperationError('RELAY_UNAVAILABLE', 'Relay indisponível.');
     }
 
     const existingPending = this.pendingAcks.get(frame.messageId);
@@ -935,7 +1030,7 @@ export class RelayClient {
       }
       this.pendingAcks.delete(frame.messageId);
       this.forceSocketDisconnect();
-      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
+      pending.reject(new RelayOperationError('TIMEOUT', 'Tempo esgotado aguardando confirmação do Relay.'));
     }, ACK_TIMEOUT_MS);
     timeout.unref?.();
 
@@ -957,7 +1052,7 @@ export class RelayClient {
       if (!pending || pending.promise !== promise) return;
       clearTimeout(pending.timeout);
       this.pendingAcks.delete(frame.messageId);
-      pending.reject(new Error('Falha ao enviar frame para o relay.'));
+      pending.reject(new RelayOperationError('RELAY_UNAVAILABLE', 'Falha ao enviar operação ao Relay.'));
     });
 
     return promise;
@@ -1001,13 +1096,48 @@ export class RelayClient {
     action: string,
     data: Record<string, unknown> = {}
   ): Promise<RelayGroupAckPayload> {
+    const requestId = randomUUID();
+    return this.outboundQueue.enqueue(async () => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await this.sendGroupRequestOnce(
+            'relay:group:request',
+            { requestId, action, data },
+            requestId,
+            'Falha ao enviar ação de grupo ao Relay.'
+          );
+        } catch (error) {
+          lastError = error;
+          if (
+            attempt >= 3 ||
+            !this.started ||
+            (error instanceof RelayOperationError && !error.recoverable)
+          ) break;
+          await sleep(retryDelayMs(attempt, 350, 5_000));
+        }
+      }
+      throw new RelayOperationError(
+        'RELAY_UNAVAILABLE',
+        lastError instanceof Error ? lastError.message : 'A ação de grupo não pôde ser confirmada.',
+        true,
+        lastError
+      );
+    }, 90);
+  }
+
+  private async sendGroupRequestOnce(
+    type: 'relay:group:request' | 'relay:group:file:complete',
+    payload: Record<string, unknown>,
+    requestId: string,
+    sendFailureMessage: string
+  ): Promise<RelayGroupAckPayload> {
     await this.waitUntilReady(8_000);
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Relay indisponível.');
+      throw new RelayOperationError('RELAY_UNAVAILABLE', 'Relay indisponível.');
     }
 
-    const requestId = randomUUID();
     let resolveAck!: (result: RelayGroupAckPayload) => void;
     let rejectAck!: (error: Error) => void;
     const promise = new Promise<RelayGroupAckPayload>((resolve, reject) => {
@@ -1022,7 +1152,10 @@ export class RelayClient {
       }
       this.pendingGroupAcks.delete(requestId);
       this.forceSocketDisconnect();
-      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
+      pending.reject(new RelayOperationError(
+        'TIMEOUT',
+        'Timeout aguardando confirmação do Relay.'
+      ));
     }, ACK_TIMEOUT_MS);
     timeout.unref?.();
 
@@ -1034,19 +1167,15 @@ export class RelayClient {
     });
 
     this.sendEnvelope({
-      type: 'relay:group:request',
-      payload: {
-        requestId,
-        action,
-        data
-      }
+      type,
+      payload
     }, (error) => {
       if (!error) return;
       const pending = this.pendingGroupAcks.get(requestId);
       if (!pending || pending.promise !== promise) return;
       clearTimeout(pending.timeout);
       this.pendingGroupAcks.delete(requestId);
-      pending.reject(new Error('Falha ao enviar ação de grupo ao relay.'));
+      pending.reject(new RelayOperationError('RELAY_UNAVAILABLE', sendFailureMessage));
     });
 
     return promise;
@@ -1089,43 +1218,34 @@ export class RelayClient {
   }
 
   async completeGroupFile(fileId: string): Promise<RelayGroupAckPayload> {
-    await this.waitUntilReady(8_000);
     const requestId = randomUUID();
-    let resolveAck!: (result: RelayGroupAckPayload) => void;
-    let rejectAck!: (error: Error) => void;
-    const promise = new Promise<RelayGroupAckPayload>((resolve, reject) => {
-      resolveAck = resolve;
-      rejectAck = reject;
-    });
-    const timeout = setTimeout(() => {
-      const pending = this.pendingGroupAcks.get(requestId);
-      if (!pending || pending.promise !== promise) return;
-      this.pendingGroupAcks.delete(requestId);
-      this.forceSocketDisconnect();
-      pending.reject(new Error('Timeout aguardando confirmação do relay.'));
-    }, ACK_TIMEOUT_MS);
-    timeout.unref?.();
-    this.pendingGroupAcks.set(requestId, {
-      promise,
-      resolve: resolveAck,
-      reject: rejectAck,
-      timeout
-    });
-    this.sendEnvelope({
-      type: 'relay:group:file:complete',
-      payload: {
-        requestId,
-        fileId
+    return this.outboundQueue.enqueue(async () => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await this.sendGroupRequestOnce(
+            'relay:group:file:complete',
+            { requestId, fileId },
+            requestId,
+            'Falha ao finalizar anexo de grupo.'
+          );
+        } catch (error) {
+          lastError = error;
+          if (
+            attempt >= 3 ||
+            !this.started ||
+            (error instanceof RelayOperationError && !error.recoverable)
+          ) break;
+          await sleep(retryDelayMs(attempt, 350, 5_000));
+        }
       }
-    }, (error) => {
-      if (!error) return;
-      const pending = this.pendingGroupAcks.get(requestId);
-      if (!pending || pending.promise !== promise) return;
-      clearTimeout(pending.timeout);
-      this.pendingGroupAcks.delete(requestId);
-      pending.reject(new Error('Falha ao finalizar anexo de grupo.'));
-    });
-    return promise;
+      throw new RelayOperationError(
+        'RELAY_UNAVAILABLE',
+        lastError instanceof Error ? lastError.message : 'O anexo de grupo não pôde ser finalizado.',
+        true,
+        lastError
+      );
+    }, 95);
   }
 
   async requestGroupFile(
@@ -1372,7 +1492,13 @@ export class RelayClient {
     if (!this.started) return;
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, RECONNECT_DELAY_MAX_MS);
     this.refreshRelayDiscoveryIfNeeded();
-    this.connectWithBackoff();
+    const jitteredDelay = Math.round(this.reconnectDelayMs * (0.8 + Math.random() * 0.4));
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectNow();
+    }, jitteredDelay);
+    this.reconnectTimer.unref?.();
   }
 
   private handleDisconnect(endpoint: string): void {
@@ -1489,7 +1615,10 @@ export class RelayClient {
         const normalized = frames.filter(
           (value): value is ProtocolFrame => Boolean(value && typeof value === 'object')
         );
-        if (this.callbacks.onHistorySnapshot) this.callbacks.onHistorySnapshot(normalized);
+        const serverHighWaterSeq = Math.max(0, Math.trunc(Number(payload?.serverHighWaterSeq) || 0));
+        if (this.callbacks.onHistorySnapshot) {
+          this.callbacks.onHistorySnapshot(normalized, serverHighWaterSeq);
+        }
         else normalized.forEach((frame) => this.callbacks.onFrame(frame));
         return;
       }
@@ -1671,7 +1800,20 @@ export class RelayClient {
         clearTimeout(pending.timeout);
         this.pendingGroupAcks.delete(requestId);
         if (payload?.ok === false) {
-          pending.reject(new Error(asString(payload.message) || 'Falha na ação de grupo.'));
+          const code = asString(payload.code) || 'UNKNOWN';
+          const message = asString(payload.message) || 'Falha na ação de grupo.';
+          const normalizedCode =
+            code === 'RATE_LIMITED' ? 'RATE_LIMITED'
+            : code.includes('ATTACHMENT') &&
+                (code.includes('NOT_FOUND') || /indisponível|não encontrado/i.test(message))
+              ? 'ATTACHMENT_NOT_FOUND'
+              : code === 'SESSION_REPLACED' ? 'SESSION_RECONNECTING'
+              : 'UNKNOWN';
+          pending.reject(new RelayOperationError(
+            normalizedCode,
+            message,
+            normalizedCode !== 'UNKNOWN'
+          ));
           return;
         }
         pending.resolve({
@@ -1838,7 +1980,12 @@ export class RelayClient {
           if (pending) {
             clearTimeout(pending.timeout);
             this.pendingAcks.delete(frameMessageId);
-            pending.reject(new Error(`[relay:${code}] ${message}`));
+            const normalizedCode =
+              code === 'RATE_LIMITED' ? 'RATE_LIMITED'
+              : code.includes('ATTACHMENT') && code.includes('NOT_FOUND') ? 'ATTACHMENT_NOT_FOUND'
+              : code === 'SESSION_REPLACED' ? 'SESSION_RECONNECTING'
+              : 'UNKNOWN';
+            pending.reject(new RelayOperationError(normalizedCode, message, normalizedCode !== 'UNKNOWN'));
             correlated = true;
           }
         }

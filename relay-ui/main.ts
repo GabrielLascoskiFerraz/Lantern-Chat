@@ -51,7 +51,8 @@ const snapshot = () => {
     ? { running: true, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), ...relay.getDashboardSnapshot() }
     : { running: false, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), port: settings.port,
         tls: Boolean(settings.tlsCertFile && settings.tlsKeyFile), peersOnline: 0,
-        announcementsActive: 0, uptimeMs: 0, centralStore: {}, transferMetrics: null, peers: [] };
+        announcementsActive: 0, uptimeMs: 0, centralStore: {}, transferMetrics: null,
+        reliabilityMetrics: null, peers: [] };
 };
 const startRelay = async () => {
   if (relay) return snapshot();

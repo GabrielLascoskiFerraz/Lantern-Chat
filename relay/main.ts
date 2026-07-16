@@ -56,8 +56,50 @@ const OPEN_READY_STATE = 1;
 const GROUP_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const ANNOUNCEMENT_STATE_KEY = 'announcements';
 const ANNOUNCEMENT_STATE_VERSION = 1;
+const MAX_QUEUED_COMMANDS_PER_SESSION = 250;
+const MAX_QUEUED_ROUTES = 5_000;
 
 type JsonRecord = Record<string, unknown>;
+
+class RelayWorkQueue {
+  private active = 0;
+  private readonly pending: Array<{
+    run: () => Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }> = [];
+
+  constructor(
+    private readonly concurrency: number,
+    private readonly maxPending: number
+  ) {}
+
+  get size(): number {
+    return this.pending.length;
+  }
+
+  enqueue(run: () => Promise<void>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.pending.length >= this.maxPending) {
+        reject(new Error('Fila de roteamento temporariamente saturada.'));
+        return;
+      }
+      this.pending.push({ run, resolve, reject });
+      this.drain();
+    });
+  }
+
+  private drain(): void {
+    while (this.active < this.concurrency && this.pending.length > 0) {
+      const task = this.pending.shift()!;
+      this.active += 1;
+      void task.run().then(task.resolve, task.reject).finally(() => {
+        this.active -= 1;
+        this.drain();
+      });
+    }
+  }
+}
 
 export interface RelayConfig {
   host: string;
@@ -139,6 +181,8 @@ interface RelaySession {
   clientDeviceId: string | null;
   lastSeenAt: number;
   isAlive: boolean;
+  missedHeartbeats: number;
+  queuedMessages: number;
   messageQueue: Promise<void>;
   // Downloads stay ordered, but must not block this peer's commands while a
   // potentially large group attachment is being streamed.
@@ -231,7 +275,19 @@ interface RelayDashboardSnapshot {
     pendingRecipients: number;
     averageSendLatencyMs: number;
     maxSendLatencyMs: number;
+    p95SendLatencyMs: number;
     sendFailures: number;
+  };
+  reliabilityMetrics: {
+    acceptedFrames: number;
+    duplicateFrames: number;
+    activeRoutes: number;
+    peakActiveRoutes: number;
+    routeFailures: number;
+    sessionsAwaitingHeartbeat: number;
+    queuedCommands: number;
+    peakQueuedCommands: number;
+    queuedRoutes: number;
   };
   peers: RelayDashboardPeer[];
   announcements: RelayDashboardAnnouncement[];
@@ -1320,10 +1376,11 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       setText('metric-resumes', String(transfers.downloadsResumed || 0));
       setText('metric-transfer-failures', String(transferFailures) + ' falhas · ' + String(transfers.activeUploads || 0) + ' uploads ativos');
       setText('metric-latency', Number(transfers.averageSendLatencyMs || 0).toFixed(1) + ' ms');
-      setText('metric-latency-max', 'máxima ' + Number(transfers.maxSendLatencyMs || 0).toFixed(1) + ' ms · ' + String(transfers.sendFailures || 0) + ' falhas de socket');
+      const reliability = data.reliabilityMetrics || {};
+      setText('metric-latency-max', 'p95 ' + Number(transfers.p95SendLatencyMs || 0).toFixed(1) + ' ms · máxima ' + Number(transfers.maxSendLatencyMs || 0).toFixed(1) + ' ms · ' + String(transfers.sendFailures || 0) + ' falhas');
       setText('peers-meta', String(data.peers.length) + ' online');
       setText('announcements-meta', String(data.announcements.length) + ' ativos');
-      setText('store-path', 'Dados de anúncios: ' + data.announcementStoreFile + ' · métricas reiniciam com o Relay');
+      setText('store-path', 'Dados: ' + data.announcementStoreFile + ' · ' + String(reliability.acceptedFrames || 0) + ' operações persistidas · ' + String(reliability.activeRoutes || 0) + ' entregas ativas · ' + String(reliability.queuedRoutes || 0) + ' entregas aguardando · ' + String(reliability.queuedCommands || 0) + ' comandos na fila');
       setText('status-text', 'Online · atualizado ' + new Date().toLocaleTimeString('pt-BR'));
       const dot = $('status-dot');
       if (dot) dot.classList.remove('offline');
@@ -1695,8 +1752,18 @@ export class LanternRelay {
     sendLatencyTotalMs: 0,
     sendLatencyCount: 0,
     maxSendLatencyMs: 0,
+    sendLatencySamples: [] as number[],
     sendFailures: 0
   };
+  private readonly reliabilityMetrics = {
+    acceptedFrames: 0,
+    duplicateFrames: 0,
+    activeRoutes: 0,
+    peakActiveRoutes: 0,
+    routeFailures: 0,
+    peakQueuedCommands: 0
+  };
+  private readonly routeQueue = new RelayWorkQueue(16, MAX_QUEUED_ROUTES);
 
   constructor(config: RelayConfig) {
     this.config = config;
@@ -2135,10 +2202,11 @@ export class LanternRelay {
       const now = Date.now();
       for (const session of Array.from(this.sessionsBySocket.values())) {
         const isStale = now - session.lastSeenAt > this.config.peerTimeoutMs;
-        if (!session.isAlive || isStale) {
+        if (isStale && session.missedHeartbeats >= 3) {
           this.dropSession(session, 'timeout');
           continue;
         }
+        if (!session.isAlive) session.missedHeartbeats += 1;
         session.isAlive = false;
         try {
           session.socket.ping();
@@ -3230,6 +3298,10 @@ export class LanternRelay {
       this.transferMetrics.sendLatencyCount > 0
         ? this.transferMetrics.sendLatencyTotalMs / this.transferMetrics.sendLatencyCount
         : 0;
+    const sortedSendLatencies = [...this.transferMetrics.sendLatencySamples].sort((a, b) => a - b);
+    const p95SendLatencyMs = sortedSendLatencies.length > 0
+      ? sortedSendLatencies[Math.min(sortedSendLatencies.length - 1, Math.floor(sortedSendLatencies.length * 0.95))]
+      : 0;
 
     return {
       ok: true,
@@ -3263,7 +3335,16 @@ export class LanternRelay {
         pendingRecipients: attachmentStats.pendingRecipients,
         averageSendLatencyMs,
         maxSendLatencyMs: this.transferMetrics.maxSendLatencyMs,
+        p95SendLatencyMs,
         sendFailures: this.transferMetrics.sendFailures
+      },
+      reliabilityMetrics: {
+        ...this.reliabilityMetrics,
+        sessionsAwaitingHeartbeat: Array.from(this.sessionsBySocket.values())
+          .filter((session) => session.missedHeartbeats > 0).length,
+        queuedCommands: Array.from(this.sessionsBySocket.values())
+          .reduce((sum, session) => sum + session.queuedMessages, 0),
+        queuedRoutes: this.routeQueue.size
       },
       peers,
       announcements
@@ -3341,6 +3422,8 @@ export class LanternRelay {
       clientDeviceId: null,
       lastSeenAt: Date.now(),
       isAlive: true,
+      missedHeartbeats: 0,
+      queuedMessages: 0,
       messageQueue: Promise.resolve(),
       groupFileDownloadQueue: Promise.resolve(),
       attachmentDownloadQueue: Promise.resolve(),
@@ -3363,24 +3446,58 @@ export class LanternRelay {
 
     socket.on('pong', () => {
       session.isAlive = true;
+      session.missedHeartbeats = 0;
       session.lastSeenAt = Date.now();
     });
 
     socket.on('message', (raw) => {
+      // Heartbeat tem caminho rápido: nunca espera uploads, downloads ou
+      // roteamento já enfileirados para esta sessão.
+      try {
+        const parsed = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : raw.toString()) as RelayEnvelope;
+        if (parsed?.type === 'relay:heartbeat') {
+          session.lastSeenAt = Date.now();
+          session.isAlive = true;
+          session.missedHeartbeats = 0;
+          this.sendEnvelope(session.socket, {
+            type: 'relay:pong',
+            payload: { serverTime: Date.now() }
+          });
+          return;
+        }
+      } catch {
+        // O caminho normal produzirá BAD_JSON.
+      }
+      if (session.queuedMessages >= MAX_QUEUED_COMMANDS_PER_SESSION) {
+        this.sendError(
+          session,
+          'RATE_LIMITED',
+          'Muitas operações aguardando processamento. Tente novamente em instantes.'
+        );
+        return;
+      }
+      session.queuedMessages += 1;
+      this.reliabilityMetrics.peakQueuedCommands = Math.max(
+        this.reliabilityMetrics.peakQueuedCommands,
+        Array.from(this.sessionsBySocket.values())
+          .reduce((sum, entry) => sum + entry.queuedMessages, 0)
+      );
       session.messageQueue = session.messageQueue
         .catch(() => undefined)
         .then(() => this.handleMessage(session, raw))
         .catch((error) => {
-        logRelay(
-          'message_handler_failed',
-          {
-            sessionId: session.sessionId,
-            deviceId: session.peer?.deviceId || null,
-            message: error instanceof Error ? error.message : String(error)
-          },
-          { level: 'warn', rateKey: `message_handler_failed:${session.sessionId}`, rateLimitMs: 1_000 }
-        );
-      });
+          logRelay(
+            'message_handler_failed',
+            {
+              sessionId: session.sessionId,
+              deviceId: session.peer?.deviceId || null,
+              message: error instanceof Error ? error.message : String(error)
+            },
+            { level: 'warn', rateKey: `message_handler_failed:${session.sessionId}`, rateLimitMs: 1_000 }
+          );
+        }).finally(() => {
+          session.queuedMessages = Math.max(0, session.queuedMessages - 1);
+        });
     });
 
     socket.on('close', () => {
@@ -3434,6 +3551,7 @@ export class LanternRelay {
 
     session.lastSeenAt = Date.now();
     session.isAlive = true;
+    session.missedHeartbeats = 0;
 
     switch (envelope.type) {
       case 'relay:hello':
@@ -3463,6 +3581,9 @@ export class LanternRelay {
         return;
       case 'relay:history:request':
         this.handleCanonicalHistoryRequest(session, envelope.payload);
+        return;
+      case 'relay:sync:request':
+        this.handleCanonicalSyncRequest(session, envelope.payload);
         return;
       case 'relay:search:request':
         this.handleCanonicalSearchRequest(session, envelope.payload);
@@ -3559,6 +3680,40 @@ export class LanternRelay {
     this.sendEnvelope(session.socket, {
       type: 'relay:history:page',
       payload: { requestId, frames, hasMore: frames.length === limit }
+    });
+  }
+
+  private handleCanonicalSyncRequest(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Autenticação necessária.');
+      return;
+    }
+    const record = asRecord(payload);
+    const requestId = asString(record?.requestId);
+    if (!requestId) {
+      this.sendError(session, 'INVALID_SYNC_REQUEST', 'Cursor de sincronização inválido.');
+      return;
+    }
+    const afterSeq = Math.max(0, Math.trunc(asFiniteNumber(record?.afterSeq) || 0));
+    const limit = Math.max(1, Math.min(Math.trunc(asFiniteNumber(record?.limit) || 500), 1_000));
+    const frames = this.centralStore.listFramesForUserAfterSeq(session.peer.deviceId, afterSeq, limit);
+    const mapped = frames.map((frame) => ({
+      serverSeq: frame.serverSeq,
+      type: frame.type,
+      messageId: frame.messageId,
+      from: frame.senderUserId,
+      to: frame.targetUserId,
+      createdAt: frame.createdAt,
+      payload: frame.payload
+    }));
+    this.sendEnvelope(session.socket, {
+      type: 'relay:history:page',
+      payload: {
+        requestId,
+        frames: mapped,
+        hasMore: mapped.length === limit,
+        nextServerSeq: mapped.length > 0 ? mapped[mapped.length - 1].serverSeq : afterSeq
+      }
     });
   }
 
@@ -3801,8 +3956,10 @@ export class LanternRelay {
       type: 'relay:history:snapshot',
       payload: {
         serverTime: now,
+        serverHighWaterSeq: this.centralStore.getFrameSequenceHighWaterMark(),
         // Apenas um índice leve (último frame por conversa); o histórico é paginado sob demanda.
         frames: this.centralStore.listLatestConversationFramesForUser(canonicalDeviceId).map((frame) => ({
+          serverSeq: frame.serverSeq,
           type: frame.type,
           messageId: frame.messageId,
           from: frame.senderUserId,
@@ -4004,8 +4161,27 @@ export class LanternRelay {
     const action = asString(record?.action);
     const data = asRecord(record?.data) || {};
 
-    if (!action) {
+    if (!requestId || !action) {
       this.sendGroupRequestError(session, requestId, 'INVALID_GROUP_ACTION', 'Ação de grupo inválida.');
+      return;
+    }
+
+    const cached = this.centralStore.getCanonicalRequestResult<{
+      response: Record<string, unknown>;
+      events: RelayGroupEvent[];
+    }>(requestId, session.peer.deviceId);
+    if (cached) {
+      if (cached.action !== action) {
+        this.sendGroupRequestError(
+          session,
+          requestId,
+          'REQUEST_ID_REUSED',
+          'O identificador da operação já foi usado para outra ação.'
+        );
+        return;
+      }
+      this.sendGroupAck(session, requestId, cached.result.response);
+      if (cached.result.events.length > 0) this.broadcastGroupEvents(cached.result.events);
       return;
     }
 
@@ -4263,6 +4439,12 @@ export class LanternRelay {
           throw new Error(`Ação de grupo não suportada: ${action}`);
       }
 
+      this.centralStore.saveCanonicalRequestResult(
+        requestId,
+        session.peer.deviceId,
+        action,
+        { response, events }
+      );
       this.sendGroupAck(session, requestId, response);
       if (events.length > 0) {
         this.broadcastGroupEvents(events);
@@ -4321,6 +4503,28 @@ export class LanternRelay {
       this.sendGroupRequestError(session, requestId, 'INVALID_FILE_ID', 'fileId inválido.');
       return;
     }
+    if (!requestId) {
+      this.sendGroupRequestError(session, requestId, 'INVALID_REQUEST_ID', 'requestId inválido.');
+      return;
+    }
+    const cached = this.centralStore.getCanonicalRequestResult<{
+      response: Record<string, unknown>;
+      events: RelayGroupEvent[];
+    }>(requestId, session.peer.deviceId);
+    if (cached) {
+      if (cached.action !== 'file:complete') {
+        this.sendGroupRequestError(
+          session,
+          requestId,
+          'REQUEST_ID_REUSED',
+          'O identificador da operação já foi usado para outra ação.'
+        );
+        return;
+      }
+      this.sendGroupAck(session, requestId, cached.result.response);
+      if (cached.result.events.length > 0) this.broadcastGroupEvents(cached.result.events);
+      return;
+    }
     try {
       const metadata = await this.groupStore.completeGroupFile(fileId, session.peer.deviceId);
       const messageEvent = this.groupStore.appendGroupMessage({
@@ -4351,8 +4555,16 @@ export class LanternRelay {
         metadata.fileId
       );
       this.transferMetrics.uploadsCompleted += 1;
-      this.sendGroupAck(session, requestId, { metadata });
-      this.broadcastGroupEvents([messageEvent, attachmentEvent]);
+      const response = { metadata };
+      const events = [messageEvent, attachmentEvent];
+      this.centralStore.saveCanonicalRequestResult(
+        requestId,
+        session.peer.deviceId,
+        'file:complete',
+        { response, events }
+      );
+      this.sendGroupAck(session, requestId, response);
+      this.broadcastGroupEvents(events);
     } catch (error) {
       this.transferMetrics.uploadsFailed += 1;
       this.sendGroupRequestError(
@@ -4486,12 +4698,14 @@ export class LanternRelay {
       return;
     }
 
+    let persistence: 'inserted' | 'duplicate' | 'ephemeral' = 'ephemeral';
+    let persistedServerSeq: number | null = null;
     if (frame.type !== 'typing' && frame.type !== 'file:chunk' && frame.type !== 'file:complete') {
       const conversationId =
         frame.to === null
           ? 'announcements'
           : `dm:${[frame.from, frame.to].sort((left, right) => left.localeCompare(right)).join(':')}`;
-      this.centralStore.saveFrame({
+      persistence = this.centralStore.saveFrame({
         messageId: frame.messageId,
         type: frame.type,
         senderUserId: frame.from,
@@ -4500,9 +4714,12 @@ export class LanternRelay {
         createdAt: frame.createdAt,
         payload: frame.payload
       });
+      persistedServerSeq = this.centralStore.getFrameServerSeq(frame.messageId);
     }
 
-    let outboundFrame = frame;
+    let outboundFrame = persistedServerSeq
+      ? { ...frame, serverSeq: persistedServerSeq }
+      : frame;
     if (frame.type === 'announce' || (frame.type === 'file:offer' && frame.to === null)) {
       this.trackAnnouncement(frame);
     } else if (frame.type === 'chat:edit' && frame.to === null) {
@@ -4521,23 +4738,47 @@ export class LanternRelay {
       }
     }
 
-    const deliveredTo = await this.routeFrame(outboundFrame, session);
-
-    logRelay('frame_routed', {
-      type: outboundFrame.type,
-      from: outboundFrame.from,
-      to: outboundFrame.to,
-      messageId: outboundFrame.messageId,
-      deliveredCount: deliveredTo.length,
-      deliveredTo
-    }, { level: 'debug' });
-
+    // Confirma assim que a transação canônica termina. A transmissão aos
+    // sockets é independente e não bloqueia o remetente nem seu heartbeat.
     this.sendEnvelope(session.socket, {
       type: 'relay:send:ack',
       payload: {
         frameMessageId: frame.messageId,
-        deliveredTo
+        deliveredTo: [],
+        persisted: persistence !== 'ephemeral',
+        duplicate: persistence === 'duplicate'
       }
+    });
+
+    this.reliabilityMetrics.acceptedFrames += 1;
+    if (persistence === 'duplicate') this.reliabilityMetrics.duplicateFrames += 1;
+    void this.routeQueue.enqueue(async () => {
+      this.reliabilityMetrics.activeRoutes += 1;
+      this.reliabilityMetrics.peakActiveRoutes = Math.max(
+        this.reliabilityMetrics.peakActiveRoutes,
+        this.reliabilityMetrics.activeRoutes
+      );
+      try {
+        const deliveredTo = await this.routeFrame(outboundFrame, session);
+        logRelay('frame_routed', {
+          type: outboundFrame.type,
+          from: outboundFrame.from,
+          to: outboundFrame.to,
+          messageId: outboundFrame.messageId,
+          deliveredCount: deliveredTo.length,
+          deliveredTo
+        }, { level: 'debug' });
+      } finally {
+        this.reliabilityMetrics.activeRoutes = Math.max(0, this.reliabilityMetrics.activeRoutes - 1);
+      }
+    }).catch((error) => {
+      this.transferMetrics.sendFailures += 1;
+      this.reliabilityMetrics.routeFailures += 1;
+      logRelay('frame_route_failed', {
+        type: outboundFrame.type,
+        messageId: outboundFrame.messageId,
+        message: error instanceof Error ? error.message : String(error)
+      }, { level: 'warn', rateKey: `frame_route_failed:${outboundFrame.messageId}`, rateLimitMs: 1_000 });
     });
   }
 
@@ -5404,6 +5645,10 @@ export class LanternRelay {
             this.transferMetrics.maxSendLatencyMs,
             latency
           );
+          this.transferMetrics.sendLatencySamples.push(latency);
+          if (this.transferMetrics.sendLatencySamples.length > 2_000) {
+            this.transferMetrics.sendLatencySamples.shift();
+          }
           this.transferMetrics.sendFailures += 1;
           resolve(false);
         }, SEND_CALLBACK_TIMEOUT_MS);
@@ -5420,6 +5665,10 @@ export class LanternRelay {
             this.transferMetrics.maxSendLatencyMs,
             latency
           );
+          this.transferMetrics.sendLatencySamples.push(latency);
+          if (this.transferMetrics.sendLatencySamples.length > 2_000) {
+            this.transferMetrics.sendLatencySamples.shift();
+          }
           if (error) this.transferMetrics.sendFailures += 1;
           resolve(!error);
         });

@@ -3,6 +3,9 @@ import Database from 'better-sqlite3';
 export const runMigrations = (db: Database.Database): void => {
   db.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA wal_autocheckpoint = 1000;
 
     CREATE TABLE IF NOT EXISTS profile (
       deviceId TEXT PRIMARY KEY,
@@ -69,6 +72,33 @@ export const runMigrations = (db: Database.Database): void => {
       ON messages(conversationId, createdAt);
 
     CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
+
+    CREATE TABLE IF NOT EXISTS outbound_frames (
+      messageId TEXT PRIMARY KEY,
+      frameJson TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      lastError TEXT,
+      nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbound_frames_due
+      ON outbound_frames(nextAttemptAt, createdAt);
+
+    CREATE TABLE IF NOT EXISTS attachment_download_checkpoints (
+      fileId TEXT PRIMARY KEY,
+      messageId TEXT NOT NULL,
+      tempPath TEXT NOT NULL,
+      receivedBytes INTEGER NOT NULL DEFAULT 0,
+      nextChunkIndex INTEGER NOT NULL DEFAULT 0,
+      updatedAt INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS canonical_sync_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      serverSeq INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS message_reactions (
       messageId TEXT NOT NULL,

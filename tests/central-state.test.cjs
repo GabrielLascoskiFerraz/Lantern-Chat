@@ -65,6 +65,45 @@ test('estado canônico é cifrado e sobrevive à reabertura do SQLite', () => {
   }
 });
 
+test('resultados idempotentes sobrevivem à reabertura sem expor o conteúdo no SQLite', () => {
+  const root = createTempDir();
+  const dataDir = path.join(root, 'central');
+  try {
+    const store = new CentralStore(dataDir, silentLog);
+    const user = store.createUser({
+      username: 'idempotent-user', displayName: 'Idempotent User', password: 'idempotent-password'
+    });
+    store.saveCanonicalRequestResult('request-one', user.userId, 'group.create', {
+      response: { groupId: 'group-secret-marker' },
+      events: []
+    });
+    const databaseFile = store.getDatabaseFile();
+    store.close();
+
+    const database = new Database(databaseFile, { readonly: true });
+    const row = database.prepare(`
+      SELECT action, resultCipher FROM canonical_request_results WHERE requestId = ?
+    `).get('request-one');
+    database.close();
+    assert.equal(row.action, 'group.create');
+    assert.match(row.resultCipher, /^gcm-v1\./);
+    assert.equal(row.resultCipher.includes('group-secret-marker'), false);
+
+    const reopened = new CentralStore(dataDir, silentLog);
+    assert.deepEqual(
+      reopened.getCanonicalRequestResult('request-one', user.userId),
+      {
+        action: 'group.create',
+        result: { response: { groupId: 'group-secret-marker' }, events: [] }
+      }
+    );
+    assert.equal(reopened.getCanonicalRequestResult('request-one', 'another-user'), null);
+    reopened.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('pesquisa, anexos, auditoria e backup permanecem canônicos e cifrados', async () => {
   const root = createTempDir();
   const dataDir = path.join(root, 'central');
@@ -154,6 +193,39 @@ test('cursor do servidor pagina mensagens sem lacunas mesmo com timestamps iguai
   } finally {
     if (previousPassword === undefined) delete process.env.LANTERN_RELAY_ADMIN_PASSWORD;
     else process.env.LANTERN_RELAY_ADMIN_PASSWORD = previousPassword;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('sincronização incremental usa sequência canônica e deduplica reenvios', () => {
+  const root = createTempDir();
+  try {
+    const store = new CentralStore(path.join(root, 'central'), silentLog);
+    const first = createAdmin(store);
+    const second = store.createUser({
+      username: 'incremental-peer', displayName: 'Incremental Peer', password: 'incremental-peer-password'
+    });
+    const conversationId = `dm:${[first.userId, second.userId].sort().join(':')}`;
+    const base = Date.now();
+    for (let index = 1; index <= 3; index += 1) {
+      const frame = {
+        messageId: `incremental-${index}`,
+        type: 'chat:text', senderUserId: first.userId, targetUserId: second.userId,
+        conversationId, createdAt: base + index, payload: { text: `mensagem ${index}` }
+      };
+      assert.equal(store.saveFrame(frame), 'inserted');
+      if (index === 2) assert.equal(store.saveFrame(frame), 'duplicate');
+    }
+    const firstPage = store.listFramesForUserAfterSeq(second.userId, 0, 2);
+    assert.deepEqual(firstPage.map((frame) => frame.messageId), ['incremental-1', 'incremental-2']);
+    const secondPage = store.listFramesForUserAfterSeq(
+      second.userId,
+      firstPage[firstPage.length - 1].serverSeq,
+      2
+    );
+    assert.deepEqual(secondPage.map((frame) => frame.messageId), ['incremental-3']);
+    store.close();
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

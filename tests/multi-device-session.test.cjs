@@ -120,9 +120,50 @@ test('um usuário mantém múltiplos dispositivos e recebe em todas as sessões'
     const ack = sender.messages.find((item) =>
       item.type === 'relay:send:ack' && item.payload?.frameMessageId === messageId
     );
-    assert.deepEqual(ack.payload.deliveredTo, [recipient.userId]);
+    assert.deepEqual(ack.payload.deliveredTo, []);
+    assert.equal(ack.payload.persisted, true);
   } finally {
     for (const socket of sockets) socket.close();
+    await relay.stop('test');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('confirmação durável não espera a distribuição aos sockets destinatários', async () => {
+  fs.mkdirSync(root, { recursive: true });
+  const port = await getFreePort();
+  const store = new CentralStore(path.join(root, 'central'), () => undefined);
+  store.createUser({ username: 'fast-ack-sender', displayName: 'Fast Sender', password: 'fast-ack-password' });
+  const target = store.createUser({ username: 'slow-target', displayName: 'Slow Target', password: 'slow-target-password' });
+  const auth = store.login('fast-ack-sender', 'fast-ack-password', 'fast-ack-device');
+  store.close();
+  const relay = new LanternRelay(config(port));
+  const originalRoute = relay.routeFrame.bind(relay);
+  relay.routeFrame = async (...args) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return originalRoute(...args);
+  };
+  let sender;
+  try {
+    await relay.start();
+    sender = await connect(port, auth.token, auth.user, 'fast-ack-device');
+    const messageId = randomUUID();
+    const startedAt = Date.now();
+    sender.socket.send(JSON.stringify({
+      type: 'relay:send',
+      payload: { frame: {
+        type: 'chat:text', messageId, from: auth.user.userId, to: target.userId,
+        createdAt: Date.now(), payload: { text: 'ack persistido' }
+      } }
+    }));
+    await waitFor(() => sender.messages.some((item) =>
+      item.type === 'relay:send:ack' && item.payload?.frameMessageId === messageId
+    ));
+    assert.equal(Date.now() - startedAt < 250, true);
+    const ack = sender.messages.find((item) => item.payload?.frameMessageId === messageId);
+    assert.equal(ack.payload.persisted, true);
+  } finally {
+    sender?.socket.close();
     await relay.stop('test');
     fs.rmSync(root, { recursive: true, force: true });
   }

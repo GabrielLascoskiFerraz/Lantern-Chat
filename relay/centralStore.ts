@@ -100,6 +100,7 @@ export class CentralStore {
   private readonly encrypted: EncryptedFields;
   private readonly attachmentsDir: string;
   private readonly chunks: EncryptedChunkStore;
+  private lastRequestResultCleanupAt = 0;
 
   constructor(private readonly dataDir: string, private readonly log: (event: string, details?: Record<string, unknown>) => void) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -112,6 +113,8 @@ export class CentralStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('wal_autocheckpoint = 1000');
     this.migrate();
   }
 
@@ -229,6 +232,18 @@ export class CentralStore {
         messageId TEXT NOT NULL UNIQUE,
         FOREIGN KEY(messageId) REFERENCES canonical_frames(messageId) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS canonical_request_results (
+        requestId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        action TEXT NOT NULL,
+        resultCipher TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        PRIMARY KEY(requestId, userId),
+        FOREIGN KEY(userId) REFERENCES users(userId) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_request_results_created
+        ON canonical_request_results(createdAt);
 
       CREATE TABLE IF NOT EXISTS canonical_search_documents (
         messageId TEXT PRIMARY KEY,
@@ -354,6 +369,38 @@ export class CentralStore {
 
   getDatabaseFile(): string {
     return this.databaseFile;
+  }
+
+  getCanonicalRequestResult<T>(requestId: string, userId: string): { action: string; result: T } | null {
+    const row = this.db.prepare(`
+      SELECT action, resultCipher
+      FROM canonical_request_results
+      WHERE requestId = ? AND userId = ?
+    `).get(requestId, userId) as { action: string; resultCipher: string } | undefined;
+    if (!row) return null;
+    return {
+      action: row.action,
+      result: this.unprotectJson<T>(row.resultCipher)
+    };
+  }
+
+  saveCanonicalRequestResult<T>(
+    requestId: string,
+    userId: string,
+    action: string,
+    result: T
+  ): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO canonical_request_results(requestId, userId, action, resultCipher, createdAt)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(requestId, userId) DO NOTHING
+    `).run(requestId, userId, action, this.protectJson(result), now);
+    if (now - this.lastRequestResultCleanupAt >= 60 * 60 * 1_000) {
+      this.db.prepare('DELETE FROM canonical_request_results WHERE createdAt < ?')
+        .run(now - 7 * 24 * 60 * 60 * 1_000);
+      this.lastRequestResultCleanupAt = now;
+    }
   }
 
   readCanonicalState<T>(key: string, version = 1): T | null {
@@ -1139,6 +1186,13 @@ export class CentralStore {
     return 'duplicate';
   }
 
+  getFrameServerSeq(messageId: string): number | null {
+    const row = this.db.prepare(`
+      SELECT serverSeq FROM canonical_frame_sequence WHERE messageId = ?
+    `).get(messageId) as { serverSeq: number } | undefined;
+    return row && Number.isFinite(row.serverSeq) ? row.serverSeq : null;
+  }
+
   listFramesForUser(userId: string, after = 0, limit = 500): CanonicalFrame[] {
     const rows = this.db.prepare(`
       SELECT canonical_frames.messageId, canonical_frames.type, canonical_frames.senderUserId,
@@ -1165,6 +1219,46 @@ export class CentralStore {
       createdAt: row.createdAt,
       payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
     }));
+  }
+
+  listFramesForUserAfterSeq(userId: string, afterSeq = 0, limit = 500): CanonicalFrame[] {
+    const safeAfterSeq = Math.max(0, Math.trunc(afterSeq) || 0);
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 1_000));
+    const rows = this.db.prepare(`
+      SELECT sequence.serverSeq, frame.messageId, frame.type, frame.senderUserId,
+        frame.targetUserId, frame.conversationId, frame.payloadCipher, frame.createdAt
+      FROM canonical_frame_sequence sequence
+      JOIN canonical_frames frame ON frame.messageId = sequence.messageId
+      LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
+        CASE WHEN frame.senderUserId = ? THEN frame.targetUserId ELSE frame.senderUserId END
+      WHERE sequence.serverSeq > ?
+        AND frame.deletedAt IS NULL
+        AND frame.targetUserId IS NOT NULL
+        AND frame.createdAt > COALESCE(state.clearedAt, 0)
+        AND (frame.senderUserId = ? OR frame.targetUserId = ?)
+      ORDER BY sequence.serverSeq ASC
+      LIMIT ?
+    `).all(userId, userId, safeAfterSeq, userId, userId, safeLimit) as Array<{
+      serverSeq: number; messageId: string; type: string; senderUserId: string;
+      targetUserId: string | null; conversationId: string; payloadCipher: string; createdAt: number;
+    }>;
+    return rows.map((row) => ({
+      serverSeq: row.serverSeq,
+      messageId: row.messageId,
+      type: row.type,
+      senderUserId: row.senderUserId,
+      targetUserId: row.targetUserId,
+      conversationId: row.conversationId,
+      createdAt: row.createdAt,
+      payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
+    }));
+  }
+
+  getFrameSequenceHighWaterMark(): number {
+    const row = this.db.prepare('SELECT MAX(serverSeq) AS serverSeq FROM canonical_frame_sequence').get() as {
+      serverSeq: number | null;
+    };
+    return typeof row.serverSeq === 'number' ? row.serverSeq : 0;
   }
 
   listAnnouncementFrames(): CanonicalFrame[] {
@@ -1259,13 +1353,14 @@ export class CentralStore {
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 1_000));
     const rows = this.db.prepare(`
       WITH visible AS (
-        SELECT canonical_frames.messageId, canonical_frames.type,
+        SELECT sequence.serverSeq, canonical_frames.messageId, canonical_frames.type,
           canonical_frames.senderUserId, canonical_frames.targetUserId,
           canonical_frames.conversationId, canonical_frames.payloadCipher,
           canonical_frames.createdAt,
           CASE WHEN canonical_frames.senderUserId = ? THEN canonical_frames.targetUserId
                ELSE canonical_frames.senderUserId END AS peerUserId
         FROM canonical_frames
+        JOIN canonical_frame_sequence sequence ON sequence.messageId = canonical_frames.messageId
         LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
           CASE WHEN canonical_frames.senderUserId = ? THEN canonical_frames.targetUserId
                ELSE canonical_frames.senderUserId END
@@ -1280,16 +1375,17 @@ export class CentralStore {
         ) AS rowNumber
         FROM visible
       )
-      SELECT messageId, type, senderUserId, targetUserId, conversationId, payloadCipher, createdAt
+      SELECT serverSeq, messageId, type, senderUserId, targetUserId, conversationId, payloadCipher, createdAt
       FROM ranked
       WHERE rowNumber = 1
       ORDER BY createdAt DESC, messageId DESC
       LIMIT ?
     `).all(userId, userId, userId, userId, userId, safeLimit) as Array<{
-      messageId: string; type: string; senderUserId: string; targetUserId: string | null;
+      serverSeq: number; messageId: string; type: string; senderUserId: string; targetUserId: string | null;
       conversationId: string; payloadCipher: string; createdAt: number;
     }>;
     return rows.map((row) => ({
+      serverSeq: row.serverSeq,
       messageId: row.messageId,
       type: row.type,
       senderUserId: row.senderUserId,

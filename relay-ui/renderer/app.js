@@ -432,6 +432,7 @@ const render = (state) => {
   const running = Boolean(state.running);
   const store = state.centralStore || {};
   const transfers = state.transferMetrics || {};
+  const reliability = state.reliabilityMetrics || {};
   const port = state.port || state.settings?.port || 43190;
   const peers = Array.isArray(state.peers) ? state.peers : [];
   const announcements = Array.isArray(state.announcements) ? state.announcements : [];
@@ -458,6 +459,10 @@ const render = (state) => {
   $('metric-storage').textContent = `${bytes(store.attachmentBytes)} armazenados`;
   $('metric-transfers').textContent = number(transferTotal);
   $('metric-transfer-health').textContent = transferFailures ? `${number(transferFailures)} falha(s)` : 'Nenhuma falha';
+  $('metric-latency').textContent = `${Number(transfers.averageSendLatencyMs || 0).toFixed(1)} ms`;
+  $('metric-latency-detail').textContent = `p95 ${Number(transfers.p95SendLatencyMs || 0).toFixed(1)} ms · máxima ${Number(transfers.maxSendLatencyMs || 0).toFixed(1)} ms`;
+  $('metric-accepted').textContent = number(reliability.acceptedFrames);
+  $('metric-reliability-detail').textContent = `${number(reliability.activeRoutes)} entregas · ${number(reliability.queuedRoutes)} aguardando · ${number(reliability.queuedCommands)} comandos · ${number(reliability.sessionsAwaitingHeartbeat)} sessões atrasadas`;
   $('metric-uptime').textContent = running ? duration(state.uptimeMs) : '—';
   $('metric-started').textContent = running ? `Iniciado às ${time(state.startedAt)}` : 'Servidor parado';
   $('last-update').textContent = `Atualizado às ${time(state.now || Date.now())}`;

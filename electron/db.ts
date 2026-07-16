@@ -18,6 +18,7 @@ import {
   MessageReactionDetail,
   Peer,
   Profile,
+  ProtocolFrame,
   ReactPayload
 } from './types';
 
@@ -73,6 +74,9 @@ export class DbService {
         DELETE FROM announcement_reads;
         DELETE FROM group_attachment_downloads;
         DELETE FROM group_attachment_uploads;
+        DELETE FROM outbound_frames;
+        DELETE FROM attachment_download_checkpoints;
+        DELETE FROM canonical_sync_state;
         DELETE FROM group_pinned_messages;
         DELETE FROM group_events_applied;
         DELETE FROM group_members;
@@ -1897,6 +1901,161 @@ export class DbService {
     return this.db
       .prepare('SELECT * FROM messages WHERE messageId = ? LIMIT 1')
       .get(messageId) as DbMessage | undefined;
+  }
+
+  enqueueOutboundFrame(frame: ProtocolFrame): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO outbound_frames(messageId, frameJson, attempts, lastError, nextAttemptAt, createdAt, updatedAt)
+      VALUES (?, ?, 0, NULL, 0, ?, ?)
+      ON CONFLICT(messageId) DO UPDATE SET
+        frameJson = excluded.frameJson,
+        updatedAt = excluded.updatedAt
+    `).run(frame.messageId, JSON.stringify(frame), now, now);
+  }
+
+  completeOutboundFrame(messageId: string): void {
+    this.db.prepare('DELETE FROM outbound_frames WHERE messageId = ?').run(messageId);
+  }
+
+  retryOutboundFrame(messageId: string, error: string, delayMs: number): void {
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE outbound_frames
+      SET attempts = attempts + 1,
+          lastError = ?,
+          nextAttemptAt = ?,
+          updatedAt = ?
+      WHERE messageId = ?
+    `).run(error.slice(0, 500), now + Math.max(0, Math.trunc(delayMs)), now, messageId);
+  }
+
+  listDueOutboundFrames(limit = 100): Array<{ frame: ProtocolFrame; attempts: number }> {
+    const rows = this.db.prepare(`
+      SELECT messageId, frameJson, attempts
+      FROM outbound_frames
+      WHERE nextAttemptAt <= ?
+      ORDER BY createdAt, messageId
+      LIMIT ?
+    `).all(Date.now(), Math.max(1, Math.min(Math.trunc(limit) || 100, 500))) as Array<{
+      messageId: string;
+      frameJson: string;
+      attempts: number;
+    }>;
+    const result: Array<{ frame: ProtocolFrame; attempts: number }> = [];
+    for (const row of rows) {
+      try {
+        const frame = JSON.parse(row.frameJson) as ProtocolFrame;
+        if (frame && typeof frame.messageId === 'string' && typeof frame.type === 'string') {
+          result.push({ frame, attempts: Math.max(0, row.attempts || 0) });
+        }
+      } catch {
+        this.completeOutboundFrame(row.messageId);
+      }
+    }
+    return result;
+  }
+
+  listOutboundFrames(limit = 100): Array<{ frame: ProtocolFrame; attempts: number }> {
+    const rows = this.db.prepare(`
+      SELECT messageId, frameJson, attempts
+      FROM outbound_frames
+      ORDER BY nextAttemptAt, createdAt, messageId
+      LIMIT ?
+    `).all(Math.max(1, Math.min(Math.trunc(limit) || 100, 500))) as Array<{
+      messageId: string;
+      frameJson: string;
+      attempts: number;
+    }>;
+    return rows.flatMap((row) => {
+      try {
+        const frame = JSON.parse(row.frameJson) as ProtocolFrame;
+        return frame && typeof frame.messageId === 'string' ? [{ frame, attempts: row.attempts }] : [];
+      } catch {
+        this.completeOutboundFrame(row.messageId);
+        return [];
+      }
+    });
+  }
+
+  getNextOutboundAttemptAt(): number | null {
+    const row = this.db.prepare('SELECT MIN(nextAttemptAt) AS nextAttemptAt FROM outbound_frames')
+      .get() as { nextAttemptAt: number | null };
+    return typeof row.nextAttemptAt === 'number' ? Math.max(0, row.nextAttemptAt) : null;
+  }
+
+  getOutboundFrameCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM outbound_frames').get() as { count: number };
+    return row.count;
+  }
+
+  getMaxServerSeq(): number {
+    const row = this.db.prepare('SELECT MAX(serverSeq) AS serverSeq FROM messages').get() as {
+      serverSeq: number | null;
+    };
+    return typeof row.serverSeq === 'number' ? row.serverSeq : 0;
+  }
+
+  getCanonicalSyncCursor(): number | null {
+    const row = this.db.prepare('SELECT serverSeq FROM canonical_sync_state WHERE id = 1').get() as {
+      serverSeq: number;
+    } | undefined;
+    return row && Number.isFinite(row.serverSeq) ? Math.max(0, Math.trunc(row.serverSeq)) : null;
+  }
+
+  setCanonicalSyncCursor(serverSeq: number): void {
+    const normalized = Math.max(0, Math.trunc(serverSeq) || 0);
+    this.db.prepare(`
+      INSERT INTO canonical_sync_state(id, serverSeq, updatedAt) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        serverSeq = MAX(canonical_sync_state.serverSeq, excluded.serverSeq),
+        updatedAt = excluded.updatedAt
+    `).run(normalized, Date.now());
+  }
+
+  getAttachmentDownloadCheckpoint(fileId: string): {
+    fileId: string;
+    messageId: string;
+    tempPath: string;
+    receivedBytes: number;
+    nextChunkIndex: number;
+    updatedAt: number;
+  } | undefined {
+    return this.db.prepare(`
+      SELECT fileId, messageId, tempPath, receivedBytes, nextChunkIndex, updatedAt
+      FROM attachment_download_checkpoints WHERE fileId = ?
+    `).get(fileId) as ReturnType<DbService['getAttachmentDownloadCheckpoint']>;
+  }
+
+  saveAttachmentDownloadCheckpoint(input: {
+    fileId: string;
+    messageId: string;
+    tempPath: string;
+    receivedBytes: number;
+    nextChunkIndex: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO attachment_download_checkpoints(
+        fileId, messageId, tempPath, receivedBytes, nextChunkIndex, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(fileId) DO UPDATE SET
+        messageId = excluded.messageId,
+        tempPath = excluded.tempPath,
+        receivedBytes = excluded.receivedBytes,
+        nextChunkIndex = excluded.nextChunkIndex,
+        updatedAt = excluded.updatedAt
+    `).run(
+      input.fileId,
+      input.messageId,
+      input.tempPath,
+      Math.max(0, Math.trunc(input.receivedBytes)),
+      Math.max(0, Math.trunc(input.nextChunkIndex)),
+      Date.now()
+    );
+  }
+
+  clearAttachmentDownloadCheckpoint(fileId: string): void {
+    this.db.prepare('DELETE FROM attachment_download_checkpoints WHERE fileId = ?').run(fileId);
   }
 
   getMessageByFileId(fileId: string): DbMessage | undefined {

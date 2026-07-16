@@ -100,6 +100,8 @@ class LanternApp {
   private readonly canonicalAttachmentRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly canonicalAttachmentRetryAttempts = new Map<string, number>();
   private readonly canonicalAttachmentMaxRetries = 5;
+  private outboundResumeRunning = false;
+  private outboundResumeTimer: NodeJS.Timeout | null = null;
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -201,6 +203,7 @@ class LanternApp {
       throw new Error('O Relay não retornou uma sessão válida.');
     }
     const authenticatedProfile = this.profileFromAccount(state.user);
+    this.clearOutboundResumeTimer();
     this.db.resetCacheForAuthenticatedProfile(authenticatedProfile);
     Object.assign(this.profile, authenticatedProfile);
     this.authState = state;
@@ -269,6 +272,7 @@ class LanternApp {
 
   private async logout(): Promise<void> {
     this.relay?.stop();
+    this.clearOutboundResumeTimer();
     this.clearCanonicalAttachmentRetries();
     await this.authService.logout();
     this.authState = this.authService.getState();
@@ -328,8 +332,13 @@ class LanternApp {
       onFrame: (frame) => {
         this.enqueueIncomingFrame(frame);
       },
-      onHistorySnapshot: (frames) => {
-        void this.applyCanonicalHistorySnapshot(frames).catch((error) => {
+      onHistorySnapshot: (frames, serverHighWaterSeq) => {
+        const initializeCursor = this.db.getCanonicalSyncCursor() === null && this.db.getMaxServerSeq() === 0;
+        void this.applyCanonicalHistorySnapshot(frames).then(() => {
+          if (initializeCursor && serverHighWaterSeq > 0) {
+            this.db.setCanonicalSyncCursor(serverHighWaterSeq);
+          }
+        }).catch((error) => {
           console.error('[Lantern][Relay] falha ao aplicar histórico canônico:', error);
         });
       },
@@ -435,6 +444,8 @@ class LanternApp {
         this.resumeActiveConversationAttachmentDownloads();
         void (async () => {
           try {
+            await this.resumePendingCanonicalFrames();
+            await this.syncCanonicalHistoryIncrementally();
             await this.relay?.syncGroups(this.db.getGroupSeqMap());
             // Primeiro aplicamos o snapshot canônico; depois retomamos uploads/downloads locais.
             await this.resumePendingGroupFiles();
@@ -461,10 +472,7 @@ class LanternApp {
       fileTransfer: this.fileTransfer,
       getPeer: (peerId) => this.presence.getPeer(peerId),
       emitEvent: (event) => this.emitEvent(event)
-      ,sendCanonicalFrame: async (frame) => {
-        if (!this.relay?.isConnected()) throw new Error('Relay offline.');
-        await this.relay.sendFrame(frame);
-      },
+      ,sendCanonicalFrame: (frame) => this.sendCanonicalFrame(frame),
       uploadCanonicalAttachment: async ({ message, offer, filePath, onProgress }) => {
         if (!this.relay) throw new Error('Relay indisponível.');
         await this.relay.uploadCentralAttachment({
@@ -1330,39 +1338,63 @@ class LanternApp {
       size: message.fileSize,
       sha256: message.fileSha256
     };
-    this.fileTransfer.startIncoming(offer, message.senderDeviceId);
+    const checkpoint = this.db.getAttachmentDownloadCheckpoint(message.fileId);
+    const localPath = this.fileTransfer.startIncoming(offer, message.senderDeviceId, checkpoint);
     this.emitEvent({
       type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
       messageId: message.messageId, peerId: message.senderDeviceId,
-      transferred: 0, total: message.fileSize, stage: 'downloading'
+      transferred: checkpoint?.receivedBytes || 0, total: message.fileSize,
+      stage: checkpoint ? 'retrying' : 'downloading'
     });
-    await this.relay.downloadCentralAttachment(message.fileId, {
-      onStart: (metadata) => {
-        const attachmentId = typeof metadata.attachmentId === 'string'
-          ? metadata.attachmentId
-          : '';
-        const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
-        const size = typeof metadata.size === 'number' ? metadata.size : -1;
-        const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
-        if (
-          attachmentId !== message.fileId ||
-          messageId !== message.messageId ||
-          size !== message.fileSize ||
-          sha256 !== message.fileSha256
-        ) {
-          throw new Error('Manifesto do anexo recebido do Relay não corresponde à mensagem.');
+    try {
+      await this.relay.downloadCentralAttachment(message.fileId, {
+        onStart: (metadata) => {
+          const attachmentId = typeof metadata.attachmentId === 'string'
+            ? metadata.attachmentId
+            : '';
+          const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : '';
+          const size = typeof metadata.size === 'number' ? metadata.size : -1;
+          const sha256 = typeof metadata.sha256 === 'string' ? metadata.sha256 : '';
+          if (
+            attachmentId !== message.fileId ||
+            messageId !== message.messageId ||
+            size !== message.fileSize ||
+            sha256 !== message.fileSha256
+          ) {
+            throw new Error('Manifesto do anexo recebido do Relay não corresponde à mensagem.');
+          }
+        },
+        onChunk: (chunk) => {
+          const progress = this.fileTransfer.onChunk(chunk);
+          this.db.saveAttachmentDownloadCheckpoint({
+            fileId: message.fileId!,
+            messageId: message.messageId,
+            tempPath: localPath,
+            receivedBytes: progress.transferred,
+            nextChunkIndex: chunk.index + 1
+          });
+          this.emitEvent({
+            type: 'transfer:progress', direction: 'receive', fileId: message.fileId!,
+            messageId: message.messageId, peerId: message.senderDeviceId,
+            transferred: progress.transferred, total: progress.total, stage: 'downloading'
+          });
         }
-      },
-      onChunk: (chunk) => {
-        const progress = this.fileTransfer.onChunk(chunk);
-        this.emitEvent({
-          type: 'transfer:progress', direction: 'receive', fileId: message.fileId!,
-          messageId: message.messageId, peerId: message.senderDeviceId,
-          transferred: progress.transferred, total: progress.total, stage: 'downloading'
+      }, checkpoint?.nextChunkIndex || 0);
+      await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
+      this.db.clearAttachmentDownloadCheckpoint(message.fileId);
+    } catch (error) {
+      const paused = await this.fileTransfer.pauseIncoming(message.fileId).catch(() => null);
+      if (paused) {
+        this.db.saveAttachmentDownloadCheckpoint({
+          fileId: message.fileId,
+          messageId: message.messageId,
+          tempPath: paused.tempPath,
+          receivedBytes: paused.receivedBytes,
+          nextChunkIndex: paused.nextChunkIndex
         });
       }
-    });
-    await this.finalizeIncomingFileTransfer(message.fileId, message.senderDeviceId);
+      throw error;
+    }
   }
 
   private enqueueIncomingFrame(frame: ProtocolFrame): void {
@@ -1431,17 +1463,101 @@ class LanternApp {
   }
 
   private async sendCanonicalFrame(frame: ProtocolFrame): Promise<void> {
-    if (!this.relay || !this.relay.isConnected()) {
-      throw new Error('Relay offline.');
+    const persistent = frame.type !== 'typing';
+    if (persistent) this.db.enqueueOutboundFrame(frame);
+    try {
+      if (!this.relay || !this.relay.isConnected()) {
+        throw new Error('Relay offline.');
+      }
+      await this.relay.sendFrame(frame);
+      if (persistent) {
+        this.db.completeOutboundFrame(frame.messageId);
+        // O ACK do Relay confirma persistência canônica. "delivered" é reservado
+        // ao chat:ack emitido pelo destinatário.
+        this.db.updateMessageStatus(frame.messageId, 'sent');
+        const updated = this.db.getMessageById(frame.messageId);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+      }
+    } catch (error) {
+      if (persistent) {
+        const pending = this.db.listOutboundFrames(500).find((item) => item.frame.messageId === frame.messageId);
+        const attempts = pending?.attempts || 0;
+        const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempts));
+        this.db.retryOutboundFrame(
+          frame.messageId,
+          error instanceof Error ? error.message : String(error),
+          delayMs
+        );
+        this.scheduleOutboundResume(delayMs);
+      }
+      throw error;
     }
+  }
 
-    const targetDeviceId = frame.to;
-    const result = await this.relay.sendFrame(frame);
-    if (targetDeviceId && !result.deliveredTo.includes(targetDeviceId)) {
-      // A confirmação do Relay significa que a operação durável já foi salva.
-      // O destinatário não precisa estar conectado para mensagens, reações,
-      // edições ou exclusões. Typing continua sendo apenas best-effort.
-      if (frame.type === 'typing') return;
+  private scheduleOutboundResume(delayMs: number): void {
+    if (this.outboundResumeTimer) clearTimeout(this.outboundResumeTimer);
+    this.outboundResumeTimer = setTimeout(() => {
+      this.outboundResumeTimer = null;
+      void this.resumePendingCanonicalFrames();
+    }, Math.max(250, delayMs));
+    this.outboundResumeTimer.unref?.();
+  }
+
+  private async resumePendingCanonicalFrames(): Promise<void> {
+    if (this.outboundResumeRunning || !this.relay?.isConnected()) return;
+    this.outboundResumeRunning = true;
+    try {
+      for (const { frame, attempts } of this.db.listDueOutboundFrames(200)) {
+        if (!this.relay?.isConnected()) break;
+        try {
+          await this.relay.sendFrame(frame);
+          this.db.completeOutboundFrame(frame.messageId);
+          this.db.updateMessageStatus(frame.messageId, 'sent');
+          const updated = this.db.getMessageById(frame.messageId);
+          if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+        } catch (error) {
+          const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempts));
+          this.db.retryOutboundFrame(
+            frame.messageId,
+            error instanceof Error ? error.message : String(error),
+            delayMs
+          );
+          this.scheduleOutboundResume(delayMs);
+          if (!this.relay?.isConnected()) break;
+        }
+      }
+    } finally {
+      this.outboundResumeRunning = false;
+      const nextAttemptAt = this.db.getNextOutboundAttemptAt();
+      if (nextAttemptAt !== null && this.relay?.isConnected()) {
+        this.scheduleOutboundResume(Math.max(250, nextAttemptAt - Date.now()));
+      }
+    }
+  }
+
+  private async syncCanonicalHistoryIncrementally(): Promise<void> {
+    if (!this.relay?.isConnected()) return;
+    let cursor = this.db.getCanonicalSyncCursor() ?? this.db.getMaxServerSeq();
+    // Cursor zero representa cache novo: o snapshot leve recebido no login cria
+    // as prévias e cada conversa continua sendo paginada sob demanda.
+    if (cursor <= 0) return;
+    this.beginSyncActivity();
+    try {
+      for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
+        const page = await this.relay.requestIncrementalHistory(cursor, 500);
+        if (page.frames.length === 0) break;
+        await this.applyCanonicalHistorySnapshot(page.frames);
+        const nextCursor = Math.max(
+          page.nextServerSeq,
+          ...page.frames.map((frame) => frame.serverSeq || 0)
+        );
+        if (nextCursor <= cursor) break;
+        cursor = nextCursor;
+        this.db.setCanonicalSyncCursor(cursor);
+        if (!page.hasMore) break;
+      }
+    } finally {
+      this.endSyncActivity();
     }
   }
 
@@ -1553,13 +1669,15 @@ class LanternApp {
   }
 
   private async markConversationRead(conversationId: string): Promise<void> {
-    await this.authService.updateConversationPreference({
+    const readMessageIds = this.db.markConversationRead(conversationId);
+    this.emitConversationUnread(conversationId);
+    // A leitura local nunca deve travar a UI por uma chamada HTTP. A preferência
+    // canônica converge em segundo plano quando o Relay estiver disponível.
+    void this.authService.updateConversationPreference({
       conversationId,
       manualUnread: false,
       readAt: Date.now()
-    });
-    const readMessageIds = this.db.markConversationRead(conversationId);
-    this.emitConversationUnread(conversationId);
+    }).catch(() => undefined);
 
     if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
       void this.markVisibleAnnouncementsRead().catch(() => undefined);
@@ -2918,6 +3036,7 @@ class LanternApp {
 
   private cleanup(): void {
     this.clearCanonicalAttachmentRetries();
+    this.clearOutboundResumeTimer();
     if (this.syncIdleTimer) {
       clearTimeout(this.syncIdleTimer);
       this.syncIdleTimer = null;
@@ -2947,6 +3066,12 @@ class LanternApp {
     this.canonicalAttachmentRetryTimers.clear();
     this.canonicalAttachmentRetryAttempts.clear();
     this.canonicalAttachmentRecovery.clear();
+  }
+
+  private clearOutboundResumeTimer(): void {
+    if (this.outboundResumeTimer) clearTimeout(this.outboundResumeTimer);
+    this.outboundResumeTimer = null;
+    this.outboundResumeRunning = false;
   }
 
   private clearConversationLocal(conversationId: string): void {
