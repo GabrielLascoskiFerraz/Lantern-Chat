@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('relayUi', {
   importStickers: (input: { category?: string; replaceExisting?: boolean }) => ipcRenderer.invoke('relay-ui:importStickers', input),
   updateSticker: (relativePath: string, input: { label: string; category: string }) => ipcRenderer.invoke('relay-ui:updateSticker', relativePath, input),
   removeSticker: (relativePath: string) => ipcRenderer.invoke('relay-ui:removeSticker', relativePath),
+  selectUpdateInstaller: (platform: 'win32' | 'darwin' | 'linux') => ipcRenderer.invoke('relay-ui:selectUpdateInstaller', platform),
+  removeUpdateInstaller: (platform: 'win32' | 'darwin' | 'linux') => ipcRenderer.invoke('relay-ui:removeUpdateInstaller', platform),
   stickerPreview: (relativePath: string) => ipcRenderer.invoke('relay-ui:stickerPreview', relativePath),
   openDashboard: () => ipcRenderer.invoke('relay-ui:openDashboard'),
   updateSettings: (input: { port?: number; tlsCertFile?: string; tlsKeyFile?: string; startAtLogin?: boolean; startRelayOnLaunch?: boolean }) =>

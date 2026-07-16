@@ -4478,7 +4478,12 @@ body {
 .login-mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 5px; border-radius: 12px; background: var(--surface-subtle); }
 .login-mode-tabs .fui-Button { min-width: 0; padding-inline: 8px; }
 .login-address-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
-.login-feedback { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent); border-radius: 10px; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); font-size: 13px; line-height: 1.45; }
+.login-feedback { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface-subtle); font-size: 13px; line-height: 1.45; }
+.login-feedback.error { border-color:color-mix(in srgb, var(--danger) 25%, transparent); color:var(--danger); background:color-mix(in srgb, var(--danger) 8%, transparent); }
+.login-feedback.success { border-color:color-mix(in srgb, #168b4f 30%, transparent); color:#126d40; background:color-mix(in srgb, #168b4f 9%, transparent); }
+.login-feedback.warning { border-color:color-mix(in srgb, #b56a12 30%, transparent); color:#8a500c; background:color-mix(in srgb, #b56a12 9%, transparent); }
+:root[data-theme='dark'] .login-feedback.success { color:#77d9a6; }
+:root[data-theme='dark'] .login-feedback.warning { color:#f0bc77; }
 .login-account-hint { color: var(--muted); line-height: 1.45; }
 .login-screen-v2 { grid-template-columns: minmax(210px, 300px) minmax(420px, 560px); justify-content: center; }
 .login-brand-v2 { align-self: center; }
@@ -5471,6 +5476,13 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.update-gate { width:min(520px, calc(100vw - 32px)); max-width:520px; }
+.update-gate-title { display:flex; align-items:center; gap:10px; }
+.update-gate-version { display:flex; align-items:center; justify-content:center; gap:12px; padding:14px; margin-bottom:18px; border:1px solid var(--colorNeutralStroke2); border-radius:8px; background:var(--colorNeutralBackground2); }
+.update-gate-version span { font-weight:600; }
+.update-gate-progress, .update-gate-ready { display:grid; gap:14px; }
+.update-gate-ready .fui-Button { justify-self:start; }
 
 .profile-identity-editor {
   display: grid;

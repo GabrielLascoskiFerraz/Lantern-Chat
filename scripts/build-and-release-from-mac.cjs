@@ -250,6 +250,7 @@ const buildReleaseAssets = (dryRun) => {
     findFile(distInstallersDir, (name) => /^Lantern-.*\.dmg$/i.test(name));
   const relayWin = path.join(distRelayDir, 'LanternRelay.exe');
   const relayMac =
+    findFile(distRelayDir, (name) => /^LanternRelay-mac-universal$/i.test(name)) ||
     findFile(distRelayDir, (name) => /^LanternRelay-mac-arm64$/i.test(name)) ||
     findFile(distRelayDir, (name) => /^LanternRelay-mac-x64$/i.test(name)) ||
     findFile(distRelayDir, (name) => /^LanternRelay-mac-/i.test(name));

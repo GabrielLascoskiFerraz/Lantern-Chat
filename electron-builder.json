@@ -19,9 +19,15 @@
   },
   "mac": {
     "icon": "assets/icon.icns",
-    "target": ["dmg", "zip"],
+    "target": ["dmg"],
     "artifactName": "Lantern-${version}-${arch}.${ext}",
     "category": "public.app-category.social-networking"
+  },
+  "linux": {
+    "icon": "assets/icon.png",
+    "target": ["AppImage"],
+    "artifactName": "Lantern-${version}-${arch}.${ext}",
+    "category": "Network"
   },
   "nsis": {
     "oneClick": false,

@@ -7,6 +7,7 @@
   "asar": true,
   "asarUnpack": ["node_modules/better-sqlite3/**/*"],
   "win": { "icon": "assets/icon.ico", "target": ["nsis"], "artifactName": "LanternMigration-Setup-${version}.${ext}" },
-  "mac": { "icon": "assets/icon.icns", "target": ["dmg", "zip"], "artifactName": "LanternMigration-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "mac": { "icon": "assets/icon.icns", "target": ["dmg"], "artifactName": "LanternMigration-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "linux": { "icon": "assets/icon.png", "target": ["AppImage"], "artifactName": "LanternMigration-${version}-${arch}.${ext}", "category": "Utility" },
   "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false }
 }

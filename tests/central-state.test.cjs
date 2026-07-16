@@ -12,6 +12,22 @@ const createAdmin = (store) => store.createUser({
   username: 'admin-test', displayName: 'Admin Test', password: 'admin-test-password', role: 'admin'
 });
 
+test('credencial headless legada vira primeiro acesso sem senha apenas para a conta criada pelo bootstrap', () => {
+  const root = createTempDir();
+  try {
+    const store = new CentralStore(path.join(root, 'central'), silentLog);
+    const legacy = store.createUser({
+      username: 'admin', displayName: 'Administrador', password: 'lantern-admin',
+      role: 'admin', allowBootstrapPassword: true
+    }, 'headless-bootstrap');
+    assert.equal(store.migrateLegacyHeadlessAdministrator('admin', 'lantern-admin'), true);
+    assert.equal(store.getUser(legacy.userId).passwordSetupRequired, true);
+    assert.equal(store.login('admin', '', 'migrated-first-access').user.passwordSetupRequired, true);
+    assert.equal(store.migrateLegacyHeadlessAdministrator('admin', 'lantern-admin'), false);
+    store.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('um Relay novo começa sem conta administrativa padrão', () => {
   const root = createTempDir();
   try {

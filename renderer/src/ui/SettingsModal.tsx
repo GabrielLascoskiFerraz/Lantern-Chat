@@ -16,6 +16,7 @@ import {
 import {
   Alert20Regular,
   Apps20Regular,
+  ArrowSync20Regular,
   LockClosed20Regular,
   Person20Regular
 } from '@fluentui/react-icons';
@@ -102,6 +103,9 @@ export const SettingsModal = ({
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState('');
+  const [updateSupported, setUpdateSupported] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateFeedback, setUpdateFeedback] = useState('');
 
   const resetDraftFromProps = (): void => {
     setActiveSection('profile');
@@ -124,7 +128,10 @@ export const SettingsModal = ({
   };
 
   useEffect(() => {
-    if (open) resetDraftFromProps();
+    if (open) {
+      resetDraftFromProps();
+      void ipcClient.getUpdateState().then((state) => setUpdateSupported(state.supported)).catch(() => setUpdateSupported(false));
+    }
   }, [open, profile, startupSettings]);
 
   const activeDoNotDisturbUntil = doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
@@ -400,6 +407,35 @@ export const SettingsModal = ({
                       <Text size={200} className="settings-inline-help">Esta opção não é suportada neste sistema.</Text>
                     )}
                   </div>
+                  {updateSupported && (
+                    <div className="settings-card settings-option-card">
+                      <div className="settings-option-heading">
+                        <div>
+                          <h3>Atualização do aplicativo</h3>
+                          <p>Verifica novamente o Relay e reinstala a versão disponibilizada para este sistema.</p>
+                        </div>
+                        <Button
+                          appearance="secondary"
+                          icon={<ArrowSync20Regular />}
+                          disabled={updateBusy}
+                          onClick={() => {
+                            setUpdateBusy(true);
+                            setUpdateFeedback('Verificando atualização…');
+                            void ipcClient.forceUpdate().then((state) => {
+                              setUpdateFeedback(state.status === 'idle'
+                                ? 'O Relay não possui um instalador compatível para este sistema.'
+                                : 'O download da atualização foi iniciado.');
+                            }).catch((error) => {
+                              setUpdateFeedback(error instanceof Error ? error.message : 'Não foi possível verificar a atualização.');
+                            }).finally(() => setUpdateBusy(false));
+                          }}
+                        >
+                          Forçar atualização
+                        </Button>
+                      </div>
+                      {updateFeedback && <Text size={200} className="settings-inline-help">{updateFeedback}</Text>}
+                    </div>
+                  )}
                   <div className="settings-card settings-option-card">
                     <div className="settings-option-heading">
                       <div>

@@ -10,6 +10,7 @@
   "asar": true,
   "asarUnpack": ["node_modules/better-sqlite3/**/*"],
   "win": { "icon": "assets/icon.ico", "target": ["nsis"], "artifactName": "LanternRelay-Setup-${version}.${ext}" },
-  "mac": { "icon": "assets/icon.icns", "target": ["dmg", "zip"], "artifactName": "LanternRelay-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "mac": { "icon": "assets/icon.icns", "target": ["dmg"], "artifactName": "LanternRelay-${version}-${arch}.${ext}", "category": "public.app-category.utilities" },
+  "linux": { "icon": "assets/icon.png", "target": ["AppImage"], "artifactName": "LanternRelay-${version}-${arch}.${ext}", "category": "Network" },
   "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false }
 }

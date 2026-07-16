@@ -44,6 +44,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4V5Zm3 10 3-3 2 2 2-2 3 3M8 9h.01"/></svg>
             <span>GIFs</span>
           </a>
+          <a class="nav-link" href="#client-updates" data-section="client-updates">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg>
+            <span>Atualizações</span>
+          </a>
           <a class="nav-link" href="#announcement-settings" data-section="announcement-settings">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h3l8-3v18l-8-3H5V6Zm3 3v6"/></svg>
             <span>Anúncios</span>
@@ -265,6 +269,19 @@
             <div class="calendar-actions"><button class="button primary" type="submit">Salvar automação</button><button id="calendar-refresh-now" class="button" type="button">Atualizar agora</button></div>
           </form>
           <div id="calendar-last-result" class="calendar-result">Nenhuma atualização executada.</div>
+        </article>
+      </section>
+
+      <section id="client-updates" class="page-section" aria-labelledby="client-updates-title">
+        <div class="section-heading">
+          <div><span class="section-kicker">Distribuição centralizada</span><h2 id="client-updates-title">Atualizações do Lantern</h2></div>
+          <span id="updates-version" class="count-badge">—</span>
+        </div>
+        <article class="card management-card">
+          <div class="card-header compact">
+            <div><h3>Instaladores dos clientes</h3><p>Clientes com versão diferente baixarão automaticamente o instalador correspondente. Sem arquivo compatível, continuam funcionando normalmente.</p></div>
+          </div>
+          <div id="update-installers" class="update-installer-grid"></div>
         </article>
       </section>
 

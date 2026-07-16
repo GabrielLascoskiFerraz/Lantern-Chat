@@ -45,6 +45,7 @@ import {
 } from './types';
 import { AttachmentRecoveryCoordinator } from './attachmentRecoveryCoordinator';
 import { prepareLanternUserDataPath } from './userDataPath';
+import { UpdateService } from './updateService';
 
 class LanternApp {
   private mainWindow: BrowserWindow | null = null;
@@ -102,6 +103,8 @@ class LanternApp {
   private readonly canonicalAttachmentMaxRetries = 5;
   private outboundResumeRunning = false;
   private outboundResumeTimer: NodeJS.Timeout | null = null;
+  private updateService!: UpdateService;
+  private updateCheckTimer: NodeJS.Timeout | null = null;
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -215,6 +218,7 @@ class LanternApp {
     await this.refreshCanonicalUserPreferences();
     this.relay?.setAuthenticatedSession(this.profile, this.authService.getToken()!);
     this.relay?.setDirectRelayEndpoint(state.endpoint);
+    void this.updateService.check(false);
     await this.relay?.start();
     this.emitEvent({ type: 'auth:changed', state });
     return state;
@@ -336,6 +340,7 @@ class LanternApp {
     this.notifications = new NotificationService(() => this.mainWindow);
     this.tray = new TrayController();
     this.fileTransfer = new FileTransferService(this.getConfiguredAttachmentsDir(), this.profile);
+    this.updateService = new UpdateService(this.authService, (state) => this.emitEvent({ type: 'update:state', state }));
 
     this.relay = new RelayClient(this.profile, {
       onFrame: (frame) => {
@@ -620,6 +625,9 @@ class LanternApp {
         ),
       getArchivedConversationIds: () => this.db.getArchivedConversationIds(),
       saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
+      ,getUpdateState: () => this.updateService.getState()
+      ,forceUpdate: () => this.updateService.check(true)
+      ,installUpdate: () => this.updateService.install()
     });
 
     this.emitEvent = ipc.emitEvent;
@@ -629,7 +637,9 @@ class LanternApp {
       endpoint: this.relay?.getCurrentEndpoint() || null
     });
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
+    this.emitEvent({ type: 'update:state', state: this.updateService.getState() });
     this.reconcileLegacyIncomingFilePaths();
+    if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.updateService.check(false);
 
     if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.relay.start().then(() => {
       this.emitEvent({
@@ -648,6 +658,11 @@ class LanternApp {
         message: 'Não foi possível iniciar conexão com o Relay. A UI continua disponível.'
       });
     });
+
+    this.updateCheckTimer = setInterval(() => {
+      if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.updateService.check(false);
+    }, 15 * 60_000);
+    this.updateCheckTimer.unref?.();
 
     if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
       console.log(
@@ -3045,6 +3060,10 @@ class LanternApp {
   }
 
   private cleanup(): void {
+    if (this.updateCheckTimer) {
+      clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = null;
+    }
     this.clearCanonicalAttachmentRetries();
     this.clearOutboundResumeTimer();
     if (this.syncIdleTimer) {

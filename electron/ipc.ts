@@ -8,6 +8,7 @@ import {
   AnnouncementReadDetail,
   AnnouncementReadSummary,
   AppEvent,
+  AppUpdateState,
   ClientAuthState,
   ClientRelayConfig,
   ConversationMediaCursor,
@@ -186,6 +187,9 @@ export interface IpcBindings {
   getConversations: () => Record<string, number>;
   getArchivedConversationIds: () => string[];
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
+  getUpdateState: () => AppUpdateState;
+  forceUpdate: () => Promise<AppUpdateState>;
+  installUpdate: () => Promise<void>;
 }
 
 export const registerIpc = (
@@ -489,6 +493,9 @@ export const registerIpc = (
   ipcMain.handle('lantern:updateStartupSettings', (_event, input) =>
     bindings.updateStartupSettings(input)
   );
+  ipcMain.handle('lantern:getUpdateState', () => bindings.getUpdateState());
+  ipcMain.handle('lantern:forceUpdate', () => bindings.forceUpdate());
+  ipcMain.handle('lantern:installUpdate', () => bindings.installUpdate());
   ipcMain.handle(
     'lantern:sendText',
     (_event, peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>

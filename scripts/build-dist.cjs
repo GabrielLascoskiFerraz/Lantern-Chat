@@ -36,7 +36,7 @@ if (!target) {
 }
 
 const builderArgs = [target];
-if (target === '--win') {
+if (target === '--win' || target === '--linux') {
   builderArgs.push('--x64');
 }
 builderArgs.push('--publish', 'never');

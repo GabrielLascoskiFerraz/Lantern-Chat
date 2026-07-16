@@ -11,6 +11,7 @@ import { Shell } from './ui/Shell';
 import { LoginView } from './ui/LoginView';
 import { FirstLoginSetupView } from './ui/FirstLoginSetupView';
 import { useLanternStore } from './state/store';
+import { UpdateGate } from './ui/UpdateGate';
 
 const brandPalette = {
   10: '#06122b',
@@ -146,6 +147,7 @@ export default function App() {
         ) : (
           <Shell />
         )}
+        <UpdateGate />
       </AppErrorBoundary>
     </FluentProvider>
   );

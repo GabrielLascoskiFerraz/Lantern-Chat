@@ -19,9 +19,9 @@ Opcoes:
 
 Saida esperada:
   dist-installers/Lantern-<versao>-universal.dmg
-  dist-installers/Lantern-<versao>-universal.zip
+  dist-installers/mac-universal/Lantern.app
   dist-installers/Lantern-Setup-<versao>.exe
-  dist-relay/LanternRelay-mac-<arch>
+  dist-relay/LanternRelay-mac-universal
   dist-relay/LanternRelay.exe
 `);
 };
@@ -43,7 +43,6 @@ const winSkipRcedit = args.has('--win-skip-rcedit');
 
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-const relayMacTargetArg = process.arch === 'arm64' ? 'mac-arm64' : 'mac-x64';
 
 const run = (label, command, commandArgs) => {
   const rendered = `${command} ${commandArgs.join(' ')}`;
@@ -105,9 +104,8 @@ const main = () => {
   run('Gerando instalador Windows x64', npxCmd, windowsBuildArgs);
 
   run('Build do Relay (TypeScript)', npmCmd, ['run', 'build:relay']);
-  run('Gerando binario do Relay para macOS', process.execPath, [
-    './scripts/build-relay-bin.cjs',
-    relayMacTargetArg
+  run('Gerando binario universal do Relay para macOS', process.execPath, [
+    './scripts/build-relay-universal-mac.cjs'
   ]);
   run('Gerando binario do Relay para Windows x64', process.execPath, [
     './scripts/build-relay-bin.cjs',

@@ -35,17 +35,39 @@ test('Relay headless cria uma única conta administrativa temporária em banco v
   assert.equal(users.length, 1);
   assert.equal(users[0].username, 'admin');
   assert.equal(users[0].role, 'admin');
-  assert.equal(users[0].passwordSetupRequired, false);
+  assert.equal(users[0].passwordSetupRequired, true);
 
   await relay.start();
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/admin/login`, {
+    const base = `http://127.0.0.1:${port}`;
+    const initialLogin = await fetch(`${base}/api/client/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: 'admin', password: 'lantern-admin' })
+      body: JSON.stringify({ username: 'admin', password: '', deviceId: 'headless-first-access' })
     });
-    assert.equal(response.status, 200);
-    assert.equal((await response.json()).ok, true);
+    assert.equal(initialLogin.status, 200);
+    const initial = await initialLogin.json();
+    assert.equal(initial.user.passwordSetupRequired, true);
+
+    const dashboardBeforePassword = await fetch(`${base}/api/admin/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: '' })
+    });
+    assert.equal(dashboardBeforePassword.status, 401);
+
+    const setup = await fetch(`${base}/api/client/initial-password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${initial.token}` },
+      body: JSON.stringify({ newPassword: 'headless-admin-password' })
+    });
+    assert.equal(setup.status, 200);
+    assert.equal((await setup.json()).user.passwordSetupRequired, false);
+
+    const dashboardAfterPassword = await fetch(`${base}/api/admin/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'headless-admin-password' })
+    });
+    assert.equal(dashboardAfterPassword.status, 200);
   } finally {
     await relay.stop('headless-bootstrap-test');
     fs.rmSync(root, { recursive: true, force: true });

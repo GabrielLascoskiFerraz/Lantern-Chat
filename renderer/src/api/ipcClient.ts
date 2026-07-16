@@ -209,6 +209,26 @@ export interface StartupSettings {
   doNotDisturbUntil: number;
 }
 
+export interface UpdateInstallerInfo {
+  platform: 'win32' | 'darwin' | 'linux';
+  fileName: string;
+  size: number;
+  sha256: string;
+  updatedAt: number;
+  localPath?: string;
+}
+
+export interface AppUpdateState {
+  supported: boolean;
+  status: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error';
+  currentVersion: string;
+  relayVersion: string | null;
+  installer?: UpdateInstallerInfo;
+  downloaded: number;
+  total: number;
+  error: string | null;
+}
+
 export type AppEvent =
   | { type: 'auth:changed'; state: ClientAuthState }
   | { type: 'peers:updated'; peers: Peer[] }
@@ -247,7 +267,8 @@ export type AppEvent =
   | { type: 'navigate'; conversationId: string }
   | { type: 'message:reactions'; messageId: string; summary: AnnouncementReactionSummary }
   | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary }
-  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary };
+  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary }
+  | { type: 'update:state'; state: AppUpdateState };
 
 export interface LanternApi {
   getPlatform: () =>
@@ -313,6 +334,9 @@ export interface LanternApi {
   }) => Promise<RelaySettings>;
   forceRelayRediscovery: () => Promise<RelaySettings>;
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) => Promise<StartupSettings>;
+  getUpdateState: () => Promise<AppUpdateState>;
+  forceUpdate: () => Promise<AppUpdateState>;
+  installUpdate: () => Promise<void>;
   sendText: (
     peerId: string,
     text: string,
@@ -478,6 +502,9 @@ export const ipcClient = {
   forceRelayRediscovery: () => window.lantern.forceRelayRediscovery(),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     window.lantern.updateStartupSettings(input),
+  getUpdateState: () => window.lantern.getUpdateState(),
+  forceUpdate: () => window.lantern.forceUpdate(),
+  installUpdate: () => window.lantern.installUpdate(),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendText(peerId, text, replyTo),
   sendGroupText: (groupId: string, text: string, replyTo?: MessageReplyReference | null) =>

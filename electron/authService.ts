@@ -60,6 +60,11 @@ export class AuthService {
     return this.stored.deviceId;
   }
 
+  getUpdateRequestContext(): { baseUrl: string; token: string } | null {
+    if (!this.token || !this.stored.endpoint || !this.user) return null;
+    return { baseUrl: this.httpBase(this.stored.endpoint), token: this.token };
+  }
+
   async restore(): Promise<ClientAuthState> {
     if (!this.token || !this.stored.endpoint) return this.getState();
     try {

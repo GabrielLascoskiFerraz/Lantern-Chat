@@ -267,11 +267,53 @@ const renderStickerCatalog = (stickers) => {
   }
 };
 
+const renderUpdateInstallers = (updates) => {
+  const manifest = updates || { version: latestState?.version || '—', installers: {} };
+  $('updates-version').textContent = `Versão ${manifest.version || latestState?.version || '—'}`;
+  const list = $('update-installers');
+  list.replaceChildren();
+  const platforms = [
+    { id: 'win32', label: 'Windows', extension: '.exe' },
+    { id: 'darwin', label: 'macOS universal', extension: '.dmg' },
+    { id: 'linux', label: 'Linux', extension: '.AppImage' }
+  ];
+  for (const platform of platforms) {
+    const installer = manifest.installers?.[platform.id];
+    const card = document.createElement('article'); card.className = 'update-installer-card';
+    const header = document.createElement('header');
+    const title = document.createElement('strong'); title.textContent = platform.label;
+    const state = document.createElement('span'); state.className = `state-badge${installer ? '' : ' disabled'}`; state.textContent = installer ? 'Disponível' : 'Não configurado';
+    header.append(title, state);
+    const detail = document.createElement('p');
+    detail.textContent = installer
+      ? `${installer.fileName} · ${bytes(installer.size)} · SHA-256 ${String(installer.sha256).slice(0, 12)}…`
+      : `Selecione o instalador ${platform.extension} desta versão.`;
+    const actions = document.createElement('div'); actions.className = 'row-actions';
+    const select = document.createElement('button'); select.type = 'button'; select.className = 'button primary'; select.textContent = installer ? 'Substituir' : 'Selecionar arquivo';
+    select.addEventListener('click', () => void runManagementAction(async () => {
+      const result = await api.selectUpdateInstaller(platform.id);
+      if (result?.canceled) return;
+      return result;
+    }, `${platform.label}: instalador salvo.`));
+    actions.append(select);
+    if (installer) {
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger'; remove.textContent = 'Remover';
+      remove.addEventListener('click', () => {
+        if (!window.confirm(`Remover o instalador de ${platform.label}?`)) return;
+        void runManagementAction(() => api.removeUpdateInstaller(platform.id), `${platform.label}: instalador removido.`);
+      });
+      actions.append(remove);
+    }
+    card.append(header, detail, actions); list.append(card);
+  }
+};
+
 const renderManagement = (state) => {
   const users = Array.isArray(state.users) ? state.users : [];
   const requests = Array.isArray(state.passwordResetRequests) ? state.passwordResetRequests : [];
   const announcements = Array.isArray(state.announcements) ? state.announcements : [];
   renderStickerCatalog(state.stickers);
+  renderUpdateInstallers(state.updates);
   $('accounts-count').textContent = number(users.length);
   $('password-resets-count').textContent = number(requests.length);
   const accounts = $('accounts-list');

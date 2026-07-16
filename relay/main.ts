@@ -14,10 +14,26 @@ import { CentralStore } from './centralStore';
 import { RetentionPolicy } from './centralTypes';
 import { createSessionToken, hashToken } from './security';
 import { CalendarAutomationEvent, fetchCalendarEventsForDay } from './calendarAutomation';
+import { isUpdatePlatform, UpdatePlatform, UpdateStore } from './updateStore';
 
-const RELAY_VERSION = '1.0.0';
+const resolveLanternVersion = (): string => {
+  for (const candidate of [
+    path.resolve(__dirname, '..', 'package.json'),
+    path.resolve(__dirname, '..', '..', 'package.json'),
+    path.resolve(process.cwd(), 'package.json')
+  ]) {
+    try {
+      const value = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { version?: unknown };
+      if (typeof value.version === 'string' && value.version.trim()) return value.version.trim();
+    } catch {
+      // Tenta a próxima localização, inclusive dentro dos pacotes distribuídos.
+    }
+  }
+  return String(process.env.npm_package_version || '0.0.0');
+};
+const RELAY_VERSION = resolveLanternVersion();
 const HEADLESS_ADMIN_USERNAME = 'admin';
-const HEADLESS_ADMIN_PASSWORD = 'lantern-admin';
+const LEGACY_HEADLESS_ADMIN_PASSWORD = 'lantern-admin';
 const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
 const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
@@ -1029,6 +1045,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .admin-user-fields input { grid-column: span 2; }
     .admin-user-fields input { min-width: 0; min-height: 34px; border: 1px solid var(--line); border-radius: 5px; padding: 0 9px; background: var(--teams-surface); color: var(--text); }
     .admin-user-fields button { width: 100%; min-width: 0; padding: 0 8px; }
+    .admin-update-item .admin-user-fields { grid-template-columns:repeat(2,minmax(140px,max-content)); justify-content:start; }
+    #admin-updates { scroll-margin-top:88px; }
     .admin-sessions-list { max-height: 356px; }
     .admin-feedback { min-height: 18px; margin-top: 8px; color: var(--muted); font-size: 12px; }
     .admin-audit { display:grid; gap:7px; max-height:220px; overflow:auto; margin-top:10px; }
@@ -1160,6 +1178,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
           <a class="nav-link active" href="#overview"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg></span>Visão geral</a>
           <a class="nav-link" href="#activity"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16l4-4 3 2 5-7"/></svg></span>Atividade</a>
           <a class="nav-link" href="#administration"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg></span>Contas e acesso</a>
+          <a class="nav-link" href="#admin-updates"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg></span>Atualizações</a>
         </nav>
       </div>
       <div class="nav-footer">
@@ -1270,10 +1289,10 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
               <input id="new-username" placeholder="Usuário (ex.: maria.silva)" required>
               <input id="new-display-name" placeholder="Nome de exibição" required>
               <input id="new-department" placeholder="Setor (ex.: Financeiro)">
-              <input id="new-password" type="password" minlength="10" placeholder="Senha inicial (mín. 10 caracteres)" required>
               <select id="new-locale">
                 <option value="pt-BR">Português</option><option value="en">English</option><option value="es">Español</option>
               </select>
+              <div class="section-meta">No primeiro acesso, o usuário entra com a senha vazia e cria a própria senha.</div>
               <button type="submit">Criar usuário</button>
             </form>
           </div>
@@ -1299,6 +1318,11 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
             <h3>Operação e auditoria</h3>
             <button id="create-backup" class="admin-action secondary" type="button">Criar backup consistente</button>
             <div id="admin-audit" class="admin-audit"></div>
+          </div>
+          <div class="admin-panel" id="admin-updates">
+            <h3>Atualizações do Lantern</h3>
+            <div class="section-meta">Clientes com versão diferente baixarão automaticamente o instalador do sistema correspondente.</div>
+            <div id="admin-update-installers" class="admin-users"></div>
           </div>
           <div class="admin-panel">
             <h3>Sessões dos clientes</h3>
@@ -1696,6 +1720,61 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       if (!requests || requests.length === 0) list.appendChild(make('span', 'section-meta', 'Nenhuma solicitação pendente.'));
     };
 
+    const renderAdminUpdates = (updates) => {
+      const list = $('admin-update-installers');
+      if (!list) return;
+      clear(list);
+      const manifest = updates || { version: '—', installers: {} };
+      const platforms = [
+        { id: 'win32', label: 'Windows', extension: '.exe', accept: '.exe' },
+        { id: 'darwin', label: 'macOS universal', extension: '.dmg', accept: '.dmg' },
+        { id: 'linux', label: 'Linux', extension: '.AppImage', accept: '.AppImage,.appimage' }
+      ];
+      list.appendChild(make('span', 'section-meta', 'Versão distribuída: ' + manifest.version));
+      for (const platform of platforms) {
+        const installer = manifest.installers && manifest.installers[platform.id];
+        const item = make('div', 'admin-user admin-update-item');
+        const head = make('div', 'admin-user-head');
+        const identity = make('div');
+        identity.appendChild(make('div', 'name', platform.label));
+        identity.appendChild(make('div', 'status', installer
+          ? installer.fileName + ' · ' + formatBytes(installer.size)
+          : 'Nenhum instalador ' + platform.extension + ' selecionado'));
+        head.appendChild(identity);
+        head.appendChild(make('span', 'chip', installer ? 'Disponível' : 'Não configurado'));
+        const fields = make('div', 'admin-user-fields');
+        const input = make('input'); input.type = 'file'; input.accept = platform.accept; input.className = 'hidden';
+        const select = make('button', 'admin-action secondary', installer ? 'Substituir arquivo' : 'Selecionar arquivo');
+        select.addEventListener('click', () => input.click());
+        input.addEventListener('change', async () => {
+          const file = input.files && input.files[0];
+          if (!file) return;
+          select.disabled = true; select.textContent = 'Enviando…';
+          setAdminFeedback('Enviando ' + file.name + ' para o Relay…');
+          const response = await adminFetch('/api/admin/updates/' + platform.id, {
+            method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-lantern-file-name': encodeURIComponent(file.name) }, body: file
+          });
+          const body = await response.json().catch(() => ({}));
+          select.disabled = false; select.textContent = installer ? 'Substituir arquivo' : 'Selecionar arquivo';
+          input.value = '';
+          setAdminFeedback(response.ok ? 'Instalador de ' + platform.label + ' salvo.' : (body.message || 'Falha ao enviar instalador.'));
+          if (response.ok) void loadAdmin();
+        });
+        fields.appendChild(input); fields.appendChild(select);
+        if (installer) {
+          const remove = make('button', 'admin-action danger', 'Remover');
+          remove.addEventListener('click', async () => {
+            if (!confirm('Remover o instalador de ' + platform.label + '?')) return;
+            const response = await adminFetch('/api/admin/updates/' + platform.id, { method: 'DELETE' });
+            setAdminFeedback(response.ok ? 'Instalador removido.' : 'Não foi possível remover o instalador.');
+            if (response.ok) void loadAdmin();
+          });
+          fields.appendChild(remove);
+        }
+        item.appendChild(head); item.appendChild(fields); list.appendChild(item);
+      }
+    };
+
     const loadAdmin = async () => {
       const sessionReady = await syncAdminSession();
       if (!sessionReady) {
@@ -1722,6 +1801,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       const sessionsBody = sessionsResponse.ok ? await sessionsResponse.json() : { sessions: [] };
       const resetRequestsResponse = await adminFetch('/api/admin/password-reset-requests', { method: 'GET' });
       const resetRequestsBody = resetRequestsResponse.ok ? await resetRequestsResponse.json() : { requests: [] };
+      const updatesResponse = await adminFetch('/api/admin/updates', { method: 'GET' });
+      const updatesBody = updatesResponse.ok ? await updatesResponse.json() : { updates: { version: '—', installers: {} } };
       $('admin-login').classList.add('hidden');
       $('admin-content').classList.remove('hidden');
       $('dashboard-shell').classList.remove('auth-locked');
@@ -1732,6 +1813,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       renderAudit(auditBody.entries || []);
       renderSessions(sessionsBody.sessions || []);
       renderPasswordResetRequests(resetRequestsBody.requests || []);
+      renderAdminUpdates(updatesBody.updates);
     };
 
     $('admin-login-form').addEventListener('submit', async (event) => {
@@ -1746,7 +1828,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       sessionStorage.setItem('lantern.admin.csrf', adminCsrf);
       $('admin-password').value = '';
       setAdminFeedback('Acesso administrativo liberado.');
-      void loadAdmin();
+      await loadAdmin();
+      await load();
     });
 
     $('admin-create-user').addEventListener('submit', async (event) => {
@@ -1757,7 +1840,6 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
           username: $('new-username').value,
           displayName: $('new-display-name').value,
           department: $('new-department').value,
-          password: $('new-password').value,
           locale: $('new-locale').value
         })
       });
@@ -1786,7 +1868,13 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
     const load = async () => {
       try {
-        const response = await fetch(dashboardApiUrl, { cache: 'no-store' });
+        const response = await adminFetch(dashboardApiUrl, { method: 'GET' });
+        if (response.status === 401) {
+          setText('status-text', 'Autenticação necessária');
+          const dot = $('status-dot');
+          if (dot) dot.classList.add('offline');
+          return;
+        }
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const data = await response.json();
         applySnapshot(data);
@@ -1817,6 +1905,7 @@ export class LanternRelay {
   private readonly startedAt = Date.now();
   private readonly groupStore: GroupStore;
   private readonly centralStore: CentralStore;
+  private readonly updateStore: UpdateStore;
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
   private readonly userSessions = new SessionRegistry<RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
@@ -1894,6 +1983,7 @@ export class LanternRelay {
       maxPayload: this.config.maxPayloadBytes
     });
     this.centralStore = new CentralStore(path.join(resolveRelayDataDir(), 'central'), logRelay);
+    this.updateStore = new UpdateStore(resolveRelayDataDir(), RELAY_VERSION);
     this.groupStore = new GroupStore(
       LEGACY_GROUP_STORE_FILE,
       GROUP_ATTACHMENTS_DIR,
@@ -1944,27 +2034,40 @@ export class LanternRelay {
   }
 
   bootstrapHeadlessAdministrator(): void {
-    if (this.centralStore.listUsers().length > 0) return;
     const username = asString(process.env.LANTERN_RELAY_ADMIN_USERNAME) || HEADLESS_ADMIN_USERNAME;
-    const password = asString(process.env.LANTERN_RELAY_ADMIN_PASSWORD) || HEADLESS_ADMIN_PASSWORD;
+    const configuredPassword = asString(process.env.LANTERN_RELAY_ADMIN_PASSWORD) || '';
+    if (this.centralStore.listUsers().length > 0) {
+      if (!configuredPassword && username === HEADLESS_ADMIN_USERNAME &&
+          this.centralStore.migrateLegacyHeadlessAdministrator(username, LEGACY_HEADLESS_ADMIN_PASSWORD)) {
+        logRelay('headless_admin_legacy_password_removed', {
+          username,
+          instruction: 'Entre no Lantern com a senha vazia e crie uma senha pessoal.'
+        }, { level: 'warn' });
+      }
+      return;
+    }
     const user = this.centralStore.createUser({
       username,
       displayName: 'Administrador do Lantern',
-      password,
       role: 'admin',
-      allowBootstrapPassword: true
+      password: configuredPassword,
+      passwordSetupRequired: !configuredPassword,
+      allowBootstrapPassword: Boolean(configuredPassword)
     }, 'headless-bootstrap');
     logRelay('headless_admin_bootstrap_created', {
       username: user.username,
-      temporaryPassword: password,
-      warning: 'Altere esta senha imediatamente depois do primeiro acesso.'
+      passwordSetupRequired: user.passwordSetupRequired,
+      instruction: configuredPassword
+        ? 'Use a senha definida em LANTERN_RELAY_ADMIN_PASSWORD.'
+        : 'Entre no Lantern com a senha vazia e crie uma senha pessoal.'
     }, { level: 'warn' });
   }
 
   createCanonicalBackup() {
     return this.centralStore.createBackup([
       { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
-      { name: 'stickers', source: RELAY_STICKERS_DIR }
+      { name: 'stickers', source: RELAY_STICKERS_DIR },
+      { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
     ], 'relay-ui');
   }
 
@@ -1975,8 +2078,26 @@ export class LanternRelay {
       announcementTtlMs: this.centralStore.getAnnouncementTtlMs(),
       announcements: this.listDashboardAnnouncements(this.listDashboardPeers(Date.now()), Date.now()),
       calendarAutomation: this.getCalendarAutomationSettings(),
-      stickers: this.listStickerCatalog()
+      stickers: this.listStickerCatalog(),
+      updates: this.updateStore.getManifest()
     };
+  }
+
+  setManagedUpdateInstaller(platform: UpdatePlatform, sourcePath: string, fileName?: string) {
+    const installer = this.updateStore.importInstaller(platform, sourcePath, fileName);
+    this.centralStore.recordAudit('update.installer_saved', 'relay-ui', platform, {
+      fileName: installer.fileName,
+      size: installer.size,
+      sha256: installer.sha256,
+      version: RELAY_VERSION
+    });
+    return this.updateStore.getManifest();
+  }
+
+  removeManagedUpdateInstaller(platform: UpdatePlatform) {
+    this.updateStore.removeInstaller(platform);
+    this.centralStore.recordAudit('update.installer_removed', 'relay-ui', platform, { version: RELAY_VERSION });
+    return this.updateStore.getManifest();
   }
 
   addManagedStickers(input: { sourcePaths: string[]; category?: string; replaceExisting?: boolean }): ManagedStickerImportResult {
@@ -2622,6 +2743,31 @@ export class LanternRelay {
       return;
     }
 
+    if (requestUrl.pathname === '/api/client/update' && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      const platform = requestUrl.searchParams.get('platform');
+      const installer = isUpdatePlatform(platform) ? this.updateStore.getInstaller(platform)?.metadata || null : null;
+      this.writeJson(res, method, { ok: true, version: RELAY_VERSION, installer });
+      return;
+    }
+
+    const updateDownloadMatch = requestUrl.pathname.match(/^\/api\/client\/update\/download\/(win32|darwin|linux)$/);
+    if (updateDownloadMatch && (method === 'GET' || method === 'HEAD')) {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      this.serveUpdateInstaller(updateDownloadMatch[1] as UpdatePlatform, req, res, method);
+      return;
+    }
+
     if (requestUrl.pathname === '/api/client/password-reset/request' && method === 'POST') {
       const remoteAddress = this.normalizeRemoteAddress(req.socket.remoteAddress || 'unknown');
       const rateLimitKey = `password-reset:${remoteAddress}`;
@@ -2902,6 +3048,41 @@ export class LanternRelay {
         return;
       }
 
+      if (requestUrl.pathname === '/api/admin/updates' && method === 'GET') {
+        this.writeJson(res, method, { ok: true, updates: this.updateStore.getManifest() });
+        return;
+      }
+      const adminUpdateMatch = requestUrl.pathname.match(/^\/api\/admin\/updates\/(win32|darwin|linux)$/);
+      if (adminUpdateMatch && method === 'PUT') {
+        try {
+          const platform = adminUpdateMatch[1] as UpdatePlatform;
+          const fileName = decodeURIComponent(String(req.headers['x-lantern-file-name'] || ''));
+          const temporary = await this.receiveUpdateUpload(req, platform, fileName);
+          try {
+            const installer = this.updateStore.importInstaller(platform, temporary, fileName);
+            this.centralStore.recordAudit('update.installer_saved', adminSession.userId, platform, {
+              fileName: installer.fileName,
+              size: installer.size,
+              sha256: installer.sha256,
+              version: RELAY_VERSION
+            });
+            this.writeJson(res, method, { ok: true, updates: this.updateStore.getManifest() });
+          } finally {
+            fs.rmSync(temporary, { force: true });
+          }
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'UPDATE_UPLOAD_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+        }
+        return;
+      }
+      if (adminUpdateMatch && method === 'DELETE') {
+        const platform = adminUpdateMatch[1] as UpdatePlatform;
+        this.updateStore.removeInstaller(platform);
+        this.centralStore.recordAudit('update.installer_removed', adminSession.userId, platform, { version: RELAY_VERSION });
+        this.writeJson(res, method, { ok: true, updates: this.updateStore.getManifest() });
+        return;
+      }
+
       if (requestUrl.pathname === '/api/admin/users' && method === 'GET') {
         this.writeJson(res, method, { ok: true, users: this.centralStore.listUsers() });
         return;
@@ -2939,7 +3120,7 @@ export class LanternRelay {
             username: asString(body.username) || '',
             displayName: asString(body.displayName) || '',
             department: asString(body.department) || '',
-            password: typeof body.password === 'string' ? body.password : '',
+            passwordSetupRequired: true,
             role: body.role === 'admin' ? 'admin' : 'user',
             locale: body.locale === 'en' || body.locale === 'es' ? body.locale : 'pt-BR'
           }, adminSession.userId);
@@ -3043,7 +3224,8 @@ export class LanternRelay {
         try {
           const backup = await this.centralStore.createBackup([
             { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
-            { name: 'stickers', source: RELAY_STICKERS_DIR }
+            { name: 'stickers', source: RELAY_STICKERS_DIR },
+            { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
           ], adminSession.userId);
           this.writeJson(res, method, { ok: true, backup }, 201);
         } catch (error) {
@@ -3122,6 +3304,82 @@ export class LanternRelay {
     if (chunks.length === 0) return {};
     const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
     return asRecord(parsed) || {};
+  }
+
+  private async receiveUpdateUpload(req: IncomingMessage, platform: UpdatePlatform, fileName: string): Promise<string> {
+    const expected = platform === 'win32' ? /\.exe$/i : platform === 'darwin' ? /\.dmg$/i : /\.appimage$/i;
+    if (!expected.test(path.basename(fileName))) throw new Error('O formato do instalador não corresponde ao sistema selecionado.');
+    const declaredSize = Number(req.headers['content-length'] || 0);
+    const maximumSize = 2 * 1024 * 1024 * 1024;
+    if (declaredSize > maximumSize) throw new Error('O instalador deve ter no máximo 2 GB.');
+    const uploadDirectory = path.join(resolveRelayDataDir(), '.update-uploads');
+    fs.mkdirSync(uploadDirectory, { recursive: true });
+    const temporary = path.join(uploadDirectory, `${platform}-${randomUUID()}.tmp`);
+    const output = fs.createWriteStream(temporary, { flags: 'wx', mode: 0o600 });
+    let outputError: Error | null = null;
+    output.on('error', (error) => { outputError = error; });
+    let received = 0;
+    try {
+      for await (const raw of req) {
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        received += chunk.length;
+        if (received > maximumSize || (declaredSize > 0 && received > declaredSize)) throw new Error('O tamanho recebido não corresponde ao instalador informado.');
+        if (!output.write(chunk)) await new Promise<void>((resolve) => {
+          output.once('drain', resolve);
+          output.once('error', () => resolve());
+        });
+        if (outputError) throw outputError;
+      }
+      await new Promise<void>((resolve) => {
+        output.once('error', () => resolve());
+        output.end(resolve);
+      });
+      if (outputError) throw outputError;
+      if (received <= 0 || (declaredSize > 0 && received !== declaredSize)) throw new Error('O upload do instalador foi interrompido.');
+      return temporary;
+    } catch (error) {
+      output.destroy();
+      fs.rmSync(temporary, { force: true });
+      throw error;
+    }
+  }
+
+  private serveUpdateInstaller(platform: UpdatePlatform, req: IncomingMessage, res: ServerResponse, method: string): void {
+    const installer = this.updateStore.getInstaller(platform);
+    if (!installer) {
+      this.writeJson(res, method, { ok: false, error: 'UPDATE_NOT_AVAILABLE' }, 404);
+      return;
+    }
+    const { metadata, filePath } = installer;
+    const total = metadata.size;
+    let start = 0;
+    let end = total - 1;
+    let status = 200;
+    const range = String(req.headers.range || '');
+    const match = range.match(/^bytes=(\d+)-(\d*)$/);
+    if (match) {
+      start = Number(match[1]);
+      end = match[2] ? Math.min(Number(match[2]), total - 1) : total - 1;
+      if (!Number.isFinite(start) || start < 0 || start > end || start >= total) {
+        res.writeHead(416, { 'content-range': `bytes */${total}` });
+        res.end();
+        return;
+      }
+      status = 206;
+    }
+    const headers: Record<string, string> = {
+      'content-type': 'application/octet-stream',
+      'content-length': String(end - start + 1),
+      'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(metadata.fileName)}`,
+      'accept-ranges': 'bytes',
+      'cache-control': 'private, no-store',
+      'x-lantern-sha256': metadata.sha256,
+      'x-content-type-options': 'nosniff'
+    };
+    if (status === 206) headers['content-range'] = `bytes ${start}-${end}/${total}`;
+    res.writeHead(status, headers);
+    if (method === 'HEAD') res.end();
+    else fs.createReadStream(filePath, { start, end }).pipe(res);
   }
 
   private normalizeRemoteAddress(value: string): string {

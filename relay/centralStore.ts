@@ -649,6 +649,27 @@ export class CentralStore {
     return this.toUser(row);
   }
 
+  migrateLegacyHeadlessAdministrator(usernameInput: string, legacyPassword: string): boolean {
+    const username = usernameInput.trim().toLowerCase();
+    const row = this.db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as UserRow | undefined;
+    if (!row || row.role !== 'admin' || row.disabled || row.passwordSetupRequired || !verifyPassword(legacyPassword, row.passwordHash)) {
+      return false;
+    }
+    const bootstrapAudit = this.db.prepare(`
+      SELECT 1 FROM audit_log
+      WHERE action = 'user.created' AND actor = 'headless-bootstrap' AND target = ?
+      LIMIT 1
+    `).get(row.userId);
+    if (!bootstrapAudit) return false;
+    const now = Date.now();
+    this.db.prepare('UPDATE users SET passwordHash = ?, passwordSetupRequired = 1, updatedAt = ? WHERE userId = ?')
+      .run(hashPassword(createSessionToken()), now, row.userId);
+    this.revokeUserSessions(row.userId);
+    this.db.prepare('DELETE FROM admin_sessions WHERE userId = ?').run(row.userId);
+    this.appendAudit('user.legacy_bootstrap_password_removed', 'headless-bootstrap', row.userId);
+    return true;
+  }
+
   updateUser(userId: string, input: Partial<Pick<CentralUser, 'displayName' | 'department' | 'avatarEmoji' | 'avatarBg' | 'statusMessage' | 'locale' | 'disabled'>>, actor = 'admin'): CentralUser {
     const currentRow = this.db.prepare('SELECT * FROM users WHERE userId = ?').get(userId) as UserRow | undefined;
     if (!currentRow) throw new Error('Usuário não encontrado.');
@@ -1197,6 +1218,10 @@ export class CentralStore {
       details: JSON.parse(this.encrypted.decrypt(row.detailsCipher)) as Record<string, unknown>,
       createdAt: row.createdAt
     }));
+  }
+
+  recordAudit(action: string, actor: string, target: string | null = null, details: Record<string, unknown> = {}): void {
+    this.appendAudit(action, actor, target, details);
   }
 
   saveFrame(frame: CanonicalFrame): 'inserted' | 'duplicate' {

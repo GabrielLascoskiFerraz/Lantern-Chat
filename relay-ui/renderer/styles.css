@@ -65,6 +65,13 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .nav-link.active { background: var(--row-active); box-shadow: inset 3px 0 0 var(--accent); }
 .nav-footer { display: grid; gap: 12px; margin-top: auto; padding: 14px; border-top: 1px solid var(--line); background: var(--header); }
 .nav-version { display: grid; gap: 2px; color: var(--muted); font-size: 10px; text-align: center; }
+.update-installer-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.update-installer-card { border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:12px; background:var(--surface-2); }
+.update-installer-card header { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.update-installer-card header strong { font-size:14px; }
+.update-installer-card p { margin:0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.update-installer-card .row-actions { justify-content:flex-start; }
+@media (max-width:800px) { .update-installer-grid { grid-template-columns:1fr; } }
 .nav-version span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .page { min-width: 0; padding-bottom: 42px; }

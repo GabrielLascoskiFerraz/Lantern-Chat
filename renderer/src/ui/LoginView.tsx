@@ -46,6 +46,7 @@ export function LoginView() {
   const [busy, setBusy] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [feedbackTone, setFeedbackTone] = useState<'info' | 'success' | 'warning' | 'error'>('info');
   const [forgotOpen, setForgotOpen] = useState(false);
   const [resetUsername, setResetUsername] = useState('');
   const [resetToken, setResetToken] = useState('');
@@ -64,14 +65,22 @@ export function LoginView() {
   const discover = async () => {
     setDiscovering(true);
     setFeedback('');
+    setFeedbackTone('info');
     try {
       const relays = await ipcClient.discoverRelays(Number(port) || 43190);
       const relay = relays[0];
-      if (!relay) return setFeedback(t('noRelay'));
+      if (!relay) {
+        setFeedbackTone('warning');
+        return setFeedback(t('noRelay'));
+      }
       setHost(relay.host);
       setPort(String(relay.port));
       setSecure(relay.secure);
+      setFeedbackTone('success');
       setFeedback(`${t('found')}: ${relay.host}:${relay.port}`);
+    } catch (error) {
+      setFeedbackTone('error');
+      setFeedback(readableError(error, 'Não foi possível procurar o Relay.'));
     } finally {
       setDiscovering(false);
     }
@@ -140,6 +149,7 @@ export function LoginView() {
       });
       setForgotOpen(false);
       setPassword('');
+      setFeedbackTone('success');
       setFeedback('Senha redefinida. Entre usando a nova senha.');
     } catch (error) {
       setResetFeedback(readableError(error, 'Não foi possível redefinir a senha.'));
@@ -152,6 +162,7 @@ export function LoginView() {
     event.preventDefault();
     setBusy(true);
     setFeedback('');
+    setFeedbackTone('info');
     const relay = currentRelay();
     try {
       if (creating) {
@@ -160,6 +171,7 @@ export function LoginView() {
         await login({ relay, username, password, rememberMe });
       }
     } catch (error) {
+      setFeedbackTone('error');
       setFeedback(readableError(error, 'Falha ao entrar.'));
     } finally {
       setBusy(false);
@@ -187,8 +199,8 @@ export function LoginView() {
       </header>
 
       <div className="login-account-tabs" role="tablist" aria-label="Acesso">
-        <button type="button" className={!creating ? 'active' : ''} onClick={() => { setCreating(false); setFeedback(''); }}>Entrar</button>
-        <button type="button" className={creating ? 'active' : ''} onClick={() => { setCreating(true); setFeedback(''); }}>Criar conta</button>
+        <button type="button" className={!creating ? 'active' : ''} onClick={() => { setCreating(false); setFeedback(''); setFeedbackTone('info'); }}>Entrar</button>
+        <button type="button" className={creating ? 'active' : ''} onClick={() => { setCreating(true); setFeedback(''); setFeedbackTone('info'); }}>Criar conta</button>
       </div>
 
       <div className="login-fields">
@@ -242,8 +254,8 @@ export function LoginView() {
       </div>}
 
       {creating && <small className="login-account-hint">{t('accountHint')}</small>}
-      {feedback && <div className="login-feedback" role="alert" aria-live="polite">{feedback}</div>}
-      <Button className="login-submit" type="submit" appearance="primary" size="large" disabled={busy || !username.trim() || !password || (creating && (!displayName.trim() || password.length < 10))}>
+      {feedback && <div className={`login-feedback ${feedbackTone}`} role={feedbackTone === 'error' ? 'alert' : 'status'} aria-live="polite">{feedback}</div>}
+      <Button className="login-submit" type="submit" appearance="primary" size="large" disabled={busy || !username.trim() || (creating && (!displayName.trim() || password.length < 10))}>
         {busy ? <><Spinner size="tiny" /> {t('entering')}</> : t(creating ? 'createAccount' : 'enter')}
       </Button>
       <p className="login-privacy">Ao continuar, você se conecta ao servidor selecionado.</p>

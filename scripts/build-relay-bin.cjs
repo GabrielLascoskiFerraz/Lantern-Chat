@@ -56,7 +56,7 @@ if (!targetSpec) {
 
 const parseRuntimeCandidates = () => {
   const envList = (process.env.LANTERN_RELAY_PKG_RUNTIMES || '').trim();
-  const defaults = ['node20', 'node18', 'node16'];
+  const defaults = ['node18', 'node16'];
   const base = envList.length > 0
     ? envList
         .split(',')

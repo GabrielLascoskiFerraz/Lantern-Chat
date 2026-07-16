@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { LanternRelay, RelayConfig } from '../relay/main';
 import { readConvertedBackupManifest } from '../relay/convertedBackup';
+import { isUpdatePlatform } from '../relay/updateStore';
 
 interface RelayUiSettings {
   port: number;
@@ -88,7 +89,7 @@ const snapshot = () => {
   const settings = loadSettings();
   return relay
     ? { running: true, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), ...relay.getDashboardSnapshot() }
-    : { running: false, settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), port: settings.port,
+    : { running: false, version: app.getVersion(), settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), port: settings.port,
         tls: Boolean(settings.tlsCertFile && settings.tlsKeyFile), peersOnline: 0,
         announcementsActive: 0, uptimeMs: 0, centralStore: {}, transferMetrics: null,
         reliabilityMetrics: null, peers: [] };
@@ -264,6 +265,21 @@ ipcMain.handle('relay-ui:updateSticker', (_event, relativePath, input) =>
   requireRelay().updateManagedSticker(String(relativePath), input));
 ipcMain.handle('relay-ui:removeSticker', (_event, relativePath) =>
   requireRelay().removeManagedSticker(String(relativePath)));
+ipcMain.handle('relay-ui:selectUpdateInstaller', async (_event, rawPlatform) => {
+  if (!isUpdatePlatform(rawPlatform)) throw new Error('Sistema operacional inválido.');
+  const extensions = rawPlatform === 'win32' ? ['exe'] : rawPlatform === 'darwin' ? ['dmg'] : ['AppImage', 'appimage'];
+  const result = await dialog.showOpenDialog({
+    title: 'Selecionar instalador do Lantern',
+    properties: ['openFile'],
+    filters: [{ name: 'Instalador do Lantern', extensions }]
+  });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  return { canceled: false, updates: requireRelay().setManagedUpdateInstaller(rawPlatform, result.filePaths[0]) };
+});
+ipcMain.handle('relay-ui:removeUpdateInstaller', (_event, rawPlatform) => {
+  if (!isUpdatePlatform(rawPlatform)) throw new Error('Sistema operacional inválido.');
+  return requireRelay().removeManagedUpdateInstaller(rawPlatform);
+});
 ipcMain.handle('relay-ui:stickerPreview', (_event, relativePath) =>
   requireRelay().getManagedStickerPreview(String(relativePath)));
 ipcMain.handle('relay-ui:openDashboard', async () => {

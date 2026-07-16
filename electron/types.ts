@@ -63,6 +63,26 @@ export interface UserPreferencesSnapshot {
   }>;
 }
 
+export interface UpdateInstallerInfo {
+  platform: 'win32' | 'darwin' | 'linux';
+  fileName: string;
+  size: number;
+  sha256: string;
+  updatedAt: number;
+  localPath?: string;
+}
+
+export interface AppUpdateState {
+  supported: boolean;
+  status: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error';
+  currentVersion: string;
+  relayVersion: string | null;
+  installer?: UpdateInstallerInfo;
+  downloaded: number;
+  total: number;
+  error: string | null;
+}
+
 export interface ClientAuthState {
   authenticated: boolean;
   relay: ClientRelayConfig;
@@ -426,4 +446,5 @@ export type AppEvent =
   | { type: 'navigate'; conversationId: string }
   | { type: 'message:reactions'; messageId: string; summary: AnnouncementReactionSummary }
   | { type: 'announcement:reactions'; messageId: string; summary: AnnouncementReactionSummary }
-  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary };
+  | { type: 'announcement:reads'; messageId: string; summary: AnnouncementReadSummary }
+  | { type: 'update:state'; state: AppUpdateState };

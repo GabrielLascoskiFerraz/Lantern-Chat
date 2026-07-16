@@ -158,6 +158,7 @@ class WebLanternBridge {
   private groupChunkPending = new Map<string, PendingRequest>();
   private files = new Map<string, WebFile>();
   private mediaMessages = new Map<string, MessageRow>();
+  private appVersion = 'web';
   private attachmentDownloads = new Map<string, { chunks: Uint8Array[]; resolve: (url: string) => void; reject: (error: Error) => void; timer: number }>();
   private attachmentDownloadByFileId = new Map<string, Promise<MessageRow>>();
   private pendingGroupSync: PendingGroupSync | null = null;
@@ -247,6 +248,13 @@ class WebLanternBridge {
     if (!this.token || !this.user) return;
     if (this.socket?.readyState === WebSocket.OPEN) return;
     if (this.connecting) return this.connecting;
+    try {
+      const health = await fetch('/health', { cache: 'no-store' });
+      const body = await health.json().catch(() => ({})) as { version?: string };
+      if (health.ok && typeof body.version === 'string' && body.version) this.appVersion = body.version;
+    } catch {
+      // A conexão WebSocket ainda fornecerá o erro operacional apropriado.
+    }
     this.intentionalClose = false;
     this.connecting = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(endpoint());
@@ -260,7 +268,7 @@ class WebLanternBridge {
           avatarEmoji: this.user!.avatarEmoji,
           avatarBg: this.user!.avatarBg,
           statusMessage: this.user!.statusMessage,
-          appVersion: 'web-1.2.0',
+          appVersion: this.appVersion,
           sessionToken: this.token
         }
       }));
@@ -1037,6 +1045,9 @@ class WebLanternBridge {
       },
       getRelaySettings: async () => ({ automatic: false, host: window.location.hostname, port: RELAY_PORT, connected: this.socket?.readyState === WebSocket.OPEN, endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null }),
       getStartupSettings: async () => ({ supported: false, openAtLogin: false, downloadsDir: '', doNotDisturbUntil: Number(window.localStorage.getItem('lantern.web.dnd') || 0) }),
+      getUpdateState: async () => ({ supported: false, status: 'idle', currentVersion: 'web', relayVersion: null, downloaded: 0, total: 0, error: null }),
+      forceUpdate: async () => ({ supported: false, status: 'idle', currentVersion: 'web', relayVersion: null, downloaded: 0, total: 0, error: null }),
+      installUpdate: async () => undefined,
       updateRelaySettings: async () => this.api().getRelaySettings(),
       forceRelayRediscovery: async () => { await this.connect(); return this.api().getRelaySettings(); },
       updateStartupSettings: async (input) => { if (input.doNotDisturbUntil !== undefined) window.localStorage.setItem('lantern.web.dnd', String(input.doNotDisturbUntil)); return this.api().getStartupSettings(); },

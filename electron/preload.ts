@@ -69,6 +69,9 @@ const api = {
   forceRelayRediscovery: () => ipcRenderer.invoke('lantern:forceRelayRediscovery'),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
+  getUpdateState: () => ipcRenderer.invoke('lantern:getUpdateState'),
+  forceUpdate: () => ipcRenderer.invoke('lantern:forceUpdate'),
+  installUpdate: () => ipcRenderer.invoke('lantern:installUpdate'),
   sendText: (peerId: string, text: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendText', peerId, text, replyTo),
   sendGroupText: (groupId: string, text: string, replyTo?: MessageReplyPayload | null) =>
