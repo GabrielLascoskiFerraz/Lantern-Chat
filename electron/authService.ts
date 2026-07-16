@@ -199,6 +199,17 @@ export class AuthService {
     await this.authenticatedRequest('/api/client/password', 'POST', input);
   }
 
+  async completeInitialPassword(newPassword: string): Promise<ClientAuthState> {
+    const body = await this.authenticatedRequest<{ user?: AuthenticatedUser; message?: string }>(
+      '/api/client/initial-password',
+      'POST',
+      { newPassword }
+    );
+    if (!body.user) throw new Error(body.message || 'O Relay não confirmou a criação da senha.');
+    this.user = body.user;
+    return this.getState();
+  }
+
   async requestPasswordReset(input: { relay: ClientRelayConfig; username: string }): Promise<{ requestToken: string }> {
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);

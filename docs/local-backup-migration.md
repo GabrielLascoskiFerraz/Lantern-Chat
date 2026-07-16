@@ -6,18 +6,17 @@ O aplicativo **Lantern Migration** consolida backups exportados pela edição an
 
 Durante o desenvolvimento, abra com `npm run migration-ui:dev`. Os instaladores são produzidos com `npm run migration-ui:build:mac` ou `npm run migration-ui:build:win`.
 
-1. Selecione a pasta que reúne os backups e a pasta `relay-data` de destino.
+1. Selecione a pasta que reúne os backups antigos.
 2. Opcionalmente, selecione o JSON de mapeamento e as opções de contingência.
 3. Execute **Analisar backups**. A interface mostra totais, conflitos, avisos e o relatório sem alterar o Relay.
-4. O botão **Aplicar migração** só é liberado para a mesma configuração que passou pela análise.
-5. Encerre completamente o Relay, confirme o aviso e aplique. Ao final, abra o relatório e valide o rollback informado.
+4. Escolha onde salvar e use **Gerar backup convertido**. A ferramenta cria `Lantern-Backup-Convertido-<data>` com banco, anexos, manifesto SHA-256 e a relação das contas convertidas.
+5. No **Lantern Relay UI**, use **Importar backup convertido** e selecione essa pasta. O Relay valida a integridade, interrompe o servidor, preserva os dados atuais para rollback, importa e volta a iniciar automaticamente caso estivesse em execução.
 
 ## Antes de começar
 
 1. Peça para cada usuário exportar seu backup completo.
 2. Coloque todas as pastas `LanternBackup-*` dentro de uma única pasta.
-3. Pare completamente o Lantern Relay.
-4. Use preferencialmente um Relay novo, sem histórico. Nenhuma conta administrativa padrão é criada automaticamente.
+3. Use preferencialmente um Relay novo. A importação pela Relay UI não cria conta administrativa padrão; o bootstrap `admin` existe somente quando o Relay headless é iniciado diretamente com um banco vazio.
 
 A ferramenta é estrita por padrão. Backups ausentes, `messageId` conflitante e anexos sem bytes impedem a aplicação.
 
@@ -25,15 +24,14 @@ A ferramenta é estrita por padrão. Backups ausentes, `messageId` conflitante e
 
 ```bash
 npm run migrate:local-backups -- \
-  --backups "/caminho/para/backups-dos-usuarios" \
-  --relay-data "/caminho/para/dados-do-relay"
+  --backups "/caminho/para/backups-dos-usuarios"
 ```
 
 Nenhum dado é alterado sem `--apply`. O relatório JSON informa backups e perfis encontrados, usuários propostos, totais, participantes ausentes e conflitos.
 
 ## 2. Mapeamento opcional de contas
 
-Use `--mapping` para definir usuários, setores e senhas iniciais:
+Use `--mapping` para definir usuários, setores e, opcionalmente, senhas já conhecidas:
 
 ```json
 {
@@ -48,20 +46,22 @@ Use `--mapping` para definir usuários, setores e senhas iniciais:
 }
 ```
 
-As chaves são os `deviceId` mostrados no dry-run. Sem senha informada, a ferramenta gera uma senha temporária aleatória. As credenciais ficam somente no relatório final, criado com permissão restrita ao usuário do sistema.
+As chaves são os `deviceId` mostrados no dry-run. Quando o mapeamento não informa uma senha, a conta convertida fica com a criação de senha pendente: o usuário entra pela primeira vez informando apenas o nome de usuário e define sua senha obrigatoriamente no assistente inicial. Quando uma senha é informada no mapeamento, ela é preservada e essa etapa não aparece.
 
-## 3. Aplicação
+A relação fica no arquivo `contas-convertidas.json` dentro do backup convertido, criado com permissão restrita ao usuário do sistema. O arquivo indica quais contas ainda precisam criar uma senha, sem inventar ou armazenar senhas temporárias para elas.
+
+## 3. Geração do backup convertido
 
 ```bash
 npm run migrate:local-backups -- \
   --backups "/caminho/para/backups-dos-usuarios" \
-  --relay-data "/caminho/para/dados-do-relay" \
+  --output "/caminho/onde/salvar" \
   --mapping "/caminho/migration-map.json" \
   --report "/caminho/relatorio-final.json" \
-  --apply
+  --convert
 ```
 
-A aplicação acontece em uma cópia de staging. Somente depois de validar e cifrar os dados essa cópia substitui o diretório do Relay. O diretório anterior é preservado como `<relay-data>.pre-migration-<data>`. Se a importação falhar antes da troca, o destino original permanece intocado. O relatório deve ser salvo fora de `<relay-data>`.
+A conversão acontece em staging e não acessa a instalação do Relay. Na importação, o Relay UI confere todos os tamanhos e hashes antes da troca. O estado anterior é preservado como `<relay-data>.pre-import-<data>`; se houver falha, o destino original permanece intocado. GIFs já administradas pelo Relay UI são preservadas.
 
 ## Opções de contingência
 
@@ -81,4 +81,4 @@ Estas opções descartam dados e exigem revisão prévia do relatório:
 - Anexos são verificados, divididos em chunks e cifrados com a chave do Relay.
 - Arquivamento, leitura, favoritos e mensagens ocultas são associados à conta correta.
 
-Depois da migração, inicie o Relay e valide usuários, grupos, mensagens antigas e alguns anexos antes de remover o rollback.
+Depois da importação, valide usuários, grupos, mensagens antigas e alguns anexos antes de remover o rollback ou o arquivo com a relação das contas convertidas.

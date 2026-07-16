@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 interface MigrationInput {
-  backupsDir?: string; relayDataDir?: string; mappingFile?: string; reportFile?: string;
-  apply?: boolean; allowMissingUsers?: boolean; allowMissingAttachments?: boolean;
+  backupsDir?: string; outputDir?: string; mappingFile?: string; reportFile?: string;
+  convert?: boolean; allowMissingUsers?: boolean; allowMissingAttachments?: boolean;
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -38,22 +38,23 @@ const runMigration = async (_event: Electron.IpcMainInvokeEvent, raw: MigrationI
   if (running) throw new Error('Já existe uma migração em andamento.');
   const input = raw || {};
   const backupsDir = path.resolve(clean(input.backupsDir));
-  const relayDataDir = path.resolve(clean(input.relayDataDir));
+  const outputDir = clean(input.outputDir) ? path.resolve(clean(input.outputDir)) : '';
   const reportFile = clean(input.reportFile) ? path.resolve(clean(input.reportFile)) : path.join(app.getPath('documents'), `lantern-migration-report-${Date.now()}.json`);
   if (!clean(input.backupsDir) || !fs.statSync(backupsDir, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Selecione uma pasta válida com os backups.');
-  if (!clean(input.relayDataDir)) throw new Error('Selecione a pasta de dados do Relay.');
-  if (input.apply) {
-    const confirmation = await dialog.showMessageBox(mainWindow!, { type: 'warning', buttons: ['Cancelar', 'Aplicar migração'], defaultId: 0, cancelId: 0, title: 'Confirmar migração', message: 'O Lantern Relay está completamente encerrado?', detail: 'A ferramenta preservará o diretório atual como rollback, mas nenhum processo do Relay pode estar usando o banco durante a troca.' });
-    if (confirmation.response !== 1) return { canceled: true };
+  if (input.convert && !outputDir) {
+    throw new Error('Selecione onde o backup convertido será salvo.');
   }
-  const args = [engineFile(), '--backups', backupsDir, '--relay-data', relayDataDir, '--report', reportFile];
+  const args = [engineFile(), '--backups', backupsDir, '--report', reportFile];
+  if (input.convert) args.push('--output', outputDir, '--convert');
   const mapping = clean(input.mappingFile);
   if (mapping) args.push('--mapping', path.resolve(mapping));
   if (input.allowMissingUsers) args.push('--allow-missing-users');
   if (input.allowMissingAttachments) args.push('--allow-missing-attachments');
-  if (input.apply) args.push('--apply');
   running = true;
-  mainWindow?.webContents.send('migration-ui:output', `\n${input.apply ? 'Aplicando migração' : 'Analisando backups'}...\n`);
+  mainWindow?.webContents.send(
+    'migration-ui:output',
+    `\n${input.convert ? 'Gerando backup convertido' : 'Analisando backups'}...\n`
+  );
   try {
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true });
@@ -70,7 +71,7 @@ const runMigration = async (_event: Electron.IpcMainInvokeEvent, raw: MigrationI
 };
 
 const createWindow = () => {
-  mainWindow = new BrowserWindow({ width: 1060, height: 820, minWidth: 720, minHeight: 620, title: 'Lantern Migration', backgroundColor: '#f3f6fb', autoHideMenuBar: true, icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
+  mainWindow = new BrowserWindow({ width: 1120, height: 820, minWidth: 680, minHeight: 620, title: 'Conversor de backups do Lantern', backgroundColor: '#f5f7fb', autoHideMenuBar: true, icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   void mainWindow.loadFile(path.join(__dirname, '..', '..', 'migration-ui', 'renderer', 'index.html'));
   mainWindow.on('closed', () => { mainWindow = null; });
 };
@@ -78,7 +79,7 @@ const createWindow = () => {
 app.whenReady().then(() => { Menu.setApplicationMenu(null); createWindow(); });
 app.on('window-all-closed', () => app.quit());
 ipcMain.handle('migration-ui:pickBackups', () => chooseDirectory('Pasta que contém todos os backups'));
-ipcMain.handle('migration-ui:pickDestination', () => chooseDirectory('Pasta de dados do Relay'));
+ipcMain.handle('migration-ui:pickOutput', () => chooseDirectory('Onde salvar o backup convertido'));
 ipcMain.handle('migration-ui:pickMapping', chooseFile);
 ipcMain.handle('migration-ui:pickReport', chooseReport);
 ipcMain.handle('migration-ui:run', runMigration);

@@ -316,6 +316,48 @@ test('onboarding e preferências do usuário persistem no Relay canônico', () =
   }
 });
 
+test('conta administrativa cria a própria senha no primeiro acesso sem liberar sessão provisória', () => {
+  const root = createTempDir();
+  const dataDir = path.join(root, 'central');
+  try {
+    const store = new CentralStore(dataDir, silentLog);
+    const user = store.createUser({
+      username: 'first-password',
+      displayName: 'Primeira Senha',
+      role: 'admin',
+      passwordSetupRequired: true
+    }, 'relay-ui');
+    assert.equal(user.passwordSetupRequired, true);
+    assert.equal(user.profileSetupCompleted, false);
+    assert.throws(() => store.login(user.username, 'qualquer-senha', 'wrong-device'), /inválidos/);
+    assert.throws(() => store.createAdminSession(user.username, ''), /inválidos/);
+
+    const firstSession = store.login(user.username, '', 'first-device');
+    const competingSession = store.login(user.username, '', 'second-device');
+    assert.equal(firstSession.user.passwordSetupRequired, true);
+    assert.equal(store.authenticateReady(firstSession.token), null);
+
+    const completed = store.completeInitialPassword(
+      user.userId,
+      'senha-definitiva-segura',
+      firstSession.token
+    );
+    assert.equal(completed.passwordSetupRequired, false);
+    assert.ok(store.authenticateReady(firstSession.token));
+    assert.equal(store.authenticate(competingSession.token), null);
+    assert.throws(() => store.login(user.username, '', 'empty-after-setup'), /inválidos/);
+    assert.ok(store.login(user.username, 'senha-definitiva-segura', 'normal-device'));
+    assert.ok(store.createAdminSession(user.username, 'senha-definitiva-segura').token);
+    assert.throws(
+      () => store.completeInitialPassword(user.userId, 'outra-senha-segura', firstSession.token),
+      /não possui uma senha inicial pendente/
+    );
+    store.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('exportação canônica não depende do cache e respeita edições, exclusões e ocultações', () => {
   const root = createTempDir();
   const dataDir = path.join(root, 'central');

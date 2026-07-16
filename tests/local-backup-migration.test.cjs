@@ -7,6 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const Database = require('better-sqlite3');
 const { CentralStore } = require('../dist-relay/centralStore.js');
+const { importConvertedBackup, validateConvertedBackup } = require('../dist-relay/convertedBackup.js');
 
 const createBackup = (root, profile, messages, configure) => {
   const backup = path.join(root, `LanternBackup-${profile.deviceId}`);
@@ -75,6 +76,8 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     const alice = store.listUsers().find((user) => user.username === 'alice');
     const bob = store.listUsers().find((user) => user.username === 'bob');
     assert.ok(alice && bob);
+    assert.equal(alice.passwordSetupRequired, true);
+    assert.equal(bob.passwordSetupRequired, true);
     const frames = store.listConversationFramesForUser(alice.userId, bob.userId, Number.MAX_SAFE_INTEGER, 100);
     assert.deepEqual(frames.map((frame) => frame.type), ['chat:text', 'chat:react', 'file:offer']);
     assert.equal(frames[1].payload.targetMessageId, 'message-text');
@@ -84,6 +87,64 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     assert.equal(groups.eventsByGroupId['group-one'].some((event) => event.payload?.message?.messageId === 'group-message'), true);
     assert.equal(groups.eventsByGroupId['group-one'].some((event) => event.type === 'group.message.reactionChanged' && event.payload?.targetMessageId === 'group-message'), true);
     store.close();
+
+    const convertedOutput = path.join(root, 'converted');
+    const convertedReport = path.join(root, 'converted-report.json');
+    const convertedProcess = spawnSync(process.execPath, [
+      'dist-relay/migrateLocalBackups.js',
+      '--backups', backups,
+      '--output', convertedOutput,
+      '--report', convertedReport,
+      '--convert'
+    ], {
+      cwd: path.resolve(__dirname, '..'), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8'
+    });
+    assert.equal(convertedProcess.status, 0, convertedProcess.stderr || convertedProcess.stdout);
+    const converted = JSON.parse(fs.readFileSync(convertedReport, 'utf8'));
+    assert.equal(converted.converted, true);
+    assert.equal(converted.counts.users, 2);
+    assert.ok(fs.statSync(converted.backupFile).isDirectory());
+    const manifest = validateConvertedBackup(converted.backupFile);
+    assert.equal(manifest.kind, 'lantern-relay-converted-backup');
+    assert.equal(manifest.counts.groups, 1);
+    const convertedAccounts = JSON.parse(fs.readFileSync(path.join(converted.backupFile, manifest.credentialsFile), 'utf8'));
+    assert.equal(convertedAccounts.users.every((user) => user.passwordSetupRequired === true && user.temporaryPassword === null), true);
+
+    const importedRelayData = path.join(root, 'imported-relay-data');
+    fs.mkdirSync(path.join(importedRelayData, 'stickers'), { recursive: true });
+    fs.writeFileSync(path.join(importedRelayData, 'old-state.txt'), 'rollback-me');
+    fs.writeFileSync(path.join(importedRelayData, 'stickers', 'preserved.gif'), 'GIF89a');
+    const imported = importConvertedBackup({
+      bundlePath: converted.backupFile,
+      relayDataDir: importedRelayData
+    });
+    assert.equal(imported.stats.users, 2);
+    assert.ok(imported.rollbackDir);
+    assert.equal(fs.readFileSync(path.join(imported.rollbackDir, 'old-state.txt'), 'utf8'), 'rollback-me');
+    assert.equal(fs.readFileSync(path.join(importedRelayData, 'stickers', 'preserved.gif'), 'utf8'), 'GIF89a');
+    const importedStore = new CentralStore(path.join(importedRelayData, 'central'), () => undefined);
+    assert.equal(importedStore.getStats().frames, 3);
+    assert.equal(importedStore.readCanonicalState('groups').groups.length, 1);
+    importedStore.close();
+
+    const relayUiImportedData = path.join(root, 'relay-ui-imported-data');
+    const importProcess = spawnSync(process.execPath, [
+      'dist-relay/importConvertedBackup.js',
+      '--backup', converted.backupFile,
+      '--relay-data', relayUiImportedData
+    ], {
+      cwd: path.resolve(__dirname, '..'), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8'
+    });
+    assert.equal(importProcess.status, 0, importProcess.stderr || importProcess.stdout);
+    const relayUiImport = JSON.parse(importProcess.stdout);
+    assert.equal(relayUiImport.stats.users, 2);
+    assert.ok(fs.existsSync(path.join(relayUiImportedData, 'central', 'lantern-relay.db')));
+
+    fs.appendFileSync(path.join(converted.backupFile, manifest.credentialsFile), '\ncorrompido');
+    assert.throws(
+      () => validateConvertedBackup(converted.backupFile),
+      /tamanho incorreto|integridade/
+    );
   } finally {
     if (previousPassword === undefined) delete process.env.LANTERN_RELAY_ADMIN_PASSWORD;
     else process.env.LANTERN_RELAY_ADMIN_PASSWORD = previousPassword;

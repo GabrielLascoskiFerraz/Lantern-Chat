@@ -333,7 +333,7 @@ export const SettingsModal = ({
                       <p>Controle quando o Lantern pode chamar sua atenção.</p>
                     </div>
                   </header>
-                  <div className="settings-card settings-option-card">
+                  {startupSettings?.downloadsDir && <div className="settings-card settings-option-card">
                     <div className="settings-option-heading">
                       <div>
                         <h3>Não perturbe</h3>
@@ -351,7 +351,7 @@ export const SettingsModal = ({
                         <Button appearance="subtle" onClick={() => setDoNotDisturbUntil(0)}>Desativar</Button>
                       )}
                     </div>
-                  </div>
+                  </div>}
                 </section>
               )}
 

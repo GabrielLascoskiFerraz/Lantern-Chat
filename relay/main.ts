@@ -16,6 +16,8 @@ import { createSessionToken, hashToken } from './security';
 import { CalendarAutomationEvent, fetchCalendarEventsForDay } from './calendarAutomation';
 
 const RELAY_VERSION = '1.0.0';
+const HEADLESS_ADMIN_USERNAME = 'admin';
+const HEADLESS_ADMIN_PASSWORD = 'lantern-admin';
 const RELAY_MDNS_TYPE = 'lanternrelay';
 const RELAY_MDNS_PROTOCOL = 'tcp';
 const RELAY_DISCOVERY_UDP_QUERY = 'lantern:relay:discover';
@@ -1032,6 +1034,74 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .admin-audit { display:grid; gap:7px; max-height:220px; overflow:auto; margin-top:10px; }
     .admin-audit-row { display:grid; gap:2px; padding:8px 9px; border-bottom:1px solid var(--line); font-size:11px; }
     .admin-audit-row span { color:var(--muted); }
+
+    /* Mesma base visual e mesmas proporções da Lantern Relay UI. */
+    :root {
+      --bg: #edf1f7; --surface: #ffffff; --surface-2: #f4f7fd; --header: #f8faff;
+      --line: #d4ddec; --text: #1a2230; --muted: #5e687c; --accent: #5b5fc7;
+      --accent-strong: #4f52b2; --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+      --row-hover: #edf2ff; --row-active: #e4eaff; --good: #168b4f;
+      --good-soft: rgba(22,139,79,.12); --danger: #c43f3f; --danger-soft: rgba(196,63,63,.1);
+      --warn: #c76f16; --shadow: 0 8px 26px rgba(22,39,73,.07);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#141a26; --surface:#1c2433; --surface-2:#222d40; --header:#202a3b;
+        --line:#33435f; --text:#f2f6ff; --muted:#c3cee4; --accent:#a4acff;
+        --accent-strong:#8f98ef; --accent-soft:rgba(164,172,255,.13);
+        --row-hover:#2a3951; --row-active:#324563; --good:#55ca88;
+        --good-soft:rgba(85,202,136,.13); --danger:#ff8b8b; --danger-soft:rgba(255,139,139,.1);
+        --shadow:0 8px 26px rgba(0,0,0,.34);
+      }
+    }
+    html { scroll-behavior:smooth; }
+    body { min-width:0; background:var(--bg); }
+    button, input, select { font:inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid color-mix(in srgb,var(--accent) 64%,transparent); outline-offset:2px; }
+    .dashboard-shell { grid-template-columns:244px minmax(0,1fr); }
+    .dashboard-nav { min-width:0; background:var(--surface); box-shadow:var(--shadow); z-index:10; }
+    .nav-brand { background:var(--header); }
+    .nav-scroll { min-height:0; overflow:auto; }
+    .nav-caption { padding:17px 14px 7px; font-size:10px; font-weight:750; letter-spacing:.1em; }
+    .nav-links { gap:3px; }
+    .nav-link { min-height:48px; gap:11px; padding:0 14px; border-bottom-color:color-mix(in srgb,var(--line) 75%,transparent); font-size:13px; }
+    .nav-link svg, .web-link svg { width:19px; height:19px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .nav-link:first-child svg { fill:currentColor; stroke:none; }
+    .nav-link:hover { background:var(--row-hover); }
+    .nav-link.active { background:var(--row-active); box-shadow:inset 3px 0 0 var(--accent); }
+    .nav-icon { display:grid; width:22px; place-items:center; }
+    .nav-footer { gap:12px; padding:14px; background:var(--header); }
+    .nav-version { display:grid; gap:2px; font-size:10px; }
+    .web-link { min-height:34px; justify-content:center; border-radius:6px; background:var(--accent); font-size:12px; }
+    .page { min-width:0; padding-bottom:42px; }
+    .hero { position:sticky; top:0; z-index:8; min-height:72px; margin:0; padding:10px 24px; background:color-mix(in srgb,var(--header) 94%,transparent); backdrop-filter:blur(16px); }
+    .hero h1 { font-size:21px; }
+    .live-pill { min-height:36px; padding:0 12px; border-radius:7px; background:var(--surface); color:var(--good); font-size:12px; font-weight:700; }
+    .dot { width:8px; height:8px; box-shadow:0 0 0 4px var(--good-soft); }
+    .dot.offline { color:var(--danger); box-shadow:0 0 0 4px var(--danger-soft); }
+    .grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding:22px 24px 0; }
+    .card { border-radius:12px; background:color-mix(in srgb,var(--surface) 94%,var(--surface-2)); box-shadow:0 1px 1px rgba(0,0,0,.015); }
+    .metric { min-height:112px; padding:14px; }
+    .metric-label { font-size:10px; font-weight:750; letter-spacing:.055em; }
+    .metric-value { margin-top:8px; font-size:24px; }
+    .metric-note { margin-top:5px; font-size:11px; }
+    .content { gap:12px; padding:22px 24px 0; }
+    .section-header { min-height:65px; padding:12px 14px; background:color-mix(in srgb,var(--header) 48%,transparent); }
+    .section-title { font-size:14px; }
+    .section-meta { font-size:11px; }
+    .peer, .announcement { padding:9px 14px; }
+    .admin-section { margin:22px 24px 0; padding:14px; }
+    .admin-primary, .admin-operations { gap:12px; }
+    .admin-panel { padding:14px; border-radius:12px; background:color-mix(in srgb,var(--surface) 94%,var(--surface-2)); }
+    .admin-panel h3 { font-size:14px; }
+    .admin-form { gap:10px; }
+    .admin-form input, .admin-form select, .admin-user-fields input { min-height:36px; border-radius:6px; background:var(--surface); }
+    .admin-form button, .admin-action { min-height:34px; border-radius:6px; background:var(--accent); font-size:12px; }
+    .admin-user { border-radius:9px; background:var(--surface); }
+    .dashboard-shell.auth-locked #administration { width:min(520px,calc(100vw - 32px)); margin:64px auto 0; }
+    .dashboard-shell.auth-locked .admin-section { padding:18px; box-shadow:var(--shadow); }
+    .dashboard-shell.auth-locked .admin-form.two { grid-template-columns:1fr; }
+    .dashboard-shell.auth-locked #admin-login-form button { width:100%; }
     .dashboard-shell.auth-locked { display:block; min-height:100vh; }
     .dashboard-shell.auth-locked .dashboard-nav,
     .dashboard-shell.auth-locked .topbar,
@@ -1043,7 +1113,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       .dashboard-shell { display: block; }
       .dashboard-nav { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .dashboard-nav .nav-caption, .dashboard-nav .nav-footer { display: none; }
-      .dashboard-nav > div:nth-child(2) { overflow: hidden; }
+      .dashboard-nav > div:nth-child(2), .nav-scroll { overflow: hidden; }
       .nav-links { display: flex; overflow-x: auto; }
       .nav-link { flex: 0 0 auto; }
       .page { width: 100%; }
@@ -1084,12 +1154,12 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         <img class="nav-logo" src="/lantern-icon.png" alt="">
         <div><strong>Lantern</strong><span>Administração do Relay</span></div>
       </div>
-      <div>
+      <div class="nav-scroll">
         <div class="nav-caption">Painel</div>
         <nav class="nav-links">
-          <a class="nav-link active" href="#overview"><span class="nav-icon">⌂</span>Visão geral</a>
-          <a class="nav-link" href="#activity"><span class="nav-icon">◉</span>Atividade</a>
-          <a class="nav-link" href="#administration"><span class="nav-icon">♙</span>Contas e acesso</a>
+          <a class="nav-link active" href="#overview"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg></span>Visão geral</a>
+          <a class="nav-link" href="#activity"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16l4-4 3 2 5-7"/></svg></span>Atividade</a>
+          <a class="nav-link" href="#administration"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg></span>Contas e acesso</a>
         </nav>
       </div>
       <div class="nav-footer">
@@ -1179,7 +1249,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       <div class="section-header" style="padding:0 0 14px">
         <div>
           <h2 class="section-title">Administração</h2>
-          <div class="section-meta">Disponível somente no localhost deste servidor</div>
+          <div class="section-meta">Protegida por autenticação administrativa</div>
         </div>
         <span id="admin-state" class="section-meta">Autenticação necessária</span>
       </div>
@@ -1873,6 +1943,24 @@ export class LanternRelay {
     });
   }
 
+  bootstrapHeadlessAdministrator(): void {
+    if (this.centralStore.listUsers().length > 0) return;
+    const username = asString(process.env.LANTERN_RELAY_ADMIN_USERNAME) || HEADLESS_ADMIN_USERNAME;
+    const password = asString(process.env.LANTERN_RELAY_ADMIN_PASSWORD) || HEADLESS_ADMIN_PASSWORD;
+    const user = this.centralStore.createUser({
+      username,
+      displayName: 'Administrador do Lantern',
+      password,
+      role: 'admin',
+      allowBootstrapPassword: true
+    }, 'headless-bootstrap');
+    logRelay('headless_admin_bootstrap_created', {
+      username: user.username,
+      temporaryPassword: password,
+      warning: 'Altere esta senha imediatamente depois do primeiro acesso.'
+    }, { level: 'warn' });
+  }
+
   createCanonicalBackup() {
     return this.centralStore.createBackup([
       { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
@@ -1993,8 +2081,11 @@ export class LanternRelay {
     return `data:image/gif;base64,${fs.readFileSync(filePath).toString('base64')}`;
   }
 
-  createManagedUser(input: { username: string; displayName: string; department?: string; password: string; role?: 'admin' | 'user' }) {
-    const user = this.centralStore.createUser(input, 'relay-ui');
+  createManagedUser(input: { username: string; displayName: string; department?: string; role?: 'admin' | 'user' }) {
+    const user = this.centralStore.createUser({
+      ...input,
+      passwordSetupRequired: true
+    }, 'relay-ui');
     this.broadcastDirectory();
     return user;
   }
@@ -2590,7 +2681,7 @@ export class LanternRelay {
 
     if (requestUrl.pathname === '/api/client/password' && method === 'POST') {
       const token = this.getBearerToken(req);
-      const account = token ? this.centralStore.authenticate(token) : null;
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       if (!account || !token) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
@@ -2614,9 +2705,34 @@ export class LanternRelay {
       return;
     }
 
-    if (requestUrl.pathname === '/api/client/profile-setup' && method === 'PATCH') {
+    if (requestUrl.pathname === '/api/client/initial-password' && method === 'POST') {
       const token = this.getBearerToken(req);
       const account = token ? this.centralStore.authenticate(token) : null;
+      if (!account || !token || !account.passwordSetupRequired) {
+        this.writeJson(res, method, { ok: false, error: 'INITIAL_PASSWORD_NOT_REQUIRED' }, 403);
+        return;
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        const user = this.centralStore.completeInitialPassword(
+          account.userId,
+          typeof body.newPassword === 'string' ? body.newPassword : '',
+          token
+        );
+        this.writeJson(res, method, { ok: true, user });
+      } catch (error) {
+        this.writeJson(res, method, {
+          ok: false,
+          error: 'INITIAL_PASSWORD_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }, 400);
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/client/profile-setup' && method === 'PATCH') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       if (!account) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
@@ -2640,7 +2756,7 @@ export class LanternRelay {
 
     if (requestUrl.pathname === '/api/client/preferences' && method === 'GET') {
       const token = this.getBearerToken(req);
-      const account = token ? this.centralStore.authenticate(token) : null;
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       this.writeJson(
         res,
         method,
@@ -2654,7 +2770,7 @@ export class LanternRelay {
 
     if (requestUrl.pathname === '/api/client/preferences/conversation' && method === 'PUT') {
       const token = this.getBearerToken(req);
-      const account = token ? this.centralStore.authenticate(token) : null;
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       if (!account) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
@@ -2677,7 +2793,7 @@ export class LanternRelay {
 
     if (requestUrl.pathname === '/api/client/preferences/message' && method === 'PUT') {
       const token = this.getBearerToken(req);
-      const account = token ? this.centralStore.authenticate(token) : null;
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       if (!account) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
@@ -2698,7 +2814,7 @@ export class LanternRelay {
 
     if (requestUrl.pathname === '/api/client/export' && method === 'GET') {
       const token = this.getBearerToken(req);
-      const account = token ? this.centralStore.authenticate(token) : null;
+      const account = token ? this.centralStore.authenticateReady(token) : null;
       if (!account) {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
@@ -3927,6 +4043,15 @@ export class LanternRelay {
       this.sendError(session, 'AUTH_REQUIRED', 'Sessão inválida ou expirada.');
       try {
         session.socket.close(4001, 'authentication required');
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (account.passwordSetupRequired) {
+      this.sendError(session, 'PASSWORD_SETUP_REQUIRED', 'Crie sua senha antes de conectar ao Lantern.');
+      try {
+        session.socket.close(4003, 'password setup required');
       } catch {
         // ignore
       }
@@ -5721,6 +5846,7 @@ export const createRelayFromEnvironment = (): LanternRelay => new LanternRelay({
 
 if (require.main === module) {
   const relay = createRelayFromEnvironment();
+  relay.bootstrapHeadlessAdministrator();
   const shutdown = async (signal: string): Promise<void> => {
     logRelay('shutdown', { signal });
     try {

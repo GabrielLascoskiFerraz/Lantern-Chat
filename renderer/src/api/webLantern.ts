@@ -157,6 +157,7 @@ class WebLanternBridge {
   private pendingFrames = new Map<string, PendingRequest>();
   private groupChunkPending = new Map<string, PendingRequest>();
   private files = new Map<string, WebFile>();
+  private mediaMessages = new Map<string, MessageRow>();
   private attachmentDownloads = new Map<string, { chunks: Uint8Array[]; resolve: (url: string) => void; reject: (error: Error) => void; timer: number }>();
   private attachmentDownloadByFileId = new Map<string, Promise<MessageRow>>();
   private pendingGroupSync: PendingGroupSync | null = null;
@@ -172,6 +173,30 @@ class WebLanternBridge {
 
   private emit(event: AppEvent): void {
     for (const listener of this.events) listener(event);
+  }
+
+  private notifyIncoming(message: MessageRow): void {
+    if (message.direction !== 'in' || message.conversationId === this.activeConversation && !document.hidden) return;
+    if (Number(window.localStorage.getItem('lantern.web.dnd') || 0) > Date.now()) return;
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const sender = this.directory.get(message.senderDeviceId);
+    const title = message.type === 'announcement' ? '📢 Anúncio' : sender?.displayName || 'Nova mensagem';
+    const body = message.type === 'file' ? `📎 ${message.fileName || 'Arquivo'}` : message.bodyText || 'Nova mensagem';
+    try {
+      const notification = new Notification(title, { body: body.slice(0, 120), tag: message.messageId });
+      notification.onclick = () => {
+        window.focus();
+        this.emit({ type: 'navigate', conversationId: message.conversationId });
+        notification.close();
+      };
+    } catch {
+      // Alguns navegadores móveis exigem Service Worker para notificações.
+    }
+  }
+
+  private requestNotificationPermission(): void {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+    void Notification.requestPermission().catch(() => undefined);
   }
 
   private async http(path: string, init: RequestInit = {}, authenticated = true): Promise<Json> {
@@ -392,6 +417,7 @@ class WebLanternBridge {
     if (emit) {
       if (merged.conversationId !== this.activeConversation && merged.direction === 'in') this.unread[merged.conversationId] = (this.unread[merged.conversationId] || 0) + 1;
       this.emit({ type: 'message:received', message: merged });
+      this.notifyIncoming(merged);
     }
   }
 
@@ -636,6 +662,9 @@ class WebLanternBridge {
       case 'relay:deliver': {
         const frame = asRecord(payload.frame);
         this.applyCanonicalFrame(frame, true);
+        if (frame.from !== this.user?.userId && frame.to === this.user?.userId && frame.type === 'chat:text') {
+          void this.sendAck(String(frame.from || ''), String(frame.messageId || ''), 'delivered');
+        }
         return;
       }
       case 'relay:announcement:snapshot': {
@@ -648,6 +677,7 @@ class WebLanternBridge {
           this.replaceReactions(messageId, reactions[messageId] || {}, serverTime, true);
           this.replaceAnnouncementReads(messageId, reads[messageId] || {});
         }
+        this.emit({ type: 'conversation:synchronized', conversationId: 'announcements' });
         return;
       }
       case 'relay:announcement:reactions':
@@ -777,6 +807,18 @@ class WebLanternBridge {
     return sha256Bytes(bytes);
   }
 
+  private async sendAck(to: string, ackMessageId: string, status: 'delivered' | 'read'): Promise<void> {
+    if (!to || !ackMessageId || !this.user) return;
+    try {
+      await this.sendFrame({
+        type: 'chat:ack', messageId: uuid(), from: this.user.userId, to,
+        createdAt: Date.now(), payload: { ackMessageId, status }
+      });
+    } catch {
+      // Confirmações são best-effort e convergem numa próxima leitura.
+    }
+  }
+
   private reply(replyTo?: MessageReplyReference | null): Json | null {
     return replyTo ? { ...replyTo } : null;
   }
@@ -841,10 +883,27 @@ class WebLanternBridge {
         if (row.conversationId.startsWith('group:')) this.send('relay:group:file:request', { requestId, fileId: row.fileId, startIndex: 0 });
         else this.send('relay:attachment:request', { requestId, attachmentId: row.fileId, startIndex: 0 });
       });
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('O anexo baixado não pôde ser lido.');
+      const blob = await response.blob();
+      URL.revokeObjectURL(url);
+      const file = new File([blob], row.fileName || 'arquivo', { type: blob.type || 'application/octet-stream' });
+      if (row.fileSize !== null && row.fileSize !== undefined && file.size !== row.fileSize) {
+        throw new Error('O tamanho do anexo recebido não confere com o Relay.');
+      }
+      if (row.fileSha256 && await this.sha256(file) !== row.fileSha256) {
+        throw new Error('A integridade SHA-256 do anexo recebido é inválida.');
+      }
+      const key = `webfile:${uuid()}`;
+      this.files.set(key, { file, url: null });
       const latest = (this.messages.get(row.conversationId) || []).find((item) => item.messageId === row.messageId) || row;
-      const updated = { ...latest, filePath: url };
+      const updated = { ...latest, filePath: key, status: 'delivered' as const };
       this.mergeMessage(updated);
+      this.mediaMessages.set(updated.messageId, updated);
       this.emit({ type: 'message:updated', message: updated });
+      if (updated.direction === 'in' && updated.conversationId.startsWith('dm:')) {
+        void this.sendAck(updated.senderDeviceId, updated.messageId, 'delivered');
+      }
       return updated;
     })();
     this.attachmentDownloadByFileId.set(row.fileId, operation);
@@ -884,7 +943,8 @@ class WebLanternBridge {
   private async sendCanonicalFile(
     targetUserId: string | null,
     filePath: string,
-    replyTo?: MessageReplyReference | null
+    replyTo?: MessageReplyReference | null,
+    forwardedFromMessageId?: string | null
   ): Promise<MessageRow> {
     const file = this.fileForKey(filePath);
     const fileId = uuid();
@@ -895,7 +955,7 @@ class WebLanternBridge {
     const frame = {
       type: 'file:offer', messageId, from: this.user!.userId, to: targetUserId,
       createdAt: Date.now(),
-      payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo) }
+      payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), forwardedFromMessageId: forwardedFromMessageId || null }
     };
     await this.sendFrame(frame);
     const row = { ...this.messageFromFrame(frame)!, filePath: URL.createObjectURL(file) };
@@ -908,14 +968,27 @@ class WebLanternBridge {
       getPlatform: () => 'linux',
       getAuthState: async () => {
         if (!this.token) return this.authState();
-        try { const body = await this.http('/api/client/session'); this.user = body.user as AuthenticatedUser; await this.loadPreferences(); await this.connect(); }
+        try {
+          const body = await this.http('/api/client/session');
+          this.user = body.user as AuthenticatedUser;
+          if (!this.user.passwordSetupRequired) {
+            await this.loadPreferences();
+            await this.connect();
+            this.requestNotificationPermission();
+          }
+        }
         catch { this.token = ''; window.localStorage.removeItem(TOKEN_KEY); window.sessionStorage.removeItem(TOKEN_KEY); this.user = null; }
         return this.authState();
       },
       discoverRelays: async () => [{ host: window.location.hostname, port: RELAY_PORT, secure: window.location.protocol === 'https:' }],
       login: async ({ username, password, rememberMe = true }) => {
         const body = await this.http('/api/client/login', { method: 'POST', body: JSON.stringify({ username, password, deviceId: this.deviceId() }) }, false);
-        this.token = String(body.token); this.user = body.user as AuthenticatedUser; this.saveToken(this.token, rememberMe); await this.loadPreferences(); await this.connect();
+        this.token = String(body.token); this.user = body.user as AuthenticatedUser; this.saveToken(this.token, rememberMe);
+        if (!this.user.passwordSetupRequired) {
+          await this.loadPreferences();
+          await this.connect();
+        }
+        this.requestNotificationPermission();
         const state = this.authState(); this.emit({ type: 'auth:changed', state }); return state;
       },
       register: async ({ username, displayName, password, locale }) => {
@@ -926,6 +999,15 @@ class WebLanternBridge {
       getPasswordResetStatus: async (requestToken) => (await this.http(`/api/client/password-reset/status?token=${encodeURIComponent(requestToken)}`, {}, false)).status,
       completePasswordReset: async (input) => { await this.http('/api/client/password-reset/complete', { method: 'POST', body: JSON.stringify(input) }, false); },
       changePassword: async (input) => { await this.http('/api/client/password', { method: 'POST', body: JSON.stringify(input) }); },
+      completeInitialPassword: async (newPassword) => {
+        const body = await this.http('/api/client/initial-password', { method: 'POST', body: JSON.stringify({ newPassword }) });
+        this.user = body.user as AuthenticatedUser;
+        await this.loadPreferences();
+        await this.connect();
+        const state = this.authState();
+        this.emit({ type: 'auth:changed', state });
+        return state;
+      },
       completeFirstLoginSetup: async ({ avatarEmoji, avatarBg }) => { const body = await this.http('/api/client/profile-setup', { method: 'PATCH', body: JSON.stringify({ avatarEmoji, avatarBg }) }); this.user = body.user as AuthenticatedUser; return this.authState(); },
       logout: () => this.logout(),
       getProfile: async () => this.profile(),
@@ -954,7 +1036,7 @@ class WebLanternBridge {
         this.emit({ type: 'group:pins', groupId, messageIds: next });
       },
       getRelaySettings: async () => ({ automatic: false, host: window.location.hostname, port: RELAY_PORT, connected: this.socket?.readyState === WebSocket.OPEN, endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null }),
-      getStartupSettings: async () => ({ supported: false, openAtLogin: false, downloadsDir: 'Downloads', doNotDisturbUntil: Number(window.localStorage.getItem('lantern.web.dnd') || 0) }),
+      getStartupSettings: async () => ({ supported: false, openAtLogin: false, downloadsDir: '', doNotDisturbUntil: Number(window.localStorage.getItem('lantern.web.dnd') || 0) }),
       updateRelaySettings: async () => this.api().getRelaySettings(),
       forceRelayRediscovery: async () => { await this.connect(); return this.api().getRelaySettings(); },
       updateStartupSettings: async (input) => { if (input.doNotDisturbUntil !== undefined) window.localStorage.setItem('lantern.web.dnd', String(input.doNotDisturbUntil)); return this.api().getStartupSettings(); },
@@ -983,7 +1065,10 @@ class WebLanternBridge {
       forwardMessageToPeer: async (targetPeerId, sourceMessageId) => {
         const source = Array.from(this.messages.values()).flat().find((item) => item.messageId === sourceMessageId);
         if (!source) throw new Error('Mensagem não encontrada.');
-        if (source.type !== 'file') return this.dmText(targetPeerId, source.bodyText || '');
+        if (source.type !== 'file') {
+          const frame = { type: 'chat:text', messageId: uuid(), from: this.user!.userId, to: targetPeerId, createdAt: Date.now(), payload: { text: source.bodyText || '', replyTo: null, forwardedFromMessageId: source.messageId } };
+          await this.sendFrame(frame); const row = this.messageFromFrame(frame)!; this.mergeMessage(row); return row;
+        }
         const available = source.filePath ? source : await this.downloadAttachment(source);
         if (!available.filePath) throw new Error('O anexo não pôde ser recuperado do Relay.');
         const blob = await fetch(available.filePath).then((response) => {
@@ -992,7 +1077,7 @@ class WebLanternBridge {
         });
         const key = `webfile:${uuid()}`;
         this.files.set(key, { file: new File([blob], available.fileName || 'arquivo', { type: blob.type }), url: null });
-        return this.sendCanonicalFile(targetPeerId, key);
+        return this.sendCanonicalFile(targetPeerId, key, null, source.messageId);
       },
       editMessage: async (conversationId, messageId, text) => { if (conversationId.startsWith('group:')) await this.groupAction('editMessage', { groupId: conversationId.slice(6), targetMessageId: messageId, text }); else { const to = conversationId === 'announcements' ? null : conversationId.slice(3); await this.sendFrame({ type: 'chat:edit', messageId: uuid(), from: this.user!.userId, to, createdAt: Date.now(), payload: { targetMessageId: messageId, text, editedAt: Date.now() } }); } const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId); if (!existing) return null; const updated = { ...existing, bodyText: text, editedAt: Date.now() }; this.mergeMessage(updated); return updated; },
       reactToMessage: async (conversationId, messageId, reaction) => {
@@ -1010,7 +1095,24 @@ class WebLanternBridge {
       deleteMessageForMe: async (conversationId, messageId) => { await this.http('/api/client/preferences/message', { method: 'PUT', body: JSON.stringify({ messageId, hidden: true }) }); const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null; this.messages.set(conversationId, (this.messages.get(conversationId) || []).filter((item) => item.messageId !== messageId)); return existing; },
       toggleMessageFavorite: async (_conversationId, messageId, favorite) => { await this.http('/api/client/preferences/message', { method: 'PUT', body: JSON.stringify({ messageId, favorite }) }); favorite ? this.favorites.add(messageId) : this.favorites.delete(messageId); return favorite; },
       getMessageFavorites: async (ids) => Object.fromEntries(ids.map((id) => [id, this.favorites.has(id)])),
-      getFavoriteMessages: async (conversationId) => (this.messages.get(conversationId) || []).filter((item) => this.favorites.has(item.messageId)),
+      getFavoriteMessages: async (conversationId) => {
+        const loaded = (this.messages.get(conversationId) || []).filter((item) => this.favorites.has(item.messageId));
+        const missing = new Set([...this.favorites].filter((id) => !loaded.some((item) => item.messageId === id)));
+        if (missing.size === 0 || conversationId === 'announcements') return loaded;
+        const body = await this.http(`/api/client/export?conversationId=${encodeURIComponent(conversationId)}`);
+        const rows = (Array.isArray(body.records) ? body.records : [])
+          .filter((record: Json) => missing.has(String(record.messageId || '')))
+          .map((record: Json): MessageRow => ({
+            messageId: String(record.messageId), conversationId,
+            direction: record.senderUserId === this.user?.userId ? 'out' : 'in', senderDeviceId: String(record.senderUserId || ''), receiverDeviceId: null,
+            type: record.type === 'file' ? 'file' : 'text', bodyText: typeof record.text === 'string' ? record.text : null,
+            fileId: null, fileName: typeof record.fileName === 'string' ? record.fileName : null, fileSize: Number(record.fileSize || 0) || null,
+            fileSha256: null, filePath: null, status: 'delivered', reaction: null, deletedAt: null,
+            replyToMessageId: null, replyToSenderDeviceId: null, replyToType: null, replyToPreviewText: null, replyToFileName: null,
+            forwardedFromMessageId: null, editedAt: Number(record.editedAt || 0) || null, createdAt: Number(record.createdAt || 0)
+          }));
+        return [...loaded, ...rows];
+      },
       resyncConversation: async (conversationId) => {
         // O cache atual continua utilizável até a página canônica ser confirmada.
         // Uma falha de rede nunca pode transformar reparo em limpeza de conversa.
@@ -1024,7 +1126,9 @@ class WebLanternBridge {
         return (this.messages.get(conversationId) || []).filter((item) => rows.some((row) => row.messageId === item.messageId));
       },
       getMessagesByIds: async (ids) => {
-        const rows = Array.from(this.messages.values()).flat().filter((item) => ids.includes(item.messageId));
+        const rowsById = new Map(Array.from(this.messages.values()).flat().map((item) => [item.messageId, item]));
+        for (const id of ids) if (!rowsById.has(id) && this.mediaMessages.has(id)) rowsById.set(id, this.mediaMessages.get(id)!);
+        const rows = ids.map((id) => rowsById.get(id)).filter((item): item is MessageRow => Boolean(item));
         return Promise.all(rows.map((row) => row.type === 'file' && row.fileId && !row.filePath
           ? this.downloadAttachment(row).catch(() => row)
           : row));
@@ -1042,8 +1146,20 @@ class WebLanternBridge {
           : await this.request('relay:media:list:request', {
               peerUserId: conversationId.slice(3), kind, cursor: cursor || null, limit
             });
+        const items = Array.isArray(result.items) ? result.items as ConversationMediaPage['items'] : [];
+        for (const item of items) {
+          const existing = (this.messages.get(conversationId) || []).find((message) => message.messageId === item.messageId);
+          this.mediaMessages.set(item.messageId, existing || {
+            messageId: item.messageId, conversationId,
+            direction: item.senderUserId === this.user?.userId ? 'out' : 'in', senderDeviceId: item.senderUserId, receiverDeviceId: null,
+            type: 'file', bodyText: null, fileId: item.fileId, fileName: item.fileName, fileSize: item.fileSize,
+            fileSha256: null, filePath: null, status: 'delivered', reaction: null, deletedAt: null,
+            replyToMessageId: null, replyToSenderDeviceId: null, replyToType: null, replyToPreviewText: null, replyToFileName: null,
+            forwardedFromMessageId: null, editedAt: null, createdAt: item.createdAt
+          });
+        }
         return {
-          items: Array.isArray(result.items) ? result.items : [],
+          items,
           nextCursor: result.nextCursor && typeof result.nextCursor === 'object'
             ? result.nextCursor as ConversationMediaCursor
             : null,
@@ -1058,9 +1174,38 @@ class WebLanternBridge {
       getMessageReactionDetails: async (messageId) => this.reactionDetails(messageId),
       getAnnouncementReadSummary: async (ids) => Object.fromEntries(ids.map((id) => [id, this.announcementReads.get(id) || { count: 0, readByMe: false }])),
       getAnnouncementReadDetails: async (messageId) => this.readDetails(messageId),
-      exportConversation: async (conversationId, format) => { const body = await this.http(`/api/client/export?conversationId=${encodeURIComponent(conversationId)}`); const text = (body.records || []).map((row: Json) => `${new Date(row.createdAt).toLocaleString()} - ${row.text || row.fileName || ''}`).join('\n'); const url = URL.createObjectURL(new Blob([text], { type: format === 'html' ? 'text/html' : 'text/plain' })); const link = document.createElement('a'); link.href = url; link.download = `${body.title || 'conversa'}.${format}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return { canceled: false, filePath: link.download }; },
+      exportConversation: async (conversationId, format) => {
+        const body = await this.http(`/api/client/export?conversationId=${encodeURIComponent(conversationId)}`);
+        const records = Array.isArray(body.records) ? body.records : [];
+        const users = asRecord(body.users);
+        const title = String(body.title || 'Conversa');
+        const lines = records.map((row: Json) => {
+          const sender = row.senderUserId === this.user?.userId ? 'Você' : String(users[String(row.senderUserId)] || `Contato ${String(row.senderUserId || '').slice(0, 6)}`);
+          const content = row.type === 'file' ? `[arquivo] ${row.fileName || 'Arquivo'} (${Number(row.fileSize || 0)} bytes)` : String(row.text || '');
+          return `[${new Date(Number(row.createdAt || 0)).toLocaleString('pt-BR')}] ${sender}${row.editedAt ? ' (editada)' : ''}: ${content}`;
+        });
+        const escape = (value: string) => value.replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char] || char));
+        const content = format === 'html'
+          ? `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escape(title)}</title><style>body{max-width:900px;margin:40px auto;padding:0 20px;font:15px/1.55 system-ui;color:#1a2230}h1{font-size:24px}.message{padding:10px 0;border-bottom:1px solid #d4ddec;white-space:pre-wrap}</style><h1>${escape(title)}</h1><p>Exportado em ${escape(new Date().toLocaleString('pt-BR'))}</p>${lines.map((line) => `<div class="message">${escape(line)}</div>`).join('')}</html>`
+          : [`Lantern - ${title}`, `Exportado em ${new Date().toLocaleString('pt-BR')}`, '', ...lines, ''].join('\n');
+        const url = URL.createObjectURL(new Blob([content], { type: format === 'html' ? 'text/html;charset=utf-8' : 'text/plain;charset=utf-8' }));
+        const link = document.createElement('a'); link.href = url; link.download = `Lantern-${title.replace(/[^a-z0-9._-]+/gi, '-')}.${format}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return { canceled: false, filePath: link.download };
+      },
       setActiveConversation: async (id) => { this.activeConversation = id; },
-      markConversationRead: async (id) => { this.unread[id] = 0; if (id === 'announcements') { const messageIds = (this.messages.get(id) || []).map((item) => item.messageId); if (messageIds.length) this.send('relay:announcement:read', { messageIds, readAt: Date.now() }); } await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, manualUnread: false, readAt: Date.now() }) }); },
+      markConversationRead: async (id) => {
+        this.unread[id] = 0;
+        if (id === 'announcements') {
+          const messageIds = (this.messages.get(id) || []).map((item) => item.messageId);
+          if (messageIds.length) this.send('relay:announcement:read', { messageIds, readAt: Date.now() });
+        } else if (id.startsWith('dm:')) {
+          const peerId = id.slice(3);
+          for (const message of (this.messages.get(id) || []).filter((item) => item.direction === 'in')) {
+            void this.sendAck(peerId, message.messageId, 'read');
+          }
+        }
+        await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, manualUnread: false, readAt: Date.now() }) });
+      },
       markConversationUnread: async (id) => { this.unread[id] = Math.max(1, this.unread[id] || 0); await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, manualUnread: true }) }); },
       archiveConversation: async (id) => { await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, archived: true }) }); return 1; },
       unarchiveConversation: async (id) => { await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, archived: false }) }); return 1; },

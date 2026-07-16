@@ -141,7 +141,7 @@ export default function App() {
           <div className="loading-screen"><Spinner /></div>
         ) : !authState?.authenticated ? (
           <LoginView />
-        ) : authState.user && !authState.user.profileSetupCompleted ? (
+        ) : authState.user && (authState.user.passwordSetupRequired || !authState.user.profileSetupCompleted) ? (
           <FirstLoginSetupView />
         ) : (
           <Shell />

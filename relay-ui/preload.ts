@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('relayUi', {
   stop: () => ipcRenderer.invoke('relay-ui:stop'),
   restart: () => ipcRenderer.invoke('relay-ui:restart'),
   backup: () => ipcRenderer.invoke('relay-ui:backup'),
+  importConvertedBackup: () => ipcRenderer.invoke('relay-ui:importConvertedBackup'),
   management: () => ipcRenderer.invoke('relay-ui:management'),
   createUser: (input: unknown) => ipcRenderer.invoke('relay-ui:createUser', input),
   updateUser: (userId: string, input: unknown) => ipcRenderer.invoke('relay-ui:updateUser', userId, input),

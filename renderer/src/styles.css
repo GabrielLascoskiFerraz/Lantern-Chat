@@ -4544,6 +4544,8 @@ body {
 .onboarding-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .onboarding-actions .fui-Button:last-child { min-width: 150px; }
 .onboarding-device-preferences { display: grid; gap: 14px; }
+.onboarding-password-step { display: grid; align-content: start; gap: 16px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.onboarding-password-note { padding: 11px 12px; border-radius: 9px; color: var(--muted); background: var(--surface-subtle); font-size: 12px; line-height: 1.45; }
 .onboarding-preference-section { display: grid; gap: 11px; padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
 .onboarding-preference-section header h2,.onboarding-preference-section header p { margin: 0; }
 .onboarding-preference-section header h2 { font-size: 14px; }

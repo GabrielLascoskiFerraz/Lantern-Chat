@@ -81,6 +81,7 @@ interface LanternState {
   loadInitial: () => Promise<void>;
   login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<void>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<void>;
+  completeInitialPassword: (newPassword: string) => Promise<void>;
   completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<void>;
   logout: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
@@ -422,6 +423,23 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         set({ authState, profile: null, ready: true, loadingConversationId: null });
         return;
       }
+      if (authState.user?.passwordSetupRequired || !authState.user?.profileSetupCompleted) {
+        const [profile, relaySettings, startupSettings] = await Promise.all([
+          ipcClient.getProfile(),
+          ipcClient.getRelaySettings(),
+          ipcClient.getStartupSettings()
+        ]);
+        set({
+          authState,
+          profile,
+          relaySettings,
+          startupSettings,
+          ready: true,
+          startupError: null,
+          loadingConversationId: null
+        });
+        return;
+      }
       const [
         profile,
         relaySettings,
@@ -631,6 +649,63 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ...(onlineChanged ? { onlinePeerIds } : {})
         };
       });
+    };
+
+    const refreshSynchronizedConversation = async (conversationId: string): Promise<void> => {
+      const baselineRows = get().messagesByConversation[conversationId] || [];
+      try {
+        const rows = normalizeMessageOrder(
+          await ipcClient.getMessages(conversationId, MESSAGES_PAGE_SIZE)
+        );
+        const messageIds = rows.map((row) => row.messageId);
+        const [reactionMap, favoritesMap, announcementReads] = messageIds.length > 0
+          ? await Promise.all([
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReactions(messageIds)
+                : ipcClient.getMessageReactions(messageIds),
+              ipcClient.getMessageFavorites(messageIds),
+              conversationId === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReadSummary(messageIds)
+                : Promise.resolve({})
+            ])
+          : [{}, {}, {}];
+        set((state) => {
+          const refreshedRows = mergeRepairedConversationPage(
+            rows,
+            baselineRows,
+            state.messagesByConversation[conversationId] || []
+          );
+          return {
+            messagesByConversation: {
+              ...state.messagesByConversation,
+              [conversationId]: refreshedRows
+            },
+            hasMoreHistoryByConversation: {
+              ...state.hasMoreHistoryByConversation,
+              [conversationId]: rows.length === MESSAGES_PAGE_SIZE
+            },
+            conversationPreviewById: {
+              ...state.conversationPreviewById,
+              [conversationId]: refreshedRows.length > 0
+                ? previewFromMessage(refreshedRows[refreshedRows.length - 1])
+                : ''
+            },
+            announcementReactionsByMessage: {
+              ...state.announcementReactionsByMessage,
+              ...reactionMap
+            },
+            announcementReadsByMessage: {
+              ...state.announcementReadsByMessage,
+              ...announcementReads
+            },
+            favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, favoritesMap),
+            loadingConversationId:
+              state.loadingConversationId === conversationId ? null : state.loadingConversationId
+          };
+        });
+      } catch {
+        // A sincronização seguinte ou uma seleção manual tentará novamente.
+      }
     };
 
     unsubscribeEvents = ipcClient.onEvent((event) => {
@@ -1063,6 +1138,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return;
       }
 
+      if (event.type === 'conversation:synchronized') {
+        if (get().selectedConversationId === event.conversationId) {
+          void refreshSynchronizedConversation(event.conversationId);
+        }
+        return;
+      }
+
       if (event.type === 'typing:update') {
         const key = event.conversationId;
         const existingTimer = typingTimers.get(key);
@@ -1166,6 +1248,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     peerRefreshTimer = window.setInterval(() => {
       void refreshPeersSnapshot();
     }, 10_000);
+
+    // Se o snapshot terminou antes de o listener acima ser registrado, esta
+    // segunda leitura encontra o cache já preenchido. Se terminar depois, o
+    // evento conversation:synchronized fará a mesma atualização.
+    if (current === ANNOUNCEMENTS_ID && get().selectedConversationId === current) {
+      await refreshSynchronizedConversation(current);
+    }
     } catch (error) {
       const message =
         error instanceof Error
@@ -1204,6 +1293,11 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   register: async (input) => {
     set({ startupError: null });
     await ipcClient.register(input);
+    await get().loadInitial();
+  },
+  completeInitialPassword: async (newPassword) => {
+    const authState = await ipcClient.completeInitialPassword(newPassword);
+    set({ authState });
     await get().loadInitial();
   },
   completeFirstLoginSetup: async (input) => {

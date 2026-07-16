@@ -104,6 +104,10 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>
               Criar backup
             </button>
+            <button id="import-backup" class="button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9m0 0-4 4m4-4 4 4M5 5h14"/></svg>
+              Importar backup convertido
+            </button>
           </div>
         </div>
 
@@ -192,12 +196,11 @@
         <div class="section-heading"><div><span class="section-kicker">Administração local</span><h2 id="accounts-title">Contas</h2></div><span id="accounts-count" class="count-badge">0</span></div>
         <div class="management-grid">
           <article class="card management-card">
-            <div class="card-header compact"><div><h3>Criar conta</h3><p>A permissão de dashboard pode ser atribuída agora ou depois.</p></div></div>
+            <div class="card-header compact"><div><h3>Criar conta</h3><p>O usuário criará a própria senha no primeiro acesso.</p></div></div>
             <form id="create-account-form" class="management-form">
               <label class="field"><span>Usuário</span><input id="create-username" required minlength="3" autocomplete="off"></label>
               <label class="field"><span>Nome de exibição</span><input id="create-display-name" required autocomplete="off"></label>
               <label class="field"><span>Setor</span><input id="create-department" autocomplete="off"></label>
-              <label class="field"><span>Senha inicial</span><input id="create-password" type="password" required minlength="10" autocomplete="new-password"></label>
               <label class="check-field"><input id="create-admin" type="checkbox"><span>Permitir acesso à dashboard administrativa</span></label>
               <button class="button primary" type="submit">Criar conta</button>
             </form>

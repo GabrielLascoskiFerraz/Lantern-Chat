@@ -58,6 +58,10 @@ test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () =
 
     const dashboardResponse = await fetch(`${baseUrl}/`);
     const dashboardHtml = await dashboardResponse.text();
+    assert.match(dashboardHtml, /grid-template-columns:244px minmax\(0,1fr\)/);
+    assert.match(dashboardHtml, /class="nav-icon"><svg/);
+    assert.match(dashboardHtml, /--accent:\s*#5b5fc7/);
+    assert.doesNotMatch(dashboardHtml, /Disponível somente no localhost/);
     const script = dashboardHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1] || '';
     assert.ok(script.length > 0);
     assert.doesNotMatch(script, /\?\./, 'dashboard não deve exigir optional chaining no Safari');

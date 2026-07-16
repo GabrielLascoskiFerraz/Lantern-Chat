@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('migrationUi', {
   pickBackups: () => ipcRenderer.invoke('migration-ui:pickBackups'),
-  pickDestination: () => ipcRenderer.invoke('migration-ui:pickDestination'),
+  pickOutput: () => ipcRenderer.invoke('migration-ui:pickOutput'),
   pickMapping: () => ipcRenderer.invoke('migration-ui:pickMapping'),
   pickReport: () => ipcRenderer.invoke('migration-ui:pickReport'),
   run: (input: unknown) => ipcRenderer.invoke('migration-ui:run', input),

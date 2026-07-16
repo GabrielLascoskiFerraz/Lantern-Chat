@@ -12,6 +12,7 @@ export interface CentralUser {
   locale: SupportedLocale;
   role: 'admin' | 'user';
   profileSetupCompleted: boolean;
+  passwordSetupRequired: boolean;
   disabled: boolean;
   createdAt: number;
   updatedAt: number;

@@ -46,6 +46,7 @@ interface UserRow {
   locale: SupportedLocale;
   role: 'admin' | 'user';
   profileSetupCompleted: number;
+  passwordSetupRequired: number;
   disabled: number;
   passwordHash: string;
   createdAt: number;
@@ -192,6 +193,7 @@ export class CentralStore {
         locale TEXT NOT NULL DEFAULT 'pt-BR',
         role TEXT NOT NULL DEFAULT 'user',
         profileSetupCompleted INTEGER NOT NULL DEFAULT 0,
+        passwordSetupRequired INTEGER NOT NULL DEFAULT 0,
         disabled INTEGER NOT NULL DEFAULT 0,
         passwordHash TEXT NOT NULL,
         createdAt INTEGER NOT NULL,
@@ -359,6 +361,9 @@ export class CentralStore {
     const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
     if (!userColumns.some((column) => column.name === 'profileSetupCompleted')) {
       this.db.exec('ALTER TABLE users ADD COLUMN profileSetupCompleted INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!userColumns.some((column) => column.name === 'passwordSetupRequired')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN passwordSetupRequired INTEGER NOT NULL DEFAULT 0;');
     }
     this.db.exec(`
       INSERT OR IGNORE INTO canonical_frame_sequence(messageId)
@@ -549,6 +554,7 @@ export class CentralStore {
       locale: normalizeLocale(row.locale),
       role: row.role === 'admin' ? 'admin' : 'user',
       profileSetupCompleted: Boolean(row.profileSetupCompleted),
+      passwordSetupRequired: Boolean(row.passwordSetupRequired),
       disabled: Boolean(row.disabled),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt
@@ -597,7 +603,8 @@ export class CentralStore {
     username: string;
     displayName: string;
     department?: string;
-    password: string;
+    password?: string;
+    passwordSetupRequired?: boolean;
     role?: 'admin' | 'user';
     locale?: SupportedLocale;
     allowBootstrapPassword?: boolean;
@@ -606,6 +613,7 @@ export class CentralStore {
     if (!USERNAME_RE.test(username)) throw new Error('Nome de usuário inválido.');
     const displayName = input.displayName.trim();
     if (!displayName) throw new Error('Nome de exibição obrigatório.');
+    const passwordSetupRequired = input.passwordSetupRequired === true;
     const now = Date.now();
     const row: UserRow = {
       userId: randomUUID(),
@@ -618,21 +626,25 @@ export class CentralStore {
       locale: normalizeLocale(input.locale),
       role: input.role === 'admin' ? 'admin' : 'user',
       profileSetupCompleted: 0,
+      passwordSetupRequired: passwordSetupRequired ? 1 : 0,
       disabled: 0,
-      passwordHash: hashPassword(input.password, input.allowBootstrapPassword === true),
+      passwordHash: passwordSetupRequired
+        ? hashPassword(createSessionToken())
+        : hashPassword(input.password || '', input.allowBootstrapPassword === true),
       createdAt: now,
       updatedAt: now
     };
     this.db.prepare(`
       INSERT INTO users(userId, username, displayName, department, avatarEmoji, avatarBg,
-        statusMessage, locale, role, profileSetupCompleted, disabled, passwordHash, createdAt, updatedAt)
+        statusMessage, locale, role, profileSetupCompleted, passwordSetupRequired, disabled, passwordHash, createdAt, updatedAt)
       VALUES (@userId, @username, @displayName, @department, @avatarEmoji, @avatarBg,
-        @statusMessage, @locale, @role, @profileSetupCompleted, @disabled, @passwordHash, @createdAt, @updatedAt)
+        @statusMessage, @locale, @role, @profileSetupCompleted, @passwordSetupRequired, @disabled, @passwordHash, @createdAt, @updatedAt)
     `).run(row);
     this.appendAudit('user.created', actor, row.userId, {
       username: row.username,
       role: row.role,
-      bootstrap: input.allowBootstrapPassword === true
+      bootstrap: input.allowBootstrapPassword === true,
+      passwordSetupRequired
     });
     return this.toUser(row);
   }
@@ -871,7 +883,7 @@ export class CentralStore {
   }
 
   resetPassword(userId: string, password: string, actor = 'admin'): void {
-    const result = this.db.prepare('UPDATE users SET passwordHash = ?, updatedAt = ? WHERE userId = ?')
+    const result = this.db.prepare('UPDATE users SET passwordHash = ?, passwordSetupRequired = 0, updatedAt = ? WHERE userId = ?')
       .run(hashPassword(password), Date.now(), userId);
     if (result.changes === 0) throw new Error('Usuário não encontrado.');
     this.revokeUserSessions(userId);
@@ -880,18 +892,37 @@ export class CentralStore {
   }
 
   changePassword(userId: string, currentPassword: string, newPassword: string, currentToken: string): void {
-    const row = this.db.prepare('SELECT passwordHash FROM users WHERE userId = ? AND disabled = 0')
-      .get(userId) as { passwordHash: string } | undefined;
-    if (!row || !verifyPassword(currentPassword, row.passwordHash)) {
+    const row = this.db.prepare('SELECT passwordHash, passwordSetupRequired FROM users WHERE userId = ? AND disabled = 0')
+      .get(userId) as { passwordHash: string; passwordSetupRequired: number } | undefined;
+    if (!row || row.passwordSetupRequired || !verifyPassword(currentPassword, row.passwordHash)) {
       throw new Error('A senha atual está incorreta.');
     }
-    this.db.prepare('UPDATE users SET passwordHash = ?, updatedAt = ? WHERE userId = ?')
+    this.db.prepare('UPDATE users SET passwordHash = ?, passwordSetupRequired = 0, updatedAt = ? WHERE userId = ?')
       .run(hashPassword(newPassword), Date.now(), userId);
     this.db.prepare(`
       UPDATE sessions SET revokedAt = ?
       WHERE userId = ? AND tokenHash != ? AND revokedAt IS NULL
     `).run(Date.now(), userId, hashToken(currentToken));
     this.appendAudit('user.password_changed', userId, userId);
+  }
+
+  completeInitialPassword(userId: string, newPassword: string, currentToken: string): CentralUser {
+    const now = Date.now();
+    const transaction = this.db.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE users
+        SET passwordHash = ?, passwordSetupRequired = 0, updatedAt = ?
+        WHERE userId = ? AND disabled = 0 AND passwordSetupRequired = 1
+      `).run(hashPassword(newPassword), now, userId);
+      if (result.changes !== 1) throw new Error('Esta conta não possui uma senha inicial pendente.');
+      this.db.prepare(`
+        UPDATE sessions SET revokedAt = ?
+        WHERE userId = ? AND tokenHash != ? AND revokedAt IS NULL
+      `).run(now, userId, hashToken(currentToken));
+    });
+    transaction();
+    this.appendAudit('user.initial_password_completed', userId, userId);
+    return this.getUser(userId)!;
   }
 
   requestPasswordReset(usernameInput: string): { token: string; requestId: string } | null {
@@ -944,7 +975,7 @@ export class CentralStore {
       throw new Error('A solicitação não foi aprovada ou expirou.');
     }
     const transaction = this.db.transaction(() => {
-      this.db.prepare('UPDATE users SET passwordHash = ?, updatedAt = ? WHERE userId = ?')
+      this.db.prepare('UPDATE users SET passwordHash = ?, passwordSetupRequired = 0, updatedAt = ? WHERE userId = ?')
         .run(hashPassword(password), now, row.userId);
       this.db.prepare(`
         UPDATE password_reset_requests SET status = 'consumed', consumedAt = ? WHERE requestId = ?
@@ -1001,7 +1032,7 @@ export class CentralStore {
     this.db.prepare(`
       UPDATE users
       SET username = ?, displayName = ?, department = '', statusMessage = '',
-          avatarEmoji = '👤', avatarBg = '#69797e', passwordHash = ?, disabled = 1,
+          avatarEmoji = '👤', avatarBg = '#69797e', passwordHash = ?, passwordSetupRequired = 0, disabled = 1,
           updatedAt = ?
       WHERE userId = ?
     `).run(`deleted-${userId}`, 'Usuário excluído', hashPassword(createSessionToken()), now, userId);
@@ -1010,10 +1041,18 @@ export class CentralStore {
     this.appendAudit('user.deleted', actor, userId, { previousUsername: user.username });
   }
 
-  login(usernameInput: string, password: string, deviceId: string): AuthSession {
+  login(
+    usernameInput: string,
+    password: string,
+    deviceId: string,
+    options: { allowInitialAccess?: boolean } = {}
+  ): AuthSession {
     const username = usernameInput.trim().toLowerCase();
     const row = this.db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(username) as UserRow | undefined;
-    if (!row || row.disabled || !verifyPassword(password, row.passwordHash)) {
+    const initialAccess = options.allowInitialAccess !== false
+      && Boolean(row?.passwordSetupRequired)
+      && password.length === 0;
+    if (!row || row.disabled || (!initialAccess && !verifyPassword(password, row.passwordHash))) {
       throw new Error('Usuário ou senha inválidos.');
     }
     const token = createSessionToken();
@@ -1039,6 +1078,11 @@ export class CentralStore {
     if (!row) return null;
     this.db.prepare('UPDATE sessions SET lastSeenAt = ? WHERE tokenHash = ?').run(now, tokenHash);
     return this.toUser(row);
+  }
+
+  authenticateReady(token: string): CentralUser | null {
+    const user = this.authenticate(token);
+    return user && !user.passwordSetupRequired ? user : null;
   }
 
   logout(token: string): void {
@@ -1075,7 +1119,7 @@ export class CentralStore {
   }
 
   createAdminSession(username: string, password: string): { token: string; csrfToken: string } {
-    const auth = this.login(username, password, 'relay-dashboard');
+    const auth = this.login(username, password, 'relay-dashboard', { allowInitialAccess: false });
     if (auth.user.role !== 'admin') {
       this.logout(auth.token);
       throw new Error('Acesso administrativo necessário.');

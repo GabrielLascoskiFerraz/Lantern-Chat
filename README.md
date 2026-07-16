@@ -126,7 +126,14 @@ Em modo externo, use obrigatoriamente `https://` e um certificado confiável. O 
 
 ## Acesso administrativo
 
-O Relay não cria usuário ou senha administrativa padrão. Crie ou selecione uma conta na Lantern Relay UI e habilite **Acesso à dashboard**. Essa permissão não é exibida no cliente, no perfil, na lista de contatos ou nas conversas.
+Quando o Relay é iniciado diretamente, sem a Lantern Relay UI, uma instalação vazia recebe uma conta administrativa temporária para permitir o primeiro acesso à dashboard:
+
+- usuário: `admin`
+- senha temporária: `lantern-admin`
+
+Altere essa senha imediatamente pelo Lantern depois do primeiro acesso. A conta só é criada quando o banco ainda não possui nenhum usuário e nunca substitui contas existentes. É possível definir credenciais diferentes antes da primeira inicialização com `LANTERN_RELAY_ADMIN_USERNAME` e `LANTERN_RELAY_ADMIN_PASSWORD`.
+
+Quando o Relay é iniciado pela Lantern Relay UI, nenhuma conta padrão é criada. Crie ou selecione uma conta na Relay UI e habilite **Acesso à dashboard**. Essa permissão não é exibida no cliente, no perfil, na lista de contatos ou nas conversas.
 
 A dashboard pode ser acessada por outros computadores, mas exibe primeiro a autenticação e não entrega métricas nem operações sem uma sessão administrativa válida. Fora de uma rede confiável, configure HTTPS para não transmitir credenciais em texto simples.
 
@@ -186,10 +193,12 @@ A Relay UI permite:
 - copiar endereços locais disponíveis;
 - acompanhar usuários, sessões, armazenamento, transferências, anúncios, frames e tempo ativo;
 - criar e gerenciar contas, conceder acesso administrativo e aprovar solicitações de redefinição de senha;
+- criar contas de primeiro acesso sem senha: o usuário entra apenas com o nome de usuário e define uma senha obrigatória no assistente inicial;
 - definir a expiração padrão ou individual dos anúncios;
 - publicar automaticamente, nos anúncios, os eventos de um calendário ICS no horário escolhido;
 - abrir a dashboard autenticada no navegador, inclusive por outro computador da rede;
-- criar um backup restaurável sem interromper o Relay.
+- criar um backup restaurável sem interromper o Relay;
+- importar backups convertidos da edição antiga, com verificação SHA-256 e rollback automático.
 
 Certificado e chave são opcionais juntos no modo local. Para rede externa, use o Relay em modo externo com TLS obrigatório.
 
@@ -233,21 +242,22 @@ Use a Relay UI ou a dashboard administrativa para criar um pacote em `central/ba
 
 ## Migração da edição com dados locais
 
-Backups exportados pela antiga edição peer-to-peer podem ser consolidados em um Relay canônico novo. O aplicativo **Lantern Migration** trabalha primeiro em modo de análise, deduplica as cópias locais, reconstrói as relações entre usuários, verifica anexos por SHA-256 e aplica a importação em staging com rollback preservado.
+Backups exportados pela antiga edição peer-to-peer podem ser consolidados em um Relay novo. O aplicativo **Lantern Migration** analisa e deduplica as cópias locais, reconstrói as relações entre usuários, verifica os anexos por SHA-256 e gera uma pasta portátil `Lantern-Backup-Convertido-*`.
 
 ```bash
 npm run migration-ui:dev
 ```
 
-Na interface, **Aplicar migração** só é liberado depois de uma análise bem-sucedida para a mesma origem, destino e opções. Para automação, o mesmo motor permanece disponível por linha de comando:
+Na interface, **Gerar backup convertido** só é liberado depois de uma análise bem-sucedida. O pacote resultante é importado pelo botão **Importar backup convertido** no Relay UI, com validação de integridade, rollback automático e retomada do servidor quando ele já estava em execução. Para automação, o mesmo motor permanece disponível por linha de comando:
 
 ```bash
 npm run migrate:local-backups -- \
   --backups "/pasta/com/LanternBackup-*" \
-  --relay-data "/pasta/de/dados/do/relay"
+  --output "/pasta/de/saida" \
+  --convert
 ```
 
-Revise o dry-run e acrescente `--apply` somente com o Relay parado. O procedimento completo e o mapeamento opcional de contas estão em [docs/local-backup-migration.md](docs/local-backup-migration.md).
+O procedimento completo, a importação pelo Relay UI e o mapeamento opcional de contas estão em [docs/local-backup-migration.md](docs/local-backup-migration.md).
 
 ## Verificação
 

@@ -43,6 +43,7 @@ export interface AuthenticatedUser {
   locale: ClientLocale;
   role: 'admin' | 'user';
   profileSetupCompleted: boolean;
+  passwordSetupRequired: boolean;
 }
 
 export interface UserPreferencesSnapshot {
@@ -400,6 +401,7 @@ export type AppEvent =
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
+  | { type: 'conversation:synchronized'; conversationId: string }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | {
       type: 'message:status';

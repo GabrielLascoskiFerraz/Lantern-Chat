@@ -194,9 +194,9 @@ export function LoginView() {
       <div className="login-fields">
         {creating && <Field label={t('displayName')} required><Input autoFocus autoComplete="name" value={displayName} onChange={(_, d) => setDisplayName(d.value)} placeholder="Como você quer ser chamado" /></Field>}
         <Field label={t('username')} required><Input autoFocus={!creating} autoComplete="username" value={username} onChange={(_, d) => setUsername(d.value)} placeholder="seu.usuario" /></Field>
-        <Field label={t('password')} required>
+        <Field label={t('password')} required={creating}>
           <Input type="password" autoComplete={creating ? 'new-password' : 'current-password'} value={password} onChange={(_, d) => setPassword(d.value)} />
-          {creating && <small className="login-field-hint">Use pelo menos 10 caracteres.</small>}
+          <small className="login-field-hint">{creating ? 'Use pelo menos 10 caracteres.' : 'No primeiro acesso de uma conta criada pelo administrador, deixe em branco.'}</small>
         </Field>
       </div>
 

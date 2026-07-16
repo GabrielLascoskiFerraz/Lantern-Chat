@@ -44,6 +44,7 @@ export interface AuthenticatedUser {
   locale: ClientLocale;
   role: 'admin' | 'user';
   profileSetupCompleted: boolean;
+  passwordSetupRequired: boolean;
 }
 export interface UserPreferencesSnapshot {
   conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
@@ -221,6 +222,7 @@ export type AppEvent =
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
+  | { type: 'conversation:synchronized'; conversationId: string }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | {
       type: 'message:status';
@@ -267,6 +269,7 @@ export interface LanternApi {
   getPasswordResetStatus: (requestToken: string) => Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'>;
   completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => Promise<void>;
   changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
+  completeInitialPassword: (newPassword: string) => Promise<ClientAuthState>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) => Promise<ClientAuthState>;
   completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<ClientAuthState>;
   logout: () => Promise<void>;
@@ -425,6 +428,7 @@ export const ipcClient = {
   getPasswordResetStatus: (requestToken: string) => window.lantern.getPasswordResetStatus(requestToken),
   completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => window.lantern.completePasswordReset(input),
   changePassword: (input: { currentPassword: string; newPassword: string }) => window.lantern.changePassword(input),
+  completeInitialPassword: (newPassword: string) => window.lantern.completeInitialPassword(newPassword),
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) =>
     window.lantern.register(input),
   completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) =>

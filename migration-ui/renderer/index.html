@@ -1,23 +1,94 @@
 <!doctype html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lantern Migration</title><link rel="stylesheet" href="styles.css"></head>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conversor de backups do Lantern</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
 <body>
-  <main class="shell">
-    <header class="hero"><img src="../../assets/icon.png" alt=""><div><p class="eyebrow">LANTERN MIGRATION</p><h1>Migrar backups locais</h1><p>Consolide contas, conversas, grupos e anexos em um Relay canônico com análise e rollback.</p></div></header>
-    <nav class="steps" aria-label="Etapas"><span class="active">1 · Origem</span><span>2 · Análise</span><span>3 · Migração</span></nav>
-    <section class="card">
-      <h2>Arquivos da migração</h2><p class="muted">Mantenha o Lantern Relay encerrado durante a aplicação. A análise não modifica nenhum dado.</p>
-      <div class="field"><label for="backups">Pasta com todos os backups</label><div class="picker"><input id="backups" readonly placeholder="Selecione a pasta que contém LanternBackup-*"><button data-pick="backups">Procurar</button></div></div>
-      <div class="field"><label for="destination">Pasta de dados do Relay</label><div class="picker"><input id="destination" readonly placeholder="Selecione relay-data"><button data-pick="destination">Procurar</button></div></div>
-      <div class="field"><label for="mapping">Mapeamento de contas <small>opcional</small></label><div class="picker"><input id="mapping" readonly placeholder="Usuários, senhas temporárias, setores e funções"><button data-pick="mapping">Procurar</button><button class="icon" data-clear="mapping" title="Limpar">×</button></div></div>
-      <div class="field"><label for="report">Relatório JSON</label><div class="picker"><input id="report" readonly placeholder="Será salvo em Documentos se não for escolhido"><button data-pick="report">Escolher</button></div></div>
-      <details><summary>Opções de contingência</summary><div class="warnings"><label><input id="missing-users" type="checkbox"> Ignorar dados de participantes sem backup</label><label><input id="missing-attachments" type="checkbox"> Ignorar anexos ausentes ou inválidos</label><p>Estas opções podem descartar dados. Use somente depois de revisar os erros da análise.</p></div></details>
-      <div class="actions"><span id="state" class="state">Pronto para analisar.</span><button id="analyze" class="primary">Analisar backups</button></div>
-    </section>
-    <section id="results" class="card hidden" aria-live="polite">
-      <div class="section-head"><div><h2>Resultado da análise</h2><p id="result-summary" class="muted"></p></div><button id="open-report" class="secondary hidden">Abrir relatório</button></div>
-      <div id="metrics" class="metrics"></div><div id="issues"></div>
-      <div class="apply-panel"><div><h3>Aplicar no Relay</h3><p>A pasta atual será preservada como rollback. Confirme que o Relay está encerrado.</p></div><button id="apply" class="danger" disabled>Aplicar migração</button></div>
-    </section>
-    <section class="card log-card"><div class="section-head"><h2>Detalhes técnicos</h2><button id="clear-log" class="secondary">Limpar</button></div><pre id="log">Aguardando análise…</pre></section>
-  </main><script src="app.js"></script>
-</body></html>
+  <div class="app-shell">
+    <aside class="side-panel" aria-label="Etapas da conversão">
+      <div class="brand">
+        <img src="../../assets/icon.png" alt="">
+        <div><strong>Lantern</strong><span>Conversor de backups</span></div>
+      </div>
+      <ol class="step-list">
+        <li class="step active" data-step="source"><span>1</span><div><strong>Backups de origem</strong><small>Selecione os arquivos exportados</small></div></li>
+        <li class="step" data-step="review"><span>2</span><div><strong>Verificação</strong><small>Revise contas e integridade</small></div></li>
+        <li class="step" data-step="output"><span>3</span><div><strong>Backup convertido</strong><small>Gere o pacote para o Relay</small></div></li>
+      </ol>
+      <div class="side-note">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Zm-3 9 2 2 4-5"/></svg>
+        <div><strong>Conversão segura</strong><span>Os backups originais não são alterados.</span></div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div><h1>Converter backups locais</h1><p>Prepare um backup único para importar pelo Lantern Relay.</p></div>
+        <span id="top-state" class="status-badge">Pronto</span>
+      </header>
+
+      <div class="content">
+        <section class="card" aria-labelledby="source-title">
+          <div class="card-header">
+            <div class="section-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3V7Zm0 0V5h7l2 2"/></svg></div>
+            <div><h2 id="source-title">Backups de origem</h2><p>Escolha a pasta que contém todos os diretórios <code>LanternBackup-*</code>.</p></div>
+          </div>
+          <div class="card-body form-grid">
+            <label class="field full" for="backups"><span>Pasta com os backups</span><div class="file-picker"><input id="backups" readonly placeholder="Nenhuma pasta selecionada"><button class="button" data-pick="backups" type="button">Procurar</button></div></label>
+            <label class="field full" for="mapping"><span>Mapeamento de contas <em>Opcional</em></span><div class="file-picker with-clear"><input id="mapping" readonly placeholder="Usuários, senhas temporárias, setores e permissões"><button class="button" data-pick="mapping" type="button">Selecionar</button><button class="icon-button" data-clear="mapping" type="button" title="Remover mapeamento" aria-label="Remover mapeamento">×</button></div></label>
+            <details class="advanced full">
+              <summary>Opções avançadas</summary>
+              <div class="advanced-content">
+                <label class="check-field"><input id="missing-users" type="checkbox"><span><strong>Ignorar participantes sem backup</strong><small>Mensagens relacionadas a essas pessoas não serão convertidas.</small></span></label>
+                <label class="check-field"><input id="missing-attachments" type="checkbox"><span><strong>Ignorar anexos ausentes ou inválidos</strong><small>As mensagens correspondentes aos arquivos serão descartadas.</small></span></label>
+                <label class="field" for="report"><span>Relatório técnico <em>Opcional</em></span><div class="file-picker"><input id="report" readonly placeholder="Salvo em Documentos automaticamente"><button class="button" data-pick="report" type="button">Escolher</button></div></label>
+              </div>
+            </details>
+          </div>
+          <div class="card-footer"><span id="source-hint">Selecione a pasta para começar.</span><button id="analyze" class="button primary" type="button">Analisar backups</button></div>
+        </section>
+
+        <section id="results" class="card hidden" aria-labelledby="review-title" aria-live="polite">
+          <div class="card-header">
+            <div class="section-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4V5Zm4 4h8M8 13h5"/></svg></div>
+            <div><h2 id="review-title">Resultado da verificação</h2><p id="result-summary">Revise os dados encontrados antes de gerar o backup.</p></div>
+            <button id="open-report" class="button hidden" type="button">Abrir relatório</button>
+          </div>
+          <div class="card-body">
+            <div id="metrics" class="metrics"></div>
+            <div id="issues" class="issues"></div>
+          </div>
+        </section>
+
+        <section id="output-card" class="card output-card disabled" aria-labelledby="output-title">
+          <div class="card-header">
+            <div class="section-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg></div>
+            <div><h2 id="output-title">Gerar backup convertido</h2><p>O resultado poderá ser importado diretamente no Lantern Relay UI.</p></div>
+          </div>
+          <div class="card-body">
+            <label class="field" for="output"><span>Salvar em</span><div class="file-picker"><input id="output" readonly placeholder="Escolha a pasta de destino"><button class="button" data-pick="output" type="button">Escolher pasta</button></div></label>
+            <div class="format-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7V3Zm7 0v5h5M10 13h5m-5 4h5"/></svg><div><strong>Lantern Backup Convertido</strong><span>Inclui banco canônico, anexos, manifesto de integridade e a relação das contas convertidas.</span></div></div>
+          </div>
+          <div class="card-footer"><span id="output-hint">Conclua a análise para liberar a conversão.</span><button id="convert" class="button primary" type="button" disabled>Gerar backup convertido</button></div>
+        </section>
+
+        <section id="conversion-result" class="success-card hidden" aria-live="polite">
+          <div class="success-icon">✓</div><div><strong>Backup convertido criado</strong><span id="conversion-path"></span></div>
+          <div class="success-actions"><button id="open-backup" class="button primary" type="button">Mostrar backup</button><button id="open-credentials" class="button" type="button">Ver contas</button></div>
+        </section>
+
+        <details class="log-panel">
+          <summary>Detalhes técnicos</summary>
+          <div class="log-toolbar"><span>Saída do mecanismo de conversão</span><button id="clear-log" class="link-button" type="button">Limpar</button></div>
+          <pre id="log">Aguardando análise…</pre>
+        </details>
+      </div>
+    </main>
+  </div>
+  <div id="busy" class="busy-overlay hidden" role="status" aria-live="assertive"><div class="busy-dialog"><span class="spinner"></span><strong id="busy-title">Processando…</strong><small id="busy-detail">Isso pode levar alguns minutos quando houver muitos anexos.</small></div></div>
+  <script src="app.js"></script>
+</body>
+</html>

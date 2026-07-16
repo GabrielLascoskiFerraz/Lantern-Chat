@@ -1,8 +1,10 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type OpenDialogOptions } from 'electron';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { LanternRelay, RelayConfig } from '../relay/main';
+import { readConvertedBackupManifest } from '../relay/convertedBackup';
 
 interface RelayUiSettings {
   port: number;
@@ -16,6 +18,43 @@ let mainWindow: BrowserWindow | null = null;
 let relay: LanternRelay | null = null;
 
 const settingsFile = (): string => path.join(app.getPath('userData'), 'relay-ui-settings.json');
+const relayDataDir = (): string => path.join(app.getPath('userData'), 'relay-data');
+const importEngineFile = (): string => {
+  const candidates = [
+    path.resolve(__dirname, '..', 'relay', 'importConvertedBackup.js'),
+    path.resolve(__dirname, '..', '..', 'dist-relay', 'importConvertedBackup.js')
+  ];
+  const engine = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!engine) throw new Error('O mecanismo de importação não foi encontrado. Reinstale o Lantern Relay.');
+  return engine;
+};
+const runConvertedBackupImport = (bundlePath: string): Promise<Record<string, unknown>> =>
+  new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      importEngineFile(),
+      '--backup', bundlePath,
+      '--relay-data', relayDataDir()
+    ], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || 'O backup convertido não pôde ser importado.'));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as Record<string, unknown>);
+      } catch {
+        reject(new Error('O mecanismo de importação retornou uma resposta inválida.'));
+      }
+    });
+  });
 const normalizeSettings = (value: Partial<RelayUiSettings>): RelayUiSettings => ({
   port: Number.isFinite(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535
     ? Math.trunc(Number(value.port)) : 43190,
@@ -63,7 +102,7 @@ const startRelay = async () => {
   if (settings.tlsCertFile && (!fs.existsSync(settings.tlsCertFile) || !fs.existsSync(settings.tlsKeyFile))) {
     throw new Error('O certificado TLS ou a chave privada não foi encontrado.');
   }
-  process.env.LANTERN_RELAY_DATA_DIR = path.join(app.getPath('userData'), 'relay-data');
+  process.env.LANTERN_RELAY_DATA_DIR = relayDataDir();
   // O renderer Web é distribuído como recurso externo para que o servidor HTTP
   // consiga transmiti-lo sem depender do cwd nem de caminhos internos do ASAR.
   process.env.LANTERN_WEB_CLIENT_DIR = path.join(process.resourcesPath, 'dist-renderer');
@@ -116,6 +155,61 @@ ipcMain.handle('relay-ui:restart', restartRelay);
 ipcMain.handle('relay-ui:backup', async () => {
   if (!relay) throw new Error('Inicie o Relay antes de criar um backup.');
   return relay.createCanonicalBackup();
+});
+ipcMain.handle('relay-ui:importConvertedBackup', async () => {
+  const openOptions: OpenDialogOptions = {
+    title: 'Selecionar backup convertido do Lantern',
+    buttonLabel: 'Selecionar backup',
+    properties: ['openDirectory']
+  };
+  const selection = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, openOptions)
+    : await dialog.showOpenDialog(openOptions);
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+  const bundlePath = selection.filePaths[0];
+  const manifest = readConvertedBackupManifest(bundlePath);
+  const counts = manifest.counts || {};
+  const messageOptions: Electron.MessageBoxOptions = {
+    type: 'warning',
+    title: 'Importar backup convertido',
+    message: 'Substituir os dados atuais do Lantern Relay?',
+    detail: [
+      `Backup: ${path.basename(bundlePath)}`,
+      `${Number(counts.users || 0)} conta(s) · ${Number(counts.directMessages || 0)} mensagem(ns) direta(s) · ${Number(counts.groups || 0)} grupo(s)`,
+      '',
+      'O Relay será interrompido durante a importação. O estado atual será preservado automaticamente para rollback.'
+    ].join('\n'),
+    buttons: ['Cancelar', 'Importar backup'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  };
+  const confirmation = mainWindow
+    ? await dialog.showMessageBox(mainWindow, messageOptions)
+    : await dialog.showMessageBox(messageOptions);
+  if (confirmation.response !== 1) return { canceled: true };
+
+  const wasRunning = Boolean(relay);
+  if (wasRunning) await stopRelay();
+  try {
+    const result = await runConvertedBackupImport(bundlePath) as {
+      manifest: typeof manifest;
+      stats: Record<string, unknown>;
+      rollbackDir: string | null;
+      importedAt: number;
+      source: string;
+    };
+    if (wasRunning) await startRelay();
+    return {
+      canceled: false,
+      ...result,
+      credentialsFile: path.join(bundlePath, result.manifest.credentialsFile),
+      restarted: wasRunning
+    };
+  } catch (error) {
+    if (wasRunning) await startRelay().catch(() => undefined);
+    throw error;
+  }
 });
 const requireRelay = (): LanternRelay => {
   if (!relay) throw new Error('Inicie o Relay para acessar o gerenciamento.');

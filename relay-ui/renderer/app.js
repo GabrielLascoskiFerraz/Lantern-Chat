@@ -292,7 +292,9 @@ const renderManagement = (state) => {
     const name = document.createElement('strong'); name.textContent = user.displayName;
     const username = document.createElement('span'); username.textContent = `@${user.username}${user.department ? ` · ${user.department}` : ''}`;
     labels.append(name, username); identity.append(avatar, labels);
-    const status = document.createElement('span'); status.className = `state-badge${user.disabled ? ' disabled' : ''}`; status.textContent = user.disabled ? 'Desativada' : 'Ativa';
+    const status = document.createElement('span');
+    status.className = `state-badge${user.disabled ? ' disabled' : user.passwordSetupRequired ? ' pending' : ''}`;
+    status.textContent = user.disabled ? 'Desativada' : user.passwordSetupRequired ? 'Aguardando senha' : 'Ativa';
     head.append(identity, status);
     const controls = document.createElement('div'); controls.className = 'management-controls';
     const department = document.createElement('input'); department.value = draft.department; department.placeholder = 'Setor'; department.setAttribute('aria-label', `Setor de ${user.displayName}`);
@@ -423,6 +425,7 @@ const setButtons = (state) => {
   $('restart').disabled = actionInFlight || !state.running;
   $('stop').disabled = actionInFlight || !state.running;
   $('backup').disabled = actionInFlight || !state.running;
+  $('import-backup').disabled = actionInFlight;
   $('dashboard').disabled = actionInFlight || !state.running;
   $('save-settings').disabled = actionInFlight || !settingsDirty;
 };
@@ -543,6 +546,27 @@ $('backup').addEventListener('click', async () => {
     if (latestState) setButtons(latestState);
   }
 });
+$('import-backup').addEventListener('click', async () => {
+  if (actionInFlight) return;
+  actionInFlight = true;
+  if (latestState) setButtons(latestState);
+  try {
+    const result = await api.importConvertedBackup();
+    if (result?.canceled) return;
+    await refresh();
+    if (latestState?.running) await refreshManagement();
+    const rollbackLabel = result.rollbackDir ? 'rollback preservado' : 'nova instalação';
+    showFeedback(
+      `Backup convertido importado · ${number(result.stats?.users || 0)} conta(s) · ${rollbackLabel}`,
+      'success'
+    );
+  } catch (error) {
+    showFeedback(cleanError(error), 'error');
+  } finally {
+    actionInFlight = false;
+    if (latestState) setButtons(latestState);
+  }
+});
 $('dashboard').addEventListener('click', async () => {
   try {
     await api.openDashboard();
@@ -585,18 +609,15 @@ $('save-settings').addEventListener('click', async () => {
 
 $('create-account-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const password = $('create-password').value;
-  if (password.length < 10) return showFeedback('A senha inicial deve ter pelo menos 10 caracteres.', 'error');
   void runManagementAction(async () => {
     await api.createUser({
       username: $('create-username').value,
       displayName: $('create-display-name').value,
       department: $('create-department').value,
-      password,
       role: $('create-admin').checked ? 'admin' : 'user'
     });
     $('create-account-form').reset();
-  }, 'Conta criada.');
+  }, 'Conta criada. O usuário poderá entrar sem senha no primeiro acesso.');
 });
 
 $('announcement-ttl-form').addEventListener('submit', (event) => {

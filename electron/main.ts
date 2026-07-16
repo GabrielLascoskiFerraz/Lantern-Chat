@@ -207,8 +207,12 @@ class LanternApp {
     this.db.resetCacheForAuthenticatedProfile(authenticatedProfile);
     Object.assign(this.profile, authenticatedProfile);
     this.authState = state;
-    await this.refreshCanonicalUserPreferences();
     this.relay?.stop();
+    if (state.user.passwordSetupRequired) {
+      this.emitEvent({ type: 'auth:changed', state });
+      return state;
+    }
+    await this.refreshCanonicalUserPreferences();
     this.relay?.setAuthenticatedSession(this.profile, this.authService.getToken()!);
     this.relay?.setDirectRelayEndpoint(state.endpoint);
     await this.relay?.start();
@@ -234,6 +238,11 @@ class LanternApp {
     this.relay?.updateProfile(this.profile);
     this.emitEvent({ type: 'auth:changed', state });
     return state;
+  }
+
+  private async completeInitialPassword(newPassword: string): Promise<ClientAuthState> {
+    const state = await this.authService.completeInitialPassword(newPassword);
+    return this.applyAuthenticatedState(state);
   }
 
   private async refreshCanonicalUserPreferences(): Promise<void> {
@@ -315,7 +324,7 @@ class LanternApp {
     } else {
       this.profile = cachedProfile;
     }
-    if (this.authState.authenticated) {
+    if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) {
       await this.refreshCanonicalUserPreferences().catch((error) => {
         console.warn('[Lantern] não foi possível carregar preferências canônicas:', error instanceof Error ? error.message : String(error));
       });
@@ -509,6 +518,7 @@ class LanternApp {
       getPasswordResetStatus: (requestToken) => this.authService.getPasswordResetStatus(requestToken),
       completePasswordReset: (input) => this.authService.completePasswordReset(input),
       changePassword: (input) => this.authService.changePassword(input),
+      completeInitialPassword: (newPassword) => this.completeInitialPassword(newPassword),
       register: async (input) => {
         const state = await this.authService.register(input);
         return this.applyAuthenticatedState(state);
@@ -621,7 +631,7 @@ class LanternApp {
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
     this.reconcileLegacyIncomingFilePaths();
 
-    if (this.authState.authenticated) void this.relay.start().then(() => {
+    if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.relay.start().then(() => {
       this.emitEvent({
         type: 'relay:connection',
         connected: this.relay?.isConnected() || false,
@@ -5036,6 +5046,14 @@ class LanternApp {
         });
       }
     }
+
+    // O snapshot pode chegar depois da primeira leitura feita pelo renderer ao
+    // entrar no app. Notifica a conclusão somente depois de todo o estado e os
+    // anexos terem sido persistidos, para a conversa já aberta ser reidratada.
+    this.emitEvent({
+      type: 'conversation:synchronized',
+      conversationId: ANNOUNCEMENTS_CONVERSATION_ID
+    });
   }
 
   private handleRelayAnnouncementReactionUpdate(

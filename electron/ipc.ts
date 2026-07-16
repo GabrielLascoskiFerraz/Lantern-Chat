@@ -32,6 +32,7 @@ export interface IpcBindings {
   getPasswordResetStatus: (requestToken: string) => Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'>;
   completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => Promise<void>;
   changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
+  completeInitialPassword: (newPassword: string) => Promise<ClientAuthState>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) => Promise<ClientAuthState>;
   completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<ClientAuthState>;
   logout: () => Promise<void>;
@@ -205,6 +206,9 @@ export const registerIpc = (
   ipcMain.handle('lantern:getPasswordResetStatus', (_event, requestToken) => bindings.getPasswordResetStatus(requestToken));
   ipcMain.handle('lantern:completePasswordReset', (_event, input) => bindings.completePasswordReset(input));
   ipcMain.handle('lantern:changePassword', (_event, input) => bindings.changePassword(input));
+  ipcMain.handle('lantern:completeInitialPassword', (_event, newPassword) =>
+    bindings.completeInitialPassword(String(newPassword || ''))
+  );
   ipcMain.handle('lantern:register', (_event, input) => bindings.register(input));
   ipcMain.handle('lantern:logout', () => bindings.logout());
 

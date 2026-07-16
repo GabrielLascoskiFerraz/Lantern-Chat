@@ -1,11 +1,13 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { CentralStore } from './centralStore';
 import { CanonicalFrame } from './centralTypes';
 import { EncryptedChunkStore } from './encryptedChunkStore';
 import { RelayGroup, RelayGroupAttachmentMetadata, RelayGroupEvent, RelayGroupMember } from './groupTypes';
+import { createConvertedBackup } from './convertedBackup';
 
 const CHUNK_BYTES = 64 * 1024;
 
@@ -34,8 +36,8 @@ interface MigrationPlan {
   attachments: Map<string, ResolvedAttachment>; warnings: string[]; errors: string[];
 }
 interface CliOptions {
-  backupsDir: string; relayDataDir: string; mappingFile: string | null; reportFile: string;
-  apply: boolean; allowMissingUsers: boolean; allowMissingAttachments: boolean;
+  backupsDir: string; relayDataDir: string; outputDir: string; mappingFile: string | null; reportFile: string;
+  apply: boolean; convert: boolean; allowMissingUsers: boolean; allowMissingAttachments: boolean;
 }
 
 const value = (row: Json, key: string): string => typeof row[key] === 'string' ? String(row[key]).trim() : '';
@@ -289,11 +291,11 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
     const existingNames = new Set(store.listUsers().map((user) => user.username)); const deviceToUser = new Map<string, string>();
     for (const planned of plan.users) {
       if (existingNames.has(planned.username)) throw new Error(`Nome de usuário já existe no Relay: ${planned.username}.`);
-      const password = planned.password || randomBytes(18).toString('base64url');
-      const created = store.createUser({ username: planned.username, displayName: planned.profile.displayName, department: planned.department, password, role: planned.role }, 'migration');
+      const passwordSetupRequired = !planned.password;
+      const created = store.createUser({ username: planned.username, displayName: planned.profile.displayName, department: planned.department, password: planned.password || undefined, passwordSetupRequired, role: planned.role }, 'migration');
       store.updateUser(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg, statusMessage: planned.profile.statusMessage }, 'migration');
       store.completeProfileSetup(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg });
-      deviceToUser.set(planned.deviceId, created.userId); credentials.push({ legacyDeviceId: planned.deviceId, userId: created.userId, username: planned.username, temporaryPassword: password });
+      deviceToUser.set(planned.deviceId, created.userId); credentials.push({ legacyDeviceId: planned.deviceId, userId: created.userId, username: planned.username, passwordSetupRequired, temporaryPassword: planned.password || null });
     }
     let directMessages = 0; let reactions = 0; let announcements = 0; let directAttachments = 0; const announcementState: Json[] = [];
     const messageById = new Map(plan.messages.map((message) => [message.messageId, message]));
@@ -363,18 +365,66 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
   }
 };
 
+const convertPlan = (plan: MigrationPlan, options: CliOptions): Json => {
+  if (plan.errors.length) {
+    throw new Error(`A análise encontrou ${plan.errors.length} erro(s); o backup convertido não foi criado.`);
+  }
+  if (!options.outputDir) throw new Error('Selecione a pasta onde o backup convertido será salvo.');
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-converted-backup-'));
+  const relayDataDir = path.join(workspace, 'relay-data');
+  try {
+    const applied = applyPlan(plan, {
+      ...options,
+      relayDataDir,
+      reportFile: path.join(workspace, 'migration-engine-report.json'),
+      apply: true,
+      convert: false
+    });
+    const rawCounts = applied.counts && typeof applied.counts === 'object'
+      ? applied.counts as Record<string, unknown>
+      : {};
+    const counts = Object.fromEntries(
+      Object.entries(rawCounts).map(([key, count]) => [key, Number(count) || 0])
+    );
+    const credentials = Array.isArray(applied.users) ? applied.users : [];
+    const converted = createConvertedBackup({
+      sourceRelayDataDir: relayDataDir,
+      outputDir: options.outputDir,
+      counts,
+      warnings: plan.warnings,
+      credentials
+    });
+    return {
+      converted: true,
+      backupFile: converted.file,
+      credentialsFile: path.join(converted.file, converted.manifest.credentialsFile),
+      createdAt: converted.createdAt,
+      size: converted.size,
+      files: converted.files,
+      counts,
+      warnings: plan.warnings,
+      users: credentials
+    };
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+};
+
 const parseArgs = (): CliOptions => {
   const args = process.argv.slice(2); const get = (name: string): string => { const index = args.indexOf(name); return index >= 0 ? String(args[index + 1] || '') : ''; };
-  const backupsDir = get('--backups'); const relayDataDir = get('--relay-data');
-  if (!backupsDir || !relayDataDir) throw new Error('Uso: --backups <pasta> --relay-data <pasta> [--mapping arquivo.json] [--apply].');
+  const backupsDir = get('--backups'); const relayDataDir = get('--relay-data'); const outputDir = get('--output');
+  const apply = args.includes('--apply'); const convert = args.includes('--convert');
+  if (!backupsDir || (apply && !relayDataDir) || (convert && !outputDir)) {
+    throw new Error('Uso: --backups <pasta> [--output <pasta> --convert] [--relay-data <pasta> --apply].');
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  return { backupsDir: path.resolve(backupsDir), relayDataDir: path.resolve(relayDataDir), mappingFile: get('--mapping') ? path.resolve(get('--mapping')) : null, reportFile: path.resolve(get('--report') || path.join(process.cwd(), `lantern-migration-report-${stamp}.json`)), apply: args.includes('--apply'), allowMissingUsers: args.includes('--allow-missing-users'), allowMissingAttachments: args.includes('--allow-missing-attachments') };
+  return { backupsDir: path.resolve(backupsDir), relayDataDir: relayDataDir ? path.resolve(relayDataDir) : '', outputDir: outputDir ? path.resolve(outputDir) : '', mappingFile: get('--mapping') ? path.resolve(get('--mapping')) : null, reportFile: path.resolve(get('--report') || path.join(process.cwd(), `lantern-migration-report-${stamp}.json`)), apply, convert, allowMissingUsers: args.includes('--allow-missing-users'), allowMissingAttachments: args.includes('--allow-missing-attachments') };
 };
 
 const main = (): void => {
   const options = parseArgs(); const plan = buildPlan(options);
-  const summary: Json = { applied: false, dryRun: !options.apply, source: options.backupsDir, destination: options.relayDataDir, counts: { backups: plan.backups.length, users: plan.users.length, messages: plan.messages.length, attachments: plan.attachments.size }, proposedUsers: plan.users.map((user) => ({ legacyDeviceId: user.deviceId, displayName: user.profile.displayName, username: user.username, password: user.password ? '<from mapping>' : '<generated on apply>' })), warnings: plan.warnings, errors: plan.errors };
-  const report = options.apply ? applyPlan(plan, options) : summary;
+  const summary: Json = { applied: false, converted: false, dryRun: !options.apply && !options.convert, source: options.backupsDir, destination: options.convert ? options.outputDir : options.relayDataDir, counts: { backups: plan.backups.length, users: plan.users.length, messages: plan.messages.length, attachments: plan.attachments.size }, proposedUsers: plan.users.map((user) => ({ legacyDeviceId: user.deviceId, displayName: user.profile.displayName, username: user.username, password: user.password ? '<from mapping>' : '<generated on conversion>' })), warnings: plan.warnings, errors: plan.errors };
+  const report = options.convert ? convertPlan(plan, options) : options.apply ? applyPlan(plan, options) : summary;
   fs.writeFileSync(options.reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ ...report, reportFile: options.reportFile }, null, 2)}\n`);
   if (plan.errors.length) process.exitCode = 2;
