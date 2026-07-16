@@ -668,8 +668,62 @@ body {
   background: var(--teams-row-hover);
 }
 
-.create-group-empty {
-  border-bottom: none;
+.sidebar-create-group-empty {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  width: calc(100% - 24px);
+  min-height: 72px;
+  margin: 12px;
+  padding: 12px 14px;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 82%, transparent);
+  border-radius: 10px;
+  color: var(--teams-text);
+  background: color-mix(in srgb, var(--teams-surface) 64%, transparent);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 120ms var(--motion-ease-standard),
+    border-color 120ms var(--motion-ease-standard),
+    transform 120ms var(--motion-ease-standard);
+}
+
+.sidebar-create-group-empty:hover {
+  border-color: color-mix(in srgb, var(--teams-accent) 42%, var(--teams-border));
+  background: var(--teams-row-hover);
+}
+
+.sidebar-create-group-empty:active {
+  transform: scale(0.99);
+}
+
+.sidebar-create-group-empty:focus-visible {
+  outline: 2px solid var(--teams-accent);
+  outline-offset: 2px;
+}
+
+.sidebar-create-group-empty-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--teams-accent);
+  background: color-mix(in srgb, var(--teams-accent) 13%, transparent);
+}
+
+.sidebar-create-group-empty-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.sidebar-create-group-empty-copy .fui-Caption1 {
+  overflow: hidden;
+  color: var(--teams-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .group-create-backdrop {

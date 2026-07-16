@@ -34,6 +34,7 @@ import {
   Chat20Regular,
   MailUnread20Regular,
   PeopleTeam20Regular,
+  PeopleTeamAdd24Regular,
   Add20Regular
   ,SignOut20Regular
 } from '@fluentui/react-icons';
@@ -781,14 +782,16 @@ export const Sidebar = ({
             {groups.length === 0 && (
               <button
                 type="button"
-                className="archived-conversations-toggle create-group-empty"
+                className="sidebar-create-group-empty"
                 onClick={() => setCreateGroupOpen(true)}
               >
-                <span className="archived-conversations-label">
-                  <PeopleTeam20Regular />
-                  <span>Criar primeiro grupo</span>
+                <span className="sidebar-create-group-empty-icon" aria-hidden="true">
+                  <PeopleTeamAdd24Regular />
                 </span>
-                <Add20Regular />
+                <span className="sidebar-create-group-empty-copy">
+                  <Text weight="semibold">Criar primeiro grupo</Text>
+                  <Caption1>Reúna pessoas em uma conversa</Caption1>
+                </span>
               </button>
             )}
           </div>
