@@ -61,6 +61,29 @@ const MAX_QUEUED_ROUTES = 5_000;
 
 type JsonRecord = Record<string, unknown>;
 
+export const resolveWebClientRoot = (): string | null => {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  const configuredPath = (process.env.LANTERN_WEB_CLIENT_DIR || '').trim();
+  const candidates = Array.from(new Set([
+    configuredPath ? path.resolve(configuredPath) : '',
+    // Relay compilado diretamente em dist-relay/main.js.
+    path.resolve(__dirname, '..', 'dist-renderer'),
+    // Relay UI compilado em dist-relay-ui/relay/main.js.
+    path.resolve(__dirname, '..', '..', 'dist-renderer'),
+    path.resolve(process.cwd(), 'dist-renderer'),
+    path.resolve(path.dirname(process.execPath), 'dist-renderer'),
+    resourcesPath ? path.resolve(resourcesPath, 'dist-renderer') : '',
+    resourcesPath ? path.resolve(resourcesPath, 'app.asar', 'dist-renderer') : ''
+  ].filter(Boolean)));
+  return candidates.find((candidate) => {
+    try {
+      return fs.statSync(path.join(candidate, 'index.html')).isFile();
+    } catch {
+      return false;
+    }
+  }) || null;
+};
+
 class RelayWorkQueue {
   private active = 0;
   private readonly pending: Array<{
@@ -3199,17 +3222,16 @@ export class LanternRelay {
       this.writeJson(res, method, { ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
       return;
     }
-    const rendererRoots = [
-      path.resolve(__dirname, '..', 'dist-renderer'),
-      path.resolve(process.cwd(), 'dist-renderer'),
-      path.resolve(path.dirname(process.execPath), 'dist-renderer')
-    ];
-    const rendererRoot = rendererRoots.find((candidate) => fs.existsSync(path.join(candidate, 'index.html')));
+    const rendererRoot = resolveWebClientRoot();
     if (!rendererRoot) {
+      logRelay('web_client_missing', {
+        configuredPath: process.env.LANTERN_WEB_CLIENT_DIR || null,
+        executableDir: path.dirname(process.execPath)
+      }, { level: 'error', rateKey: 'web_client_missing', rateLimitMs: 30_000 });
       this.writeJson(res, method, {
         ok: false,
         error: 'WEB_CLIENT_NOT_BUILT',
-        message: 'O cliente web não foi encontrado. Execute npm run build:renderer.'
+        message: 'O cliente Web não foi incluído nesta instalação do Lantern Relay.'
       }, 503);
       return;
     }

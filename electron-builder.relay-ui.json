@@ -4,6 +4,9 @@
   "directories": { "output": "dist-relay-ui-installers", "buildResources": "assets" },
   "extraMetadata": { "main": "dist-relay-ui/relay-ui/main.js" },
   "files": ["dist-relay-ui/**/*", "relay-ui/renderer/**/*", "assets/**/*", "package.json"],
+  "extraResources": [
+    { "from": "dist-renderer", "to": "dist-renderer", "filter": ["**/*"] }
+  ],
   "asar": true,
   "asarUnpack": ["node_modules/better-sqlite3/**/*"],
   "win": { "icon": "assets/icon.ico", "target": ["nsis"], "artifactName": "LanternRelay-Setup-${version}.${ext}" },

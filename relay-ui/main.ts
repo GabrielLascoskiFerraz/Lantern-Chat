@@ -64,6 +64,9 @@ const startRelay = async () => {
     throw new Error('O certificado TLS ou a chave privada não foi encontrado.');
   }
   process.env.LANTERN_RELAY_DATA_DIR = path.join(app.getPath('userData'), 'relay-data');
+  // O renderer Web é distribuído como recurso externo para que o servidor HTTP
+  // consiga transmiti-lo sem depender do cwd nem de caminhos internos do ASAR.
+  process.env.LANTERN_WEB_CLIENT_DIR = path.join(process.resourcesPath, 'dist-renderer');
   const runtime = require('../relay/main') as typeof import('../relay/main');
   const config: RelayConfig = {
     host: '0.0.0.0', port: settings.port, pingIntervalMs: 5_000, peerTimeoutMs: 30_000,
