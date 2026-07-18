@@ -154,6 +154,7 @@ export interface IpcBindings {
     before?: number
   ) => Promise<DbMessage[]> | DbMessage[];
   getMessagesByIds: (messageIds: string[]) => Promise<DbMessage[]> | DbMessage[];
+  retryAttachment: (messageId: string) => Promise<DbMessage>;
   listConversationMedia: (
     conversationId: string,
     kind: ConversationMediaKind,
@@ -583,6 +584,9 @@ export const registerIpc = (
   );
   ipcMain.handle('lantern:getMessagesByIds', (_event, messageIds: string[]) =>
     bindings.getMessagesByIds(messageIds)
+  );
+  ipcMain.handle('lantern:retryAttachment', (_event, messageId: string) =>
+    bindings.retryAttachment(messageId)
   );
   ipcMain.handle(
     'lantern:listConversationMedia',

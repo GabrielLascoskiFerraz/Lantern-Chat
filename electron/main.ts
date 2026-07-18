@@ -94,13 +94,16 @@ class LanternApp {
   >();
   private readonly groupFileDownloadTimeoutByRequestId = new Map<string, NodeJS.Timeout>();
   private readonly groupFileDownloadRetryTimerByFileId = new Map<string, NodeJS.Timeout>();
+  private readonly groupAttachmentDemandFileIds = new Set<string>();
   private readonly groupFileDownloadStartTimeoutMs = 20_000;
   private readonly groupFileDownloadMaxRetries = 3;
   private readonly groupFileUploadsInFlight = new Set<string>();
   private readonly canonicalAttachmentRecovery = new AttachmentRecoveryCoordinator();
   private readonly canonicalAttachmentRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly canonicalAttachmentRetryAttempts = new Map<string, number>();
-  private readonly canonicalAttachmentMaxRetries = 5;
+  private readonly canonicalAttachmentDemandMessageIds = new Set<string>();
+  private readonly legacyAttachmentSearchDirs = new Set<string>();
+  private attachmentDirectoryWarning: string | null = null;
   private outboundResumeRunning = false;
   private outboundResumeTimer: NodeJS.Timeout | null = null;
   private updateService!: UpdateService;
@@ -146,6 +149,41 @@ class LanternApp {
 
   private getConfiguredAttachmentsDir(): string {
     return this.db.getAttachmentsDirectory(this.getDefaultAttachmentsDir());
+  }
+
+  private isDirectoryWritable(directory: string): boolean {
+    const resolved = path.resolve(directory);
+    try {
+      fs.mkdirSync(resolved, { recursive: true });
+      fs.accessSync(resolved, fs.constants.W_OK);
+      const probe = path.join(resolved, `.lantern-write-${process.pid}-${randomUUID()}`);
+      const descriptor = fs.openSync(probe, 'wx');
+      fs.closeSync(descriptor);
+      fs.unlinkSync(probe);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private prepareAttachmentsDirectory(): string {
+    const configured = this.getConfiguredAttachmentsDir();
+    if (this.isDirectoryWritable(configured)) return configured;
+
+    const fallback = path.resolve(app.getPath('userData'), 'attachments');
+    if (!this.isDirectoryWritable(fallback)) {
+      throw new Error(
+        `O Lantern não tem permissão para gravar anexos em “${configured}” nem em “${fallback}”.`
+      );
+    }
+
+    this.legacyAttachmentSearchDirs.add(configured);
+    this.db.setAttachmentsDirectory(fallback, this.getDefaultAttachmentsDir());
+    this.attachmentDirectoryWarning =
+      `A pasta de anexos “${configured}” não permite gravação. ` +
+      `Novos arquivos serão salvos com segurança em “${fallback}”.`;
+    console.warn('[Lantern][Files]', this.attachmentDirectoryWarning);
+    return fallback;
   }
 
   private async saveFileAs(filePath: string, fileName?: string): Promise<void> {
@@ -287,6 +325,7 @@ class LanternApp {
     this.relay?.stop();
     this.clearOutboundResumeTimer();
     this.clearCanonicalAttachmentRetries();
+    this.fileTransfer?.abortAllIncoming();
     await this.authService.logout();
     this.authState = this.authService.getState();
     this.db.clearCachedUserData();
@@ -339,7 +378,11 @@ class LanternApp {
     this.mainWindow = this.createWindow();
     this.notifications = new NotificationService(() => this.mainWindow);
     this.tray = new TrayController();
-    this.fileTransfer = new FileTransferService(this.getConfiguredAttachmentsDir(), this.profile);
+    this.fileTransfer = new FileTransferService(
+      this.prepareAttachmentsDirectory(),
+      this.profile,
+      Array.from(this.legacyAttachmentSearchDirs)
+    );
     this.updateService = new UpdateService(this.authService, (state) => this.emitEvent({ type: 'update:state', state }));
 
     this.relay = new RelayClient(this.profile, {
@@ -585,6 +628,7 @@ class LanternApp {
       getMessages: (conversationId, limit, before) =>
         this.getMessagesAndRecoverMissingAttachments(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.getMessagesByIdsAndRecoverAttachments(messageIds),
+      retryAttachment: (messageId) => this.retryAttachment(messageId),
       listConversationMedia: (conversationId, kind, cursor, limit) => {
         if (!this.relay?.isConnected()) throw new Error('Conecte ao Relay para consultar mídias e arquivos.');
         return this.relay.listConversationMedia(conversationId, kind, cursor || null, limit);
@@ -638,6 +682,13 @@ class LanternApp {
     });
     this.emitEvent({ type: 'sync:status', active: this.syncActivityCount > 0 });
     this.emitEvent({ type: 'update:state', state: this.updateService.getState() });
+    if (this.attachmentDirectoryWarning) {
+      this.emitEvent({
+        type: 'ui:toast',
+        level: 'warning',
+        message: this.attachmentDirectoryWarning
+      });
+    }
     this.reconcileLegacyIncomingFilePaths();
     if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.updateService.check(false);
 
@@ -848,6 +899,9 @@ class LanternApp {
     const defaultAttachmentsDir = this.getDefaultAttachmentsDir();
     const requestedDir = (input.downloadsDir || '').trim();
     if (requestedDir.length > 0) {
+      if (!this.isDirectoryWritable(requestedDir)) {
+        throw new Error('O Lantern não tem permissão para gravar na pasta de anexos selecionada.');
+      }
       const nextDir = this.db.setAttachmentsDirectory(requestedDir, defaultAttachmentsDir);
       this.fileTransfer.setAttachmentsDir(nextDir);
     }
@@ -1143,11 +1197,48 @@ class LanternApp {
     }
   }
 
+  private persistRecoveredAttachment(message: DbMessage, localPath: string): DbMessage | null {
+    if (!message.fileId) return null;
+    this.db.updateFilePath(message.fileId, localPath, 'delivered');
+    const updated = this.db.getMessageById(message.messageId);
+    if (!updated) return null;
+    this.emitEvent({ type: 'message:updated', message: updated });
+    this.emitEvent({
+      type: 'message:status',
+      messageId: updated.messageId,
+      conversationId: updated.conversationId,
+      status: updated.status === 'read' ? 'read' : 'delivered'
+    });
+    this.emitEvent({
+      type: 'transfer:progress',
+      direction: 'receive',
+      fileId: message.fileId,
+      messageId: updated.messageId,
+      peerId: updated.senderDeviceId,
+      transferred: updated.fileSize || 0,
+      total: updated.fileSize || 0,
+      stage: 'complete',
+      attempt: 0,
+      detail: 'Arquivo local validado'
+    });
+    return updated;
+  }
+
   private activateConversation(conversationId: string): void {
     this.activeConversationId = conversationId;
     if (!conversationId) return;
+    for (const messageId of Array.from(this.canonicalAttachmentDemandMessageIds)) {
+      const demanded = this.db.getMessageById(messageId);
+      if (demanded?.conversationId === conversationId) continue;
+      this.canonicalAttachmentDemandMessageIds.delete(messageId);
+      const retry = this.canonicalAttachmentRetryTimers.get(messageId);
+      if (retry) clearTimeout(retry);
+      this.canonicalAttachmentRetryTimers.delete(messageId);
+      this.canonicalAttachmentRetryAttempts.delete(messageId);
+    }
     this.markConversationRead(conversationId);
     if (!this.relay?.isConnected()) return;
+    if (this.groupIdFromConversationId(conversationId)) return;
     this.queueMissingAttachmentsForRecovery(
       conversationId,
       this.db.getMessages(conversationId, 100)
@@ -1157,10 +1248,16 @@ class LanternApp {
   private resumeActiveConversationAttachmentDownloads(): void {
     const conversationId = this.activeConversationId;
     if (!conversationId || !this.relay?.isConnected()) return;
-    this.queueMissingAttachmentsForRecovery(
-      conversationId,
-      this.db.getMessages(conversationId, 100)
-    );
+    if (this.groupIdFromConversationId(conversationId)) return;
+    for (const messageId of this.canonicalAttachmentDemandMessageIds) {
+      const message = this.db.getMessageById(messageId);
+      if (
+        message?.conversationId === conversationId &&
+        !this.hasUsableLocalAttachment(message)
+      ) {
+        void this.downloadMissingCanonicalAttachment(message);
+      }
+    }
   }
 
   private queueMissingAttachmentsForRecovery(
@@ -1178,14 +1275,14 @@ class LanternApp {
         continue;
       }
       if (groupId) {
-        void this.requestGroupAttachmentIfNeeded({
-          fileId: message.fileId,
-          groupId,
-          messageId: message.messageId,
-          senderDeviceId: message.senderDeviceId,
-          fileSize: message.fileSize || 0
-        }).catch(() => undefined);
-      } else if (conversationId.startsWith('dm:')) {
+        // A página de histórico carrega texto e metadados. O arquivo só é
+        // solicitado quando o componente visível pede sua hidratação.
+        continue;
+      } else if (
+        this.canonicalAttachmentDemandMessageIds.has(message.messageId) &&
+        (conversationId.startsWith('dm:') ||
+          conversationId === ANNOUNCEMENTS_CONVERSATION_ID)
+      ) {
         void this.downloadMissingCanonicalAttachment(message);
       }
     }
@@ -1249,7 +1346,7 @@ class LanternApp {
     }
     if (!this.relay?.isConnected()) return messages;
 
-    this.queueMissingAttachmentsForRecovery(conversationId, messages);
+    if (!groupId) this.queueMissingAttachmentsForRecovery(conversationId, messages);
     return messages;
   }
 
@@ -1257,38 +1354,108 @@ class LanternApp {
     const rows = this.db.getMessagesByIds(messageIds)
       .filter((message) => !this.canonicalHiddenMessageIds.has(message.messageId));
     if (!this.relay?.isConnected()) return rows;
-    await Promise.all(rows.map(async (message) => {
-      if (message.type !== 'file' || !message.fileId || this.hasUsableLocalAttachment(message)) return;
+    // Hidratar o estado de uma mensagem precisa ser uma leitura local rápida.
+    // O renderer usa esta chamada também durante o bootstrap; aguardar aqui o
+    // download completo de cada anexo acoplava a montagem da UI à fila de rede
+    // e podia atrasar diretório, grupos e demais snapshots visuais.
+    for (const message of rows) {
+      if (message.type !== 'file' || !message.fileId || this.hasUsableLocalAttachment(message)) continue;
       const groupId = this.groupIdFromConversationId(message.conversationId);
       if (groupId) {
-        await this.requestGroupAttachmentIfNeeded({
+        void this.requestGroupAttachmentIfNeeded({
           fileId: message.fileId,
           groupId,
           messageId: message.messageId,
           senderDeviceId: message.senderDeviceId,
           fileSize: message.fileSize || 0
-        });
-        return;
+        }).catch(() => undefined);
+        continue;
       }
       if (
         message.conversationId.startsWith('dm:') ||
         message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID
       ) {
-        await this.downloadMissingCanonicalAttachment(message);
+        void this.downloadMissingCanonicalAttachment(message);
       }
-    }));
-    return this.db.getMessagesByIds(messageIds)
-      .filter((message) => !this.canonicalHiddenMessageIds.has(message.messageId));
+    }
+    return rows;
+  }
+
+  private async cancelGroupAttachmentDownload(fileId: string): Promise<void> {
+    this.clearGroupFileDownloadRetry(fileId);
+    const requestId = this.groupFileDownloadRequestIdByFileId.get(fileId);
+    if (requestId) {
+      this.clearGroupFileDownloadTimeout(requestId);
+      this.groupFileDownloadRequestIdByFileId.delete(fileId);
+      this.groupFileDownloadByRequestId.delete(requestId);
+    }
+    this.fileTransfer.abortIncoming(fileId);
+    this.groupFileDownloadCompletionByFileId.get(fileId)?.resolve();
+    await this.groupFileDownloadCompletionByFileId.get(fileId)?.promise.catch(() => undefined);
+    this.groupFileDownloadCompletionByFileId.delete(fileId);
+  }
+
+  private async retryAttachment(messageId: string): Promise<DbMessage> {
+    const message = this.db.getMessageById((messageId || '').trim());
+    if (!message || message.type !== 'file' || !message.fileId) {
+      throw new Error('Anexo não encontrado.');
+    }
+    if (this.hasUsableLocalAttachment(message)) return message;
+    if (!this.relay?.isConnected()) {
+      throw new Error('Conecte ao Relay para tentar baixar o anexo novamente.');
+    }
+
+    const groupId = this.groupIdFromConversationId(message.conversationId);
+    if (groupId) {
+      if (!message.senderDeviceId) throw new Error('Remetente do anexo não encontrado.');
+      await this.cancelGroupAttachmentDownload(message.fileId);
+      this.db.resetGroupAttachmentDownload(message.fileId);
+      this.db.markIncomingFileForRetry(message.messageId);
+      this.groupAttachmentDemandFileIds.add(message.fileId);
+      await this.requestGroupAttachmentIfNeeded({
+        fileId: message.fileId,
+        groupId,
+        messageId: message.messageId,
+        senderDeviceId: message.senderDeviceId,
+        fileSize: message.fileSize || 0
+      });
+      return this.db.getMessageById(message.messageId) || message;
+    }
+
+    this.canonicalAttachmentDemandMessageIds.delete(message.messageId);
+    const scheduled = this.canonicalAttachmentRetryTimers.get(message.messageId);
+    if (scheduled) clearTimeout(scheduled);
+    this.canonicalAttachmentRetryTimers.delete(message.messageId);
+    this.relay.cancelCentralAttachmentDownload(message.fileId);
+    this.fileTransfer.abortIncoming(message.fileId);
+    await this.canonicalAttachmentRecovery.wait(message.messageId);
+    const scheduledAfterCancel = this.canonicalAttachmentRetryTimers.get(message.messageId);
+    if (scheduledAfterCancel) clearTimeout(scheduledAfterCancel);
+    this.canonicalAttachmentRetryTimers.delete(message.messageId);
+    this.canonicalAttachmentRetryAttempts.delete(message.messageId);
+    this.db.clearAttachmentDownloadCheckpoint(message.fileId);
+    const waiting = this.db.markIncomingFileForRetry(message.messageId) || message;
+    this.emitEvent({ type: 'message:updated', message: waiting });
+    this.canonicalAttachmentDemandMessageIds.add(message.messageId);
+    await this.downloadMissingCanonicalAttachment(waiting);
+    return this.db.getMessageById(message.messageId) || waiting;
   }
 
   private async downloadMissingCanonicalAttachment(message: DbMessage): Promise<void> {
+    if (this.hasUsableLocalAttachment(message)) {
+      this.canonicalAttachmentDemandMessageIds.delete(message.messageId);
+      return;
+    }
+    this.canonicalAttachmentDemandMessageIds.add(message.messageId);
     if (!this.authState?.authenticated || !this.relay?.isConnected() || !message.fileId) return;
+    if (this.canonicalAttachmentRetryTimers.has(message.messageId)) return;
     try {
       await this.downloadCanonicalAttachment(message);
       const retry = this.canonicalAttachmentRetryTimers.get(message.messageId);
       if (retry) clearTimeout(retry);
       this.canonicalAttachmentRetryTimers.delete(message.messageId);
       this.canonicalAttachmentRetryAttempts.delete(message.messageId);
+      this.canonicalAttachmentDemandMessageIds.delete(message.messageId);
     } catch (error) {
       this.fileTransfer.abortIncoming(message.fileId);
       if (this.canonicalAttachmentRetryTimers.has(message.messageId)) return;
@@ -1296,7 +1463,8 @@ class LanternApp {
       const attempt = (this.canonicalAttachmentRetryAttempts.get(message.messageId) || 0) + 1;
       this.canonicalAttachmentRetryAttempts.set(message.messageId, attempt);
       const permanent = this.isPermanentCanonicalAttachmentError(reason);
-      if (permanent || attempt > this.canonicalAttachmentMaxRetries) {
+      if (permanent) {
+        this.canonicalAttachmentDemandMessageIds.delete(message.messageId);
         this.db.updateMessageStatus(message.messageId, 'failed');
         const failed = this.db.getMessageById(message.messageId);
         if (failed) this.emitEvent({ type: 'message:updated', message: failed });
@@ -1318,7 +1486,11 @@ class LanternApp {
       const retry = setTimeout(() => {
         this.canonicalAttachmentRetryTimers.delete(message.messageId);
         const latest = this.db.getMessageById(message.messageId);
-        if (latest && !this.hasUsableLocalAttachment(latest)) {
+        if (
+          latest &&
+          this.canonicalAttachmentDemandMessageIds.has(message.messageId) &&
+          !this.hasUsableLocalAttachment(latest)
+        ) {
           void this.downloadMissingCanonicalAttachment(latest);
         }
       }, Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1)));
@@ -1331,10 +1503,8 @@ class LanternApp {
     const normalized = reason.toLocaleLowerCase('pt-BR');
     return (
       normalized.includes('acesso negado') ||
-      normalized.includes('anexo ainda incompleto') ||
       normalized.includes('não corresponde à mensagem') ||
-      normalized.includes('metadados do anexo incompletos') ||
-      normalized.includes('integridade')
+      normalized.includes('metadados do anexo incompletos')
     );
   }
 
@@ -1364,6 +1534,15 @@ class LanternApp {
       sha256: message.fileSha256
     };
     const checkpoint = this.db.getAttachmentDownloadCheckpoint(message.fileId);
+    const existingPath = await this.fileTransfer.findExistingCompleteFile(
+      offer,
+      [checkpoint?.tempPath]
+    );
+    if (existingPath) {
+      this.persistRecoveredAttachment(message, existingPath);
+      this.db.clearAttachmentDownloadCheckpoint(message.fileId);
+      return;
+    }
     const localPath = this.fileTransfer.startIncoming(offer, message.senderDeviceId, checkpoint);
     this.emitEvent({
       type: 'transfer:progress', direction: 'receive', fileId: message.fileId,
@@ -2942,11 +3121,6 @@ class LanternApp {
           );
         }
 
-        const storedFile = this.db.getMessageById(payload.messageId);
-        if (shouldReceiveFile && storedFile && this.activeConversationId === conversationId) {
-          void this.downloadMissingCanonicalAttachment(storedFile);
-        }
-
         break;
       }
       default:
@@ -3021,12 +3195,6 @@ class LanternApp {
       this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
       const stored = this.db.getMessageById(frame.messageId) || row;
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: stored });
-      if (
-        this.activeConversationId === conversationId &&
-        !this.hasUsableLocalAttachment(stored)
-      ) {
-        void this.downloadMissingCanonicalAttachment(stored);
-      }
       return;
     }
     if (frame.type === 'chat:edit') {
@@ -3076,6 +3244,11 @@ class LanternApp {
     } catch {
       // ignore
     }
+    try {
+      this.fileTransfer?.abortAllIncoming();
+    } catch {
+      // ignore
+    }
     this.knownOnlinePeerIds.clear();
     this.peerUnreachableFailures.clear();
     try {
@@ -3094,6 +3267,8 @@ class LanternApp {
     for (const timer of this.canonicalAttachmentRetryTimers.values()) clearTimeout(timer);
     this.canonicalAttachmentRetryTimers.clear();
     this.canonicalAttachmentRetryAttempts.clear();
+    this.canonicalAttachmentDemandMessageIds.clear();
+    this.groupAttachmentDemandFileIds.clear();
     this.canonicalAttachmentRecovery.clear();
   }
 
@@ -3440,13 +3615,9 @@ class LanternApp {
     }
 
     if (event.type === 'group.attachment.available') {
-      const metadata = (payload.metadata && typeof payload.metadata === 'object'
-        ? payload.metadata
-        : null) as Record<string, unknown> | null;
-      const metadataGroupId = typeof metadata?.groupId === 'string' ? metadata.groupId : '';
-      if (metadata && this.activeConversationId === `group:${metadataGroupId}`) {
-        this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
-      }
+      // A disponibilidade fica persistida no Relay; o arquivo é solicitado
+      // apenas quando a mensagem entra na área visível do cliente.
+      return;
     }
   }
 
@@ -3544,20 +3715,6 @@ class LanternApp {
       );
     }
 
-    const metadata = (payload.attachment && typeof payload.attachment === 'object'
-      ? payload.attachment
-      : message.type === 'file' && message.fileId
-        ? {
-            fileId: message.fileId,
-            groupId: event.groupId,
-            messageId: message.messageId,
-            senderDeviceId: message.senderDeviceId,
-            fileSize: message.fileSize || 0
-          }
-        : null) as Record<string, unknown> | null;
-    if (metadata && this.activeConversationId === conversationId) {
-      this.requestGroupAttachmentIfNeeded(metadata).catch(() => undefined);
-    }
   }
 
   private async requestGroupAttachmentIfNeeded(metadata: Record<string, unknown>): Promise<void> {
@@ -3572,8 +3729,10 @@ class LanternApp {
     if (!fileId || !groupId || !messageId || !senderDeviceId) {
       return;
     }
+    this.groupAttachmentDemandFileIds.add(fileId);
     const message = this.db.getMessageById(messageId);
     if (this.hasUsableLocalAttachment(message)) {
+      this.groupAttachmentDemandFileIds.delete(fileId);
       this.clearGroupFileDownloadRetry(fileId);
       await this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
       return;
@@ -3599,6 +3758,60 @@ class LanternApp {
 
     try {
       const previous = this.db.getGroupAttachmentDownload(fileId);
+      if (
+        message?.fileName &&
+        message.fileSize !== null &&
+        message.fileSize !== undefined &&
+        message.fileSha256
+      ) {
+        const existingPath = await this.fileTransfer.findExistingCompleteFile(
+          {
+            fileId,
+            messageId,
+            filename: message.fileName,
+            size: message.fileSize,
+            sha256: message.fileSha256
+          },
+          [previous?.tempPath]
+        );
+        if (existingPath) {
+          this.persistRecoveredAttachment(message, existingPath);
+          this.db.upsertGroupAttachmentDownload({
+            fileId,
+            groupId,
+            messageId,
+            status: 'complete',
+            localPath: existingPath,
+            tempPath: null,
+            totalBytes: message.fileSize,
+            receivedBytes: message.fileSize,
+            nextChunkIndex: Math.max(1, Math.ceil(message.fileSize / FILE_CHUNK_SIZE_BYTES)),
+            totalChunks: Math.max(1, Math.ceil(message.fileSize / FILE_CHUNK_SIZE_BYTES)),
+            retryCount: 0,
+            lastError: null,
+            lastAttemptAt: Date.now(),
+            requestId: null,
+            receivedAt: Date.now(),
+            updatedAt: Date.now()
+          });
+          this.clearGroupFileDownloadRetry(fileId);
+          this.groupAttachmentDemandFileIds.delete(fileId);
+          completion.resolve();
+          await this.relay?.markGroupFileReceived(fileId).catch(() => undefined);
+          return;
+        }
+      }
+
+      // Uma falha definitiva só volta a consumir rede por ação explícita do
+      // usuário. Sem este bloqueio, o IntersectionObserver reabria a mesma
+      // transferência falha a cada poucos segundos.
+      if (
+        previous?.status === 'failed' &&
+        (previous.retryCount || 0) >= this.groupFileDownloadMaxRetries
+      ) {
+        completion.resolve();
+        return;
+      }
       let tempPath = previous?.tempPath || null;
       let receivedBytes = 0;
       let nextChunkIndex = 0;
@@ -3711,6 +3924,7 @@ class LanternApp {
     messageId: string,
     reason = 'Não foi possível baixar o anexo.'
   ): void {
+    this.groupAttachmentDemandFileIds.delete(fileId);
     const previous = this.db.getGroupAttachmentDownload(fileId);
     this.db.updateMessageStatus(messageId, 'failed');
     this.db.upsertGroupAttachmentDownload({
@@ -4207,6 +4421,7 @@ class LanternApp {
         status: result.ok ? 'delivered' : 'failed'
       });
       if (result.ok) {
+        this.groupAttachmentDemandFileIds.delete(payload.fileId);
         this.clearGroupFileDownloadRetry(payload.fileId);
         this.emitEvent({
           type: 'transfer:progress',
@@ -4902,6 +5117,13 @@ class LanternApp {
   private async resumePendingGroupAttachmentDownloads(): Promise<void> {
     if (!this.relay?.isConnected()) return;
     for (const download of this.db.getPendingGroupAttachmentDownloads()) {
+      if (!this.groupAttachmentDemandFileIds.has(download.fileId)) continue;
+      if (
+        download.status === 'failed' &&
+        (download.retryCount || 0) >= this.groupFileDownloadMaxRetries
+      ) {
+        continue;
+      }
       const message = this.db.getMessageById(download.messageId);
       if (!message?.fileId || !message.senderDeviceId) continue;
       if (message.filePath && fs.existsSync(message.filePath)) {

@@ -28,6 +28,12 @@ import {
 
 type Json = Record<string, any>;
 type PendingRequest = { resolve: (value: Json) => void; reject: (error: Error) => void; timer: number };
+type PendingAttachmentDownload = {
+  chunks: Uint8Array[];
+  resolve: (url: string) => void;
+  reject: (error: Error) => void;
+  timer: number;
+};
 type WebFile = { file: File; url: string | null };
 type PendingGroupSync = {
   promise: Promise<void>;
@@ -159,8 +165,9 @@ class WebLanternBridge {
   private files = new Map<string, WebFile>();
   private mediaMessages = new Map<string, MessageRow>();
   private appVersion = 'web';
-  private attachmentDownloads = new Map<string, { chunks: Uint8Array[]; resolve: (url: string) => void; reject: (error: Error) => void; timer: number }>();
+  private attachmentDownloads = new Map<string, PendingAttachmentDownload>();
   private attachmentDownloadByFileId = new Map<string, Promise<MessageRow>>();
+  private attachmentDownloadQueue: Promise<void> = Promise.resolve();
   private pendingGroupSync: PendingGroupSync | null = null;
 
   private deviceId(): string {
@@ -296,11 +303,28 @@ class WebLanternBridge {
         this.socket = null;
         this.connecting = null;
         this.online.clear();
+        const disconnectError = new Error('Conexão encerrada antes da resposta do Relay.');
+        for (const pending of this.pending.values()) {
+          window.clearTimeout(pending.timer);
+          pending.reject(disconnectError);
+        }
+        this.pending.clear();
         for (const pending of this.pendingFrames.values()) {
           window.clearTimeout(pending.timer);
-          pending.reject(new Error('Conexão encerrada antes da confirmação do Relay.'));
+          pending.reject(disconnectError);
         }
         this.pendingFrames.clear();
+        for (const pending of this.groupChunkPending.values()) {
+          window.clearTimeout(pending.timer);
+          pending.reject(disconnectError);
+        }
+        this.groupChunkPending.clear();
+        for (const [requestId, download] of this.attachmentDownloads) {
+          window.clearTimeout(download.timer);
+          this.attachmentDownloads.delete(requestId);
+          download.reject(disconnectError);
+        }
+        reject(disconnectError);
         this.emit({ type: 'relay:connection', connected: false, endpoint: null });
         if (!this.intentionalClose && this.token) {
           if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
@@ -325,8 +349,32 @@ class WebLanternBridge {
         reject(new Error('O Relay não respondeu a tempo.'));
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
-      this.send(type, { requestId, ...payload });
+      try {
+        this.send(type, { requestId, ...payload });
+      } catch (error) {
+        window.clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(error instanceof Error ? error : new Error('Falha ao enviar a operação ao Relay.'));
+      }
     });
+  }
+
+  private refreshAttachmentDownloadTimeout(
+    requestId: string,
+    download: PendingAttachmentDownload
+  ): void {
+    window.clearTimeout(download.timer);
+    download.timer = window.setTimeout(() => {
+      if (this.attachmentDownloads.get(requestId) !== download) return;
+      this.attachmentDownloads.delete(requestId);
+      download.reject(new Error('O download do anexo parou de responder.'));
+    }, 30_000);
+  }
+
+  private runAttachmentDownload<T>(operation: () => Promise<T>): Promise<T> {
+    const running = this.attachmentDownloadQueue.then(operation, operation);
+    this.attachmentDownloadQueue = running.then(() => undefined, () => undefined);
+    return running;
   }
 
   private settle(payload: Json, error?: string): boolean {
@@ -733,23 +781,39 @@ class WebLanternBridge {
         return;
       }
       case 'relay:attachment:start': {
-        const download = this.attachmentDownloads.get(String(payload.requestId));
-        if (download) download.chunks = [];
+        const requestId = String(payload.requestId || '');
+        const download = this.attachmentDownloads.get(requestId);
+        if (download) {
+          download.chunks = [];
+          this.refreshAttachmentDownloadTimeout(requestId, download);
+        }
         return;
       }
       case 'relay:group:file:start': {
-        const download = this.attachmentDownloads.get(String(payload.requestId));
-        if (download) download.chunks = [];
+        const requestId = String(payload.requestId || '');
+        const download = this.attachmentDownloads.get(requestId);
+        if (download) {
+          download.chunks = [];
+          this.refreshAttachmentDownloadTimeout(requestId, download);
+        }
         return;
       }
       case 'relay:attachment:data': {
-        const download = this.attachmentDownloads.get(String(payload.requestId));
-        if (download) download.chunks.push(this.base64Bytes(String(payload.dataBase64 || '')));
+        const requestId = String(payload.requestId || '');
+        const download = this.attachmentDownloads.get(requestId);
+        if (download) {
+          download.chunks.push(this.base64Bytes(String(payload.dataBase64 || '')));
+          this.refreshAttachmentDownloadTimeout(requestId, download);
+        }
         return;
       }
       case 'relay:group:file:chunk': {
-        const download = this.attachmentDownloads.get(String(payload.requestId));
-        if (download) download.chunks.push(this.base64Bytes(String(payload.dataBase64 || '')));
+        const requestId = String(payload.requestId || '');
+        const download = this.attachmentDownloads.get(requestId);
+        if (download) {
+          download.chunks.push(this.base64Bytes(String(payload.dataBase64 || '')));
+          this.refreshAttachmentDownloadTimeout(requestId, download);
+        }
         return;
       }
       case 'relay:attachment:download:complete': {
@@ -882,14 +946,20 @@ class WebLanternBridge {
     const inFlight = this.attachmentDownloadByFileId.get(row.fileId);
     if (inFlight) return inFlight;
 
-    const operation = (async (): Promise<MessageRow> => {
+    const operation = this.runAttachmentDownload(async (): Promise<MessageRow> => {
       await this.connect();
       const requestId = uuid();
       const url = await new Promise<string>((resolve, reject) => {
-        const timer = window.setTimeout(() => { this.attachmentDownloads.delete(requestId); reject(new Error('Tempo de download excedido.')); }, 120_000);
+        const timer = window.setTimeout(() => { this.attachmentDownloads.delete(requestId); reject(new Error('O Relay não iniciou o download do anexo.')); }, 20_000);
         this.attachmentDownloads.set(requestId, { chunks: [], resolve, reject, timer });
-        if (row.conversationId.startsWith('group:')) this.send('relay:group:file:request', { requestId, fileId: row.fileId, startIndex: 0 });
-        else this.send('relay:attachment:request', { requestId, attachmentId: row.fileId, startIndex: 0 });
+        try {
+          if (row.conversationId.startsWith('group:')) this.send('relay:group:file:request', { requestId, fileId: row.fileId, startIndex: 0 });
+          else this.send('relay:attachment:request', { requestId, attachmentId: row.fileId, startIndex: 0 });
+        } catch (error) {
+          window.clearTimeout(timer);
+          this.attachmentDownloads.delete(requestId);
+          reject(error instanceof Error ? error : new Error('Falha ao solicitar o anexo ao Relay.'));
+        }
       });
       const response = await fetch(url);
       if (!response.ok) throw new Error('O anexo baixado não pôde ser lido.');
@@ -913,7 +983,7 @@ class WebLanternBridge {
         void this.sendAck(updated.senderDeviceId, updated.messageId, 'delivered');
       }
       return updated;
-    })();
+    });
     this.attachmentDownloadByFileId.set(row.fileId, operation);
     try {
       return await operation;
@@ -1143,6 +1213,25 @@ class WebLanternBridge {
         return Promise.all(rows.map((row) => row.type === 'file' && row.fileId && !row.filePath
           ? this.downloadAttachment(row).catch(() => row)
           : row));
+      },
+      retryAttachment: async (messageId) => {
+        const row = Array.from(this.messages.values()).flat()
+          .find((candidate) => candidate.messageId === messageId) || this.mediaMessages.get(messageId);
+        if (!row || row.type !== 'file' || !row.fileId) {
+          throw new Error('Anexo não encontrado.');
+        }
+        if (row.filePath) return row;
+        const waiting = { ...row, status: 'sent' as const };
+        this.mergeMessage(waiting);
+        this.emit({ type: 'message:updated', message: waiting });
+        try {
+          return await this.downloadAttachment(waiting);
+        } catch (error) {
+          const failed = { ...waiting, status: 'failed' as const };
+          this.mergeMessage(failed);
+          this.emit({ type: 'message:updated', message: failed });
+          throw error;
+        }
       },
       listConversationMedia: async (
         conversationId: string,

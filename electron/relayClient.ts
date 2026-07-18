@@ -103,6 +103,7 @@ interface PendingCentralAck {
 }
 
 interface PendingCentralDownload {
+  attachmentId: string;
   onStart: (metadata: Record<string, unknown>) => void | Promise<void>;
   onChunk: (chunk: FileChunkPayload) => void | Promise<void>;
   resolve: () => void;
@@ -545,7 +546,10 @@ export class RelayClient {
   private lastPresenceRevision = -1;
   private readonly outboundQueue = new PriorityTaskQueue(4);
   private readonly uploadSemaphore = new Semaphore(2);
-  private readonly downloadSemaphore = new Semaphore(3);
+  // O Relay serializa downloads canônicos por sessão. Manter a mesma
+  // concorrência no cliente evita enfileirar pedidos que ainda nem começaram
+  // e disparar timeouts falsos enquanto outro arquivo está sendo transmitido.
+  private readonly downloadSemaphore = new Semaphore(1);
 
   constructor(profile: Profile, callbacks: RelayClientCallbacks, sessionToken = '') {
     this.profile = { ...profile };
@@ -578,16 +582,8 @@ export class RelayClient {
     this.discoveredEndpoints.clear();
     this.discoveredEndpointByServiceKey.clear();
     this.udpProbeInFlight = false;
-    for (const pending of this.pendingCentralAcks.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error('Relay desconectado.'));
-    }
-    this.pendingCentralAcks.clear();
-    for (const pending of this.pendingCentralDownloads.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error('Relay desconectado.'));
-    }
-    this.pendingCentralDownloads.clear();
+    this.rejectPendingCentralAcks(new Error('Relay desconectado.'));
+    this.rejectPendingCentralDownloads(new Error('Relay desconectado.'));
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -698,9 +694,10 @@ export class RelayClient {
         const timeout = setTimeout(() => {
           this.pendingCentralDownloads.delete(requestId);
           reject(new RelayOperationError('TIMEOUT', 'Tempo esgotado ao baixar anexo do Relay.'));
-        }, 120_000);
+        }, 20_000);
         timeout.unref?.();
         this.pendingCentralDownloads.set(requestId, {
+          attachmentId,
           ...handlers,
           resolve,
           reject,
@@ -710,9 +707,34 @@ export class RelayClient {
         this.sendEnvelope({
           type: 'relay:attachment:request',
           payload: { requestId, attachmentId, startIndex: Math.max(0, Math.trunc(startIndex) || 0) }
+        }, (error) => {
+          if (!error) return;
+          const pending = this.pendingCentralDownloads.get(requestId);
+          if (!pending) return;
+          clearTimeout(pending.timeout);
+          this.pendingCentralDownloads.delete(requestId);
+          pending.reject(new RelayOperationError(
+            'RELAY_UNAVAILABLE',
+            'Não foi possível solicitar o anexo ao Relay.',
+            true,
+            error
+          ));
         });
       });
     });
+  }
+
+  cancelCentralAttachmentDownload(attachmentId: string): void {
+    for (const [requestId, pending] of Array.from(this.pendingCentralDownloads.entries())) {
+      if (pending.attachmentId !== attachmentId) continue;
+      clearTimeout(pending.timeout);
+      this.pendingCentralDownloads.delete(requestId);
+      pending.reject(new RelayOperationError(
+        'OPERATION_PENDING',
+        'Download anterior cancelado para uma nova tentativa.',
+        true
+      ));
+    }
   }
 
   async requestConversationHistory(
@@ -833,7 +855,19 @@ export class RelayClient {
       }, 20_000);
       timeout.unref?.();
       this.pendingCentralAcks.set(requestId, { resolve, reject, timeout });
-      this.sendEnvelope({ type, payload: { ...payload, requestId } });
+      this.sendEnvelope({ type, payload: { ...payload, requestId } }, (error) => {
+        if (!error) return;
+        const pending = this.pendingCentralAcks.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingCentralAcks.delete(requestId);
+        pending.reject(new RelayOperationError(
+          'RELAY_UNAVAILABLE',
+          'Não foi possível enviar a operação ao Relay.',
+          true,
+          error
+        ));
+      });
     });
   }
 
@@ -905,6 +939,8 @@ export class RelayClient {
       this.rejectPendingAcks(new Error('Endpoint do relay alterado.'));
       this.rejectPendingGroupAcks(new Error('Endpoint do relay alterado.'));
       this.rejectPendingGroupChunkAcks(new Error('Endpoint do relay alterado.'));
+      this.rejectPendingCentralAcks(new Error('Endpoint do relay alterado.'));
+      this.rejectPendingCentralDownloads(new Error('Endpoint do relay alterado.'));
       this.rejectReadyWaiters(new Error('Endpoint do relay alterado.'));
       this.callbacks.onPresence([]);
       this.cancelPresenceStaleTimer();
@@ -1515,6 +1551,8 @@ export class RelayClient {
     this.rejectPendingAcks(new Error('Conexão com relay perdida.'));
     this.rejectPendingGroupAcks(new Error('Conexão com relay perdida.'));
     this.rejectPendingGroupChunkAcks(new Error('Conexão com relay perdida.'));
+    this.rejectPendingCentralAcks(new Error('Conexão com relay perdida.'));
+    this.rejectPendingCentralDownloads(new Error('Conexão com relay perdida.'));
     this.rejectReadyWaiters(new Error('Conexão com relay perdida.'));
 
     this.callbacks.onPresence([]);
@@ -1901,6 +1939,7 @@ export class RelayClient {
         if (!requestId) return;
         const pending = this.pendingCentralDownloads.get(requestId);
         if (!pending) return;
+        this.refreshCentralDownloadTimeout(requestId, pending);
         this.queueCentralDownloadWork(requestId, pending, () => pending.onStart(payload || {}));
         return;
       }
@@ -1911,6 +1950,7 @@ export class RelayClient {
         if (!requestId || !attachmentId) return;
         const pending = this.pendingCentralDownloads.get(requestId);
         if (!pending) return;
+        this.refreshCentralDownloadTimeout(requestId, pending);
         this.queueCentralDownloadWork(requestId, pending, () => pending.onChunk({
           fileId: attachmentId,
           index: Math.max(0, Math.trunc(Number(payload?.index) || 0)),
@@ -2262,6 +2302,23 @@ export class RelayClient {
     });
   }
 
+  private refreshCentralDownloadTimeout(
+    requestId: string,
+    pending: PendingCentralDownload
+  ): void {
+    clearTimeout(pending.timeout);
+    pending.timeout = setTimeout(() => {
+      if (this.pendingCentralDownloads.get(requestId) !== pending) return;
+      this.pendingCentralDownloads.delete(requestId);
+      pending.reject(new RelayOperationError(
+        'TIMEOUT',
+        'O download do anexo parou de responder.',
+        true
+      ));
+    }, 30_000);
+    pending.timeout.unref?.();
+  }
+
   private waitUntilReady(timeoutMs: number): Promise<void> {
     if (this.ready && this.socket && this.socket.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -2330,6 +2387,22 @@ export class RelayClient {
     for (const [key, pending] of Array.from(this.pendingGroupChunkAcks.entries())) {
       clearTimeout(pending.timeout);
       this.pendingGroupChunkAcks.delete(key);
+      pending.reject(error);
+    }
+  }
+
+  private rejectPendingCentralAcks(error: Error): void {
+    for (const [requestId, pending] of Array.from(this.pendingCentralAcks.entries())) {
+      clearTimeout(pending.timeout);
+      this.pendingCentralAcks.delete(requestId);
+      pending.reject(error);
+    }
+  }
+
+  private rejectPendingCentralDownloads(error: Error): void {
+    for (const [requestId, pending] of Array.from(this.pendingCentralDownloads.entries())) {
+      clearTimeout(pending.timeout);
+      this.pendingCentralDownloads.delete(requestId);
       pending.reject(error);
     }
   }

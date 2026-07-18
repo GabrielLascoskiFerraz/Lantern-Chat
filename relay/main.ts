@@ -4282,6 +4282,17 @@ export class LanternRelay {
         payload: { requestId, attachmentId }
       });
     } catch (error) {
+      logRelay('attachment_download_failed', {
+        requestId,
+        attachmentId,
+        requesterUserId: session.peer.deviceId,
+        startIndex,
+        message: error instanceof Error ? error.message : String(error)
+      }, {
+        level: 'warn',
+        rateKey: `attachment_download_failed:${session.peer.deviceId}:${attachmentId}`,
+        rateLimitMs: 2_000
+      });
       this.sendEnvelope(session.socket, {
         type: 'relay:attachment:error',
         payload: { requestId, message: error instanceof Error ? error.message : String(error) }

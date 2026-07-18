@@ -2357,6 +2357,17 @@ body {
   color: #b4232f;
 }
 
+.attachment-retry-block {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.attachment-retry-error {
+  color: var(--danger);
+}
+
 .message-file-actions {
   display: inline-flex;
   align-items: center;
@@ -4477,7 +4488,9 @@ body {
 .login-eyebrow { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
 .login-mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 5px; border-radius: 12px; background: var(--surface-subtle); }
 .login-mode-tabs .fui-Button { min-width: 0; padding-inline: 8px; }
-.login-address-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
+.login-address-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, 110px); gap: 12px; min-width: 0; }
+.login-address-row > .fui-Field { min-width: 0; }
+.login-address-row .fui-Input { width: 100%; min-width: 0; }
 .login-feedback { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface-subtle); font-size: 13px; line-height: 1.45; }
 .login-feedback.error { border-color:color-mix(in srgb, var(--danger) 25%, transparent); color:var(--danger); background:color-mix(in srgb, var(--danger) 8%, transparent); }
 .login-feedback.success { border-color:color-mix(in srgb, #168b4f 30%, transparent); color:#126d40; background:color-mix(in srgb, #168b4f 9%, transparent); }
@@ -4487,6 +4500,9 @@ body {
 .login-account-hint { color: var(--muted); line-height: 1.45; }
 .login-screen-v2 { grid-template-columns: minmax(210px, 300px) minmax(420px, 560px); justify-content: center; }
 .login-brand-v2 { align-self: center; }
+.login-brand-v2 .login-identity { flex-direction: column; justify-content: center; gap: 12px; text-align: center; }
+.login-brand-v2 .login-app-icon { width: clamp(156px, 17vw, 210px); height: clamp(156px, 17vw, 210px); }
+.login-brand-v2 .login-product strong { font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
 .login-brand-v2 .login-copy { margin-top: clamp(34px, 6vh, 70px); }
 .login-brand-v2 .login-copy h1 { font-family: inherit; font-size: clamp(38px, 4.7vw, 64px); font-weight: 720; line-height: 1.02; }
 .login-benefits { display: grid; gap: 11px; margin-top: 30px; color: var(--muted); font-size: 14px; }
@@ -4572,6 +4588,9 @@ body {
 
   .login-screen { grid-template-columns: 1fr; align-content: start; gap: 26px; padding: 24px; overflow: auto; }
   .login-brand { display: flex; align-items: center; gap: 24px; }
+  .login-brand-v2 { justify-content: center; }
+  .login-brand-v2 .login-app-icon { width: 112px; height: 112px; }
+  .login-brand-v2 .login-product strong { font-size: 20px; }
   .login-copy { margin: 0; }
   .login-brand h1 { font-size: clamp(30px, 7vw, 42px); }
   .login-brand p { margin-bottom: 0; }
@@ -4586,6 +4605,8 @@ body {
   .login-brand { display: block; }
   .login-brand-v2 .login-copy { margin-top: 18px; }
   .login-brand-v2 .login-copy h1 { font-size: clamp(30px, 9vw, 36px); line-height: 1.06; }
+  .login-brand-v2 .login-app-icon { width: 88px; height: 88px; }
+  .login-brand-v2 .login-product strong { font-size: 18px; }
   .login-identity { gap: 12px; }
   .login-app-icon { width: 58px; height: 58px; }
   .login-product strong { font-size: 23px; }

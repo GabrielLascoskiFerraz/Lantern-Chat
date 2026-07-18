@@ -18,6 +18,10 @@ export class AttachmentRecoveryCoordinator {
     return this.tasks.has(key);
   }
 
+  async wait(key: string): Promise<void> {
+    await this.tasks.get(key)?.catch(() => undefined);
+  }
+
   clear(): void {
     this.tasks.clear();
   }

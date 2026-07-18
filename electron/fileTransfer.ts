@@ -23,6 +23,8 @@ interface IncomingTransfer {
   waitingDrain: boolean;
   drainListenerAttached: boolean;
   streamErrored: boolean;
+  streamError: Error | null;
+  closing: boolean;
   writableWaiters: Array<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -36,11 +38,16 @@ export class FileTransferService {
   private attachmentsDir: string;
   private readonly profile: Profile;
   private readonly incoming = new Map<string, IncomingTransfer>();
+  private readonly existingFileSearchDirs = new Set<string>();
 
-  constructor(attachmentsDir: string, profile: Profile) {
+  constructor(attachmentsDir: string, profile: Profile, existingFileSearchDirs: string[] = []) {
     this.attachmentsDir = path.resolve(attachmentsDir);
     this.profile = profile;
     fs.mkdirSync(this.attachmentsDir, { recursive: true });
+    for (const directory of existingFileSearchDirs) {
+      const normalized = (directory || '').trim();
+      if (normalized) this.existingFileSearchDirs.add(path.resolve(normalized));
+    }
   }
 
   getAttachmentsDir(): string {
@@ -50,8 +57,33 @@ export class FileTransferService {
   setAttachmentsDir(nextDir: string): string {
     const resolved = path.resolve(nextDir);
     fs.mkdirSync(resolved, { recursive: true });
+    if (resolved !== this.attachmentsDir) {
+      this.existingFileSearchDirs.add(this.attachmentsDir);
+    }
     this.attachmentsDir = resolved;
     return this.attachmentsDir;
+  }
+
+  async findExistingCompleteFile(
+    fileOffer: FileOfferPayload,
+    additionalPaths: Array<string | null | undefined> = []
+  ): Promise<string | null> {
+    const safeName = sanitizeFileName(fileOffer.filename);
+    const candidates = new Set<string>();
+    for (const candidate of additionalPaths) {
+      if (candidate?.trim()) candidates.add(path.resolve(candidate));
+    }
+    for (const directory of [this.attachmentsDir, ...this.existingFileSearchDirs]) {
+      candidates.add(path.join(directory, `${fileOffer.messageId}_${safeName}`));
+    }
+
+    for (const candidate of candidates) {
+      const stat = await fs.promises.stat(candidate).catch(() => null);
+      if (!stat?.isFile() || stat.size !== fileOffer.size) continue;
+      const digest = await this.hashFileSha256(candidate).catch(() => '');
+      if (digest === fileOffer.sha256) return candidate;
+    }
+    return null;
   }
 
   private getChunkCount(totalBytes: number): number {
@@ -164,13 +196,29 @@ export class FileTransferService {
   ): string {
     const existing = this.incoming.get(fileOffer.fileId);
     if (existing) {
-      if (
+      const sameTransfer =
         existing.messageId === fileOffer.messageId &&
         existing.peerId === peerId &&
-        existing.receivedChunks === 0
-      ) {
+        existing.totalBytes === fileOffer.size &&
+        existing.expectedSha === fileOffer.sha256;
+      const streamIsWritable =
+        !existing.closing &&
+        !existing.streamErrored &&
+        !existing.writeStream.destroyed &&
+        !existing.writeStream.writableEnded &&
+        !existing.writeStream.writableFinished;
+
+      // O Relay pode repetir o frame de início. Nesse caso a transferência em
+      // andamento já é a fonte da verdade e os chunks repetidos são deduplicados
+      // por índice. Nunca reutilize, porém, um stream encerrado ou em erro: isso
+      // fazia todas as tentativas seguintes herdarem o mesmo estado envenenado.
+      if (sameTransfer && streamIsWritable) {
         return existing.finalPath;
       }
+      this.rejectWritableWaiters(
+        existing,
+        new Error('Transferência anterior substituída por uma nova tentativa.')
+      );
       try {
         existing.writeStream.destroy();
       } catch {
@@ -234,13 +282,16 @@ export class FileTransferService {
       waitingDrain: false,
       drainListenerAttached: false,
       streamErrored: false,
+      streamError: null,
+      closing: false,
       writableWaiters: []
     };
-    writeStream.on('error', () => {
+    writeStream.on('error', (error) => {
       transfer.streamErrored = true;
+      transfer.streamError = error;
       this.rejectWritableWaiters(
         transfer,
-        new Error('Falha de escrita durante recebimento de arquivo.')
+        new Error(`Falha de escrita durante recebimento de arquivo: ${error.message}`)
       );
     });
 
@@ -257,6 +308,7 @@ export class FileTransferService {
   } | null> {
     const transfer = this.incoming.get(fileId);
     if (!transfer) return null;
+    transfer.closing = true;
     try {
       await this.waitForWriteDrain(transfer);
       await new Promise<void>((resolve) => {
@@ -269,7 +321,9 @@ export class FileTransferService {
         // O checkpoint abaixo usa apenas os bytes efetivamente presentes no disco.
       }
     }
-    this.incoming.delete(fileId);
+    if (this.incoming.get(fileId) === transfer) {
+      this.incoming.delete(fileId);
+    }
     transfer.pendingChunks.clear();
     transfer.pendingChunkBytes = 0;
     let receivedBytes = 0;
@@ -368,6 +422,12 @@ export class FileTransferService {
     this.failIncomingTransfer(transfer);
   }
 
+  abortAllIncoming(): void {
+    for (const transfer of Array.from(this.incoming.values())) {
+      this.failIncomingTransfer(transfer);
+    }
+  }
+
   private flushQueuedWrites(transfer: IncomingTransfer): void {
     if (transfer.streamErrored || transfer.waitingDrain) {
       return;
@@ -423,7 +483,11 @@ export class FileTransferService {
       throw new Error('Transferência desconhecida');
     }
     if (transfer.streamErrored) {
-      throw new Error('Transferência em estado inválido.');
+      throw new Error(
+        transfer.streamError
+          ? `Falha de escrita no anexo: ${transfer.streamError.message}`
+          : 'Transferência em estado inválido.'
+      );
     }
 
     if (!Number.isInteger(chunk.index) || !Number.isInteger(chunk.total)) {
@@ -489,6 +553,7 @@ export class FileTransferService {
     if (transfer.totalChunks === null || transfer.receivedChunks < transfer.totalChunks) {
       throw new Error('Transferência ainda incompleta');
     }
+    transfer.closing = true;
 
     let streamClosed = true;
     try {
@@ -528,7 +593,9 @@ export class FileTransferService {
       }
     }
 
-    this.incoming.delete(fileId);
+    if (this.incoming.get(fileId) === transfer) {
+      this.incoming.delete(fileId);
+    }
 
     return {
       ok,

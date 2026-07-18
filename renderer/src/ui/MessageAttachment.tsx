@@ -79,6 +79,8 @@ export const MessageAttachment = ({
   const hydrationRequestedRef = useRef(false);
   const [documentPreviewOpen, setDocumentPreviewOpen] = useState(false);
   const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+  const [manualRetrying, setManualRetrying] = useState(false);
+  const [manualRetryError, setManualRetryError] = useState('');
   const isImageFile = isImageAttachmentName(message.fileName);
   const isStickerFile = isStickerAttachmentName(message.fileName);
   const isDocumentFile = !isImageFile && !isStickerFile;
@@ -95,37 +97,75 @@ export const MessageAttachment = ({
 
   useEffect(() => {
     hydrationRequestedRef.current = false;
+    setManualRetrying(false);
+    setManualRetryError('');
   }, [message.messageId]);
+
+  const retryAttachment = async () => {
+    if (manualRetrying) return;
+    setManualRetrying(true);
+    setManualRetryError('');
+    try {
+      await ipcClient.retryAttachment(message.messageId);
+    } catch (error) {
+      const rawMessage = error instanceof Error
+        ? error.message
+        : 'Não foi possível tentar o download novamente.';
+      setManualRetryError(
+        rawMessage.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '')
+      );
+    } finally {
+      setManualRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (message.filePath || !message.fileId || message.status === 'failed') return;
     const sentinel = hydrationSentinelRef.current;
     if (!sentinel) return;
+    let active = true;
+    let visible = typeof IntersectionObserver === 'undefined';
+    let retryTimer: number | null = null;
+
+    const scheduleRetry = () => {
+      if (!active || retryTimer !== null) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        hydrationRequestedRef.current = false;
+        if (visible) requestHydration();
+      }, 2_000);
+    };
 
     const requestHydration = () => {
-      if (hydrationRequestedRef.current) return;
+      if (!active || !visible || hydrationRequestedRef.current) return;
       hydrationRequestedRef.current = true;
       void ipcClient.getMessagesByIds([message.messageId]).then((rows) => {
         if (!rows.some((row) => row.messageId === message.messageId && row.filePath)) {
-          window.setTimeout(() => { hydrationRequestedRef.current = false; }, 2_000);
+          scheduleRetry();
         }
       }).catch(() => {
-        window.setTimeout(() => { hydrationRequestedRef.current = false; }, 2_000);
+        scheduleRetry();
       });
     };
 
     if (typeof IntersectionObserver === 'undefined') {
       requestHydration();
-      return;
+      return () => {
+        active = false;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+      };
     }
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        requestHydration();
-        observer.disconnect();
-      }
+      const entry = entries.find((candidate) => candidate.target === sentinel);
+      visible = Boolean(entry?.isIntersecting);
+      if (visible) requestHydration();
     }, { rootMargin: '240px 0px' });
     observer.observe(sentinel);
-    return () => observer.disconnect();
+    return () => {
+      active = false;
+      observer.disconnect();
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
   }, [message.fileId, message.filePath, message.messageId, message.status]);
 
   return (
@@ -182,8 +222,19 @@ export const MessageAttachment = ({
           </div>
         )
       ) : message.status === 'failed' ? (
-        <div className="inline-status error">
-          <Caption1>{outgoing ? 'Não foi possível enviar este anexo.' : 'Não foi possível recuperar este anexo do Relay.'}</Caption1>
+        <div className="attachment-retry-block">
+          <div className="inline-status error">
+            <Caption1>{outgoing ? 'Não foi possível enviar este anexo.' : 'Não foi possível recuperar este anexo do Relay.'}</Caption1>
+          </div>
+          <Button
+            size="small"
+            appearance="secondary"
+            disabled={manualRetrying}
+            onClick={() => void retryAttachment()}
+          >
+            {manualRetrying ? <><Spinner size="tiny" /> Tentando novamente...</> : 'Tentar novamente'}
+          </Button>
+          {manualRetryError && <Caption1 className="attachment-retry-error">{manualRetryError}</Caption1>}
         </div>
       ) : message.status === 'delivered' || message.status === 'read' ? (
         <div className="inline-status pending"><Spinner size="tiny" /><Caption1>Recuperando anexo do Relay...</Caption1></div>

@@ -111,6 +111,8 @@ const api = {
     ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getMessagesByIds', messageIds),
+  retryAttachment: (messageId: string) =>
+    ipcRenderer.invoke('lantern:retryAttachment', messageId),
   listConversationMedia: (
     conversationId: string,
     kind: 'media' | 'document',

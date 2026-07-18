@@ -144,12 +144,9 @@ export const Shell = () => {
   const [groupDetailsOpenId, setGroupDetailsOpenId] = useState<string | null>(null);
 
   const transferMap = useMemo(() => {
-    const map: Record<string, { transferred: number; total: number }> = {};
+    const map: typeof transfers = {};
     for (const transfer of Object.values(transfers)) {
-      map[transfer.fileId] = {
-        transferred: transfer.transferred,
-        total: transfer.total
-      };
+      map[transfer.fileId] = transfer;
     }
     return map;
   }, [transfers]);

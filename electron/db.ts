@@ -744,6 +744,21 @@ export class DbService {
     return row || null;
   }
 
+  resetGroupAttachmentDownload(fileId: string): void {
+    const cleanFileId = (fileId || '').trim();
+    if (!cleanFileId) return;
+    this.db
+      .prepare(
+        `UPDATE group_attachment_downloads
+         SET status = 'pending', tempPath = NULL, receivedBytes = 0,
+             nextChunkIndex = 0, retryCount = 0, lastError = NULL,
+             lastAttemptAt = NULL, requestId = NULL, receivedAt = NULL,
+             updatedAt = ?
+         WHERE fileId = ?`
+      )
+      .run(Date.now(), cleanFileId);
+  }
+
   getPendingGroupAttachmentDownloads(limit = 100): GroupAttachmentDownload[] {
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
     return this.db

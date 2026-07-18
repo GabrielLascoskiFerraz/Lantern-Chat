@@ -214,8 +214,10 @@ const initialSystemDark = getSystemDark();
 let unsubscribeEvents: (() => void) | null = null;
 let previewRefreshTimer: number | null = null;
 let peerRefreshTimer: number | null = null;
+let groupRefreshTimer: number | null = null;
 let peersUpdateSeq = 0;
 let peerSnapshotSeq = 0;
+let groupSnapshotSeq = 0;
 const typingTimers = new Map<string, number>();
 const transferCleanupTimers = new Map<string, number>();
 
@@ -589,6 +591,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.clearInterval(peerRefreshTimer);
       peerRefreshTimer = null;
     }
+    if (groupRefreshTimer) {
+      window.clearInterval(groupRefreshTimer);
+      groupRefreshTimer = null;
+    }
 
     const scheduleTransferCleanup = (fileId: string): void => {
       clearTransferCleanupTimer(fileId);
@@ -649,6 +655,67 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ...(onlineChanged ? { onlinePeerIds } : {})
         };
       });
+    };
+
+    const refreshGroupsSnapshot = async (): Promise<void> => {
+      const seq = ++groupSnapshotSeq;
+      const groups = [...await ipcClient.getGroups()]
+        .sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+      if (seq !== groupSnapshotSeq) return;
+
+      const visibleGroupConversationIds = new Set(
+        groups.map((group) => `group:${group.groupId}`)
+      );
+      const selectedConversationId = get().selectedConversationId;
+      const shouldCloseSelectedGroup =
+        selectedConversationId.startsWith('group:') &&
+        !visibleGroupConversationIds.has(selectedConversationId);
+
+      // A lista não depende de prévias, membros ou pinos. Mostrá-la assim que
+      // o cache canônico responde evita que uma consulta auxiliar lenta deixe
+      // a navegação aparentemente vazia.
+      set((state) => ({
+        groups,
+        selectedConversationId: shouldCloseSelectedGroup ? '' : state.selectedConversationId,
+        loadingConversationId: shouldCloseSelectedGroup ? null : state.loadingConversationId
+      }));
+
+      if (shouldCloseSelectedGroup) {
+        void ipcClient.setActiveConversation('');
+      }
+
+      const [memberEntries, pinnedEntries, previewMap] = await Promise.all([
+        Promise.all(
+          groups.map(async (group) => [
+            group.groupId,
+            await ipcClient.getGroupMembers(group.groupId).catch(() => [])
+          ] as const)
+        ),
+        Promise.all(
+          groups.map(async (group) => [
+            group.groupId,
+            await ipcClient.getGroupPinnedMessageIds(group.groupId).catch(() => [])
+          ] as const)
+        ),
+        ipcClient.getConversationPreviews([
+          ANNOUNCEMENTS_ID,
+          ...groups.map((group) => `group:${group.groupId}`),
+          ...get().peers.map((peer) => `dm:${peer.deviceId}`)
+        ])
+      ]);
+      if (seq !== groupSnapshotSeq) return;
+
+      set((state) => ({
+        groupMembersById: Object.fromEntries(memberEntries),
+        groupPinnedMessageIdsById: Object.fromEntries(pinnedEntries),
+        conversationPreviewById:
+          mergePreviewMapIfChanged(state.conversationPreviewById, previewMap) ||
+          state.conversationPreviewById
+      }));
+    };
+
+    const scheduleGroupsSnapshotRefresh = (): void => {
+      void refreshGroupsSnapshot().catch(() => undefined);
     };
 
     const refreshSynchronizedConversation = async (conversationId: string): Promise<void> => {
@@ -714,6 +781,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         return;
       }
       if (event.type === 'relay:connection') {
+        if (event.connected) {
+          // O Relay pode ter entregue diretório e grupos durante a leitura
+          // inicial, antes de este listener existir. Releia o cache canônico
+          // sempre que a sessão ficar pronta para fechar essa janela de corrida.
+          void refreshPeersSnapshot();
+          scheduleGroupsSnapshotRefresh();
+        }
         set((state) => {
           if (!state.relaySettings) {
             return {
@@ -797,6 +871,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
 
       if (event.type === 'groups:updated') {
+        const updateSeq = ++groupSnapshotSeq;
         const groups = [...event.groups].sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
         const visibleGroupConversationIds = new Set(groups.map((group) => `group:${group.groupId}`));
         const selectedConversationId = get().selectedConversationId;
@@ -808,11 +883,14 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           ...groups.map((group) => `group:${group.groupId}`),
           ...get().peers.map((peer) => `dm:${peer.deviceId}`)
         ];
+        set((state) => ({
+          groups,
+          selectedConversationId: shouldCloseSelectedGroup ? '' : state.selectedConversationId,
+          loadingConversationId: shouldCloseSelectedGroup ? null : state.loadingConversationId
+        }));
         void ipcClient.getConversationPreviews(ids).then((previewMap) => {
+          if (updateSeq !== groupSnapshotSeq) return;
           set((state) => ({
-            groups,
-            selectedConversationId: shouldCloseSelectedGroup ? '' : state.selectedConversationId,
-            loadingConversationId: shouldCloseSelectedGroup ? null : state.loadingConversationId,
             conversationPreviewById:
               mergePreviewMapIfChanged(state.conversationPreviewById, previewMap) ||
               state.conversationPreviewById
@@ -1215,7 +1293,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
     });
 
+    // Reconciliações pós-listener são deliberadamente repetidas: os snapshots
+    // do Relay podem ter chegado depois da primeira leitura e antes da inscrição
+    // acima. Sem esta segunda leitura, grupos e contatos só surgiam quando outro
+    // evento incidental (por exemplo, uma mensagem no grupo) atualizava a UI.
     void refreshPeersSnapshot();
+    scheduleGroupsSnapshotRefresh();
 
     void ipcClient.getRelaySettings().then((latestRelaySettings) => {
       set((state) => {
@@ -1247,6 +1330,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
     peerRefreshTimer = window.setInterval(() => {
       void refreshPeersSnapshot();
+    }, 10_000);
+
+    groupRefreshTimer = window.setInterval(() => {
+      scheduleGroupsSnapshotRefresh();
     }, 10_000);
 
     // Se o snapshot terminou antes de o listener acima ser registrado, esta

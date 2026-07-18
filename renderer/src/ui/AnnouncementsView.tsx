@@ -56,7 +56,13 @@ interface AnnouncementsViewProps {
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onSendFile: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
-  transferByFileId: Record<string, { transferred: number; total: number; stage?: string; detail?: string | null }>;
+  transferByFileId: Record<string, {
+    transferred: number;
+    total: number;
+    stage?: string;
+    attempt?: number;
+    detail?: string | null;
+  }>;
   onOpenFile: (filePath: string) => Promise<void>;
   onSaveFileAs: (filePath: string, fileName?: string | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
