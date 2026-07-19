@@ -1742,47 +1742,19 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           [message.conversationId]: previewFromMessage(message)
         }
       }));
-    } catch {
-      const pendingMessage: MessageRow = {
-        messageId: `local-pending:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-        conversationId,
-        direction: 'out',
-        senderDeviceId: get().profile?.deviceId || 'local',
-        receiverDeviceId: peerId,
-        type: 'text',
-        bodyText: text,
-        fileId: null,
-        fileName: null,
-        fileSize: null,
-        fileSha256: null,
-        filePath: null,
-        status: 'sent',
-        reaction: null,
-        deletedAt: null,
-        replyToMessageId: replyTo?.messageId || null,
-        replyToSenderDeviceId: replyTo?.senderDeviceId || null,
-        replyToType: replyTo?.type || null,
-        replyToPreviewText: replyTo?.previewText || null,
-        replyToFileName: replyTo?.fileName || null,
-        forwardedFromMessageId: null,
-        editedAt: null,
-        createdAt: Date.now(),
-        localOnly: true
-      };
-
+    } catch (error) {
+      // A mensagem real já existe no processo principal e na outbox com seu
+      // messageId. Uma cópia local impediria retry idempotente e causaria duplicação.
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const message = error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.';
       set((state) => ({
-        messagesByConversation: {
-          ...state.messagesByConversation,
-          [conversationId]: appendUniqueMessage(
-            state.messagesByConversation[conversationId] || [],
-            pendingMessage
-          )
-        },
+        toasts: [...state.toasts, { id, level: 'error', message }],
         conversationPreviewById: {
           ...state.conversationPreviewById,
-          [conversationId]: previewFromMessage(pendingMessage)
+          [conversationId]: text
         }
       }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
   sendGroupText: async (groupId, text, replyTo) => {

@@ -33,10 +33,61 @@ const normalizePort = (value: unknown): number => {
   return Number.isFinite(number) && number > 0 && number <= 65535 ? Math.trunc(number) : 43190;
 };
 
+const relayConnectionMessage = (error: unknown): string => {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const cause = record.cause && typeof record.cause === 'object'
+    ? record.cause as Record<string, unknown>
+    : {};
+  const code = String(cause.code || record.code || '').toUpperCase();
+  const message = String(cause.message || record.message || '').toLowerCase();
+
+  if (record.name === 'AbortError' || code === 'ABORT_ERR' || message.includes('aborted')) {
+    return 'O Relay demorou demais para responder. Verifique se ele está ligado e tente novamente.';
+  }
+  if (
+    code.includes('CERT') ||
+    code.includes('TLS') ||
+    message.includes('certificate') ||
+    message.includes('certificado') ||
+    message.includes('self-signed')
+  ) {
+    return 'Não foi possível validar a conexão segura com o Relay. Verifique o certificado, o endereço e a data do computador.';
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || message.includes('getaddrinfo')) {
+    return 'O endereço do Relay não foi encontrado. Confira o nome ou IP informado.';
+  }
+  if (code === 'ECONNREFUSED') {
+    return 'O endereço respondeu, mas o Relay não está aceitando conexões nessa porta.';
+  }
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return 'Não foi possível alcançar o Relay dentro do tempo esperado. Verifique a rede e tente novamente.';
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'UND_ERR_SOCKET') {
+    return 'A conexão com o Relay foi interrompida. Tente novamente.';
+  }
+  return 'Não foi possível conectar ao Relay. Confirme que ele está ligado e acessível nesta rede.';
+};
+
+const relayHttpErrorMessage = (
+  response: Response,
+  serverMessage: string | undefined,
+  fallback: string
+): string => {
+  if (serverMessage?.trim()) return serverMessage.trim();
+  if (response.status === 404 || response.status === 405) {
+    return 'O endereço respondeu, mas não parece ser um Relay Lantern. Confira o endereço e a porta.';
+  }
+  if (response.status >= 500) {
+    return 'O Relay encontrou um problema temporário ao processar a solicitação. Tente novamente.';
+  }
+  return fallback;
+};
+
 export class AuthService {
   private stored: StoredClientConfig;
   private token: string | null = null;
   private user: AuthenticatedUser | null = null;
+  private connectionError: string | null = null;
 
   constructor(private readonly userDataDir: string) {
     this.stored = this.load();
@@ -48,7 +99,8 @@ export class AuthService {
       authenticated: Boolean(this.token && this.user),
       relay: { ...this.stored.relay },
       endpoint: this.stored.endpoint || null,
-      user: this.user ? { ...this.user } : null
+      user: this.user ? { ...this.user } : null,
+      connectionError: this.connectionError
     };
   }
 
@@ -68,15 +120,32 @@ export class AuthService {
   async restore(): Promise<ClientAuthState> {
     if (!this.token || !this.stored.endpoint) return this.getState();
     try {
-      const response = await fetch(`${this.httpBase(this.stored.endpoint)}/api/client/session`, {
+      const response = await this.fetchRelay(this.stored.endpoint, '/api/client/session', {
         headers: { authorization: `Bearer ${this.token}` }
-      });
-      if (!response.ok) throw new Error('Sessão expirada.');
+      }, 8_000);
+      if (response.status === 401 || response.status === 403) {
+        this.clearSession();
+        return this.getState();
+      }
+      if (!response.ok) {
+        this.connectionError = relayHttpErrorMessage(
+          response,
+          undefined,
+          'O Relay não conseguiu restaurar sua sessão. Tente novamente.'
+        );
+        return this.getState();
+      }
       const body = (await response.json()) as { user?: AuthenticatedUser };
-      if (!body.user) throw new Error('Sessão inválida.');
+      if (!body.user) {
+        this.clearSession();
+        return this.getState();
+      }
       this.user = body.user;
-    } catch {
-      this.clearSession();
+      this.connectionError = null;
+    } catch (error) {
+      this.connectionError = error instanceof Error
+        ? error.message
+        : 'Não foi possível conectar ao Relay.';
     }
     return this.getState();
   }
@@ -89,7 +158,7 @@ export class AuthService {
   }): Promise<ClientAuthState> {
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);
-    const response = await fetch(`${this.httpBase(endpoint)}/api/client/login`, {
+    const response = await this.fetchRelay(endpoint, '/api/client/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -104,13 +173,14 @@ export class AuthService {
       message?: string;
     };
     if (!response.ok || !body.token || !body.user) {
-      throw new Error(body.message || 'Não foi possível entrar.');
+      throw new Error(relayHttpErrorMessage(response, body.message, 'Não foi possível entrar.'));
     }
     this.stored.relay = relay;
     this.stored.endpoint = endpoint;
     this.stored.rememberMe = input.rememberMe !== false;
     this.token = body.token;
     this.user = body.user;
+    this.connectionError = null;
     this.persist();
     return this.getState();
   }
@@ -124,7 +194,7 @@ export class AuthService {
   }): Promise<ClientAuthState> {
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);
-    const response = await fetch(`${this.httpBase(endpoint)}/api/client/register`, {
+    const response = await this.fetchRelay(endpoint, '/api/client/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -135,7 +205,9 @@ export class AuthService {
       })
     });
     const body = (await response.json().catch(() => ({}))) as { message?: string };
-    if (!response.ok) throw new Error(body.message || 'Não foi possível criar a conta.');
+    if (!response.ok) {
+      throw new Error(relayHttpErrorMessage(response, body.message, 'Não foi possível criar a conta.'));
+    }
     return this.login({ relay, username: input.username, password: input.password, rememberMe: true });
   }
 
@@ -218,13 +290,15 @@ export class AuthService {
   async requestPasswordReset(input: { relay: ClientRelayConfig; username: string }): Promise<{ requestToken: string }> {
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);
-    const response = await fetch(`${this.httpBase(endpoint)}/api/client/password-reset/request`, {
+    const response = await this.fetchRelay(endpoint, '/api/client/password-reset/request', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: input.username.trim() })
     });
     const body = (await response.json().catch(() => ({}))) as { requestToken?: string; message?: string };
-    if (!response.ok || !body.requestToken) throw new Error(body.message || 'Não foi possível enviar a solicitação.');
+    if (!response.ok || !body.requestToken) {
+      throw new Error(relayHttpErrorMessage(response, body.message, 'Não foi possível enviar a solicitação.'));
+    }
     this.stored.relay = relay;
     this.stored.endpoint = endpoint;
     this.persist();
@@ -234,21 +308,28 @@ export class AuthService {
   async getPasswordResetStatus(requestToken: string): Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'> {
     if (!this.stored.endpoint) throw new Error('Conexão com o servidor indisponível.');
     const query = encodeURIComponent(requestToken);
-    const response = await fetch(`${this.httpBase(this.stored.endpoint)}/api/client/password-reset/status?token=${query}`);
+    const response = await this.fetchRelay(
+      this.stored.endpoint,
+      `/api/client/password-reset/status?token=${query}`
+    );
     const body = (await response.json().catch(() => ({}))) as { status?: 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'; message?: string };
-    if (!response.ok || !body.status) throw new Error(body.message || 'Não foi possível consultar a solicitação.');
+    if (!response.ok || !body.status) {
+      throw new Error(relayHttpErrorMessage(response, body.message, 'Não foi possível consultar a solicitação.'));
+    }
     return body.status;
   }
 
   async completePasswordReset(input: { username: string; requestToken: string; newPassword: string }): Promise<void> {
     if (!this.stored.endpoint) throw new Error('Conexão com o servidor indisponível.');
-    const response = await fetch(`${this.httpBase(this.stored.endpoint)}/api/client/password-reset/complete`, {
+    const response = await this.fetchRelay(this.stored.endpoint, '/api/client/password-reset/complete', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input)
     });
     const body = (await response.json().catch(() => ({}))) as { message?: string };
-    if (!response.ok) throw new Error(body.message || 'Não foi possível redefinir a senha.');
+    if (!response.ok) {
+      throw new Error(relayHttpErrorMessage(response, body.message, 'Não foi possível redefinir a senha.'));
+    }
   }
 
   async discover(port = 43190): Promise<Array<{ host: string; port: number; secure: boolean }>> {
@@ -332,20 +413,41 @@ export class AuthService {
     return endpoint.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
   }
 
+  private async fetchRelay(
+    endpoint: string,
+    pathname: string,
+    init?: RequestInit,
+    timeoutMs = 12_000
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    timeout.unref?.();
+    try {
+      return await fetch(`${this.httpBase(endpoint)}${pathname}`, {
+        ...init,
+        signal: controller.signal
+      });
+    } catch (error) {
+      throw new Error(relayConnectionMessage(error));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private async authenticatedRequest<T extends Record<string, unknown>>(
     pathname: string,
     method: 'GET' | 'POST' | 'PATCH' | 'PUT',
     body?: Record<string, unknown>
   ): Promise<T> {
     if (!this.token || !this.stored.endpoint) throw new Error('Sessão do Relay indisponível.');
-    const response = await fetch(`${this.httpBase(this.stored.endpoint)}${pathname}`, {
+    const response = await this.fetchRelay(this.stored.endpoint, pathname, {
       method,
       headers: {
         authorization: `Bearer ${this.token}`,
         ...(body ? { 'content-type': 'application/json' } : {})
       },
       body: body ? JSON.stringify(body) : undefined
-    });
+    }, 30_000);
     const payload = (await response.json().catch(() => ({}))) as T & { message?: string };
     if (!response.ok) throw new Error(payload.message || 'O Relay recusou a operação.');
     return payload;
@@ -354,6 +456,7 @@ export class AuthService {
   private clearSession(): void {
     this.token = null;
     this.user = null;
+    this.connectionError = null;
     delete this.stored.encryptedToken;
     this.persist();
   }

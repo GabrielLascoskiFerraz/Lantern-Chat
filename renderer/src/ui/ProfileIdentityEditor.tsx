@@ -10,6 +10,7 @@ import {
   History20Regular,
   Search20Regular
 } from '@fluentui/react-icons';
+import { PlatformEmoji } from './PlatformEmoji';
 import {
   isProfileColor,
   PROFILE_COLOR_OPTIONS,
@@ -216,7 +217,7 @@ export const ProfileIdentityEditor = ({
                 className={selected ? 'selected' : ''}
                 onClick={() => chooseEmoji(option.emoji)}
               >
-                <span aria-hidden="true">{option.emoji}</span>
+                <PlatformEmoji emoji={option.emoji} decorative />
                 {selected && <Checkmark20Regular aria-hidden="true" />}
               </button>
             );

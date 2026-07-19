@@ -17,6 +17,7 @@ import {
   DialogSurface,
   DialogTitle,
   Input,
+  Spinner,
   Text
 } from '@fluentui/react-components';
 import {
@@ -57,6 +58,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ConversationMediaDialog } from './ConversationMediaDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { PlatformEmoji, PlatformEmojiText } from './PlatformEmoji';
 import {
   isImageAttachmentName,
   isStickerAttachmentName,
@@ -211,7 +213,7 @@ const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\
 
 const highlightText = (text: string, query: string, keyPrefix: string): ReactNode[] => {
   if (!query.trim()) {
-    return [text];
+    return [<PlatformEmojiText key={`${keyPrefix}-plain`}>{text}</PlatformEmojiText>];
   }
 
   const safeQuery = escapeRegExp(query.trim());
@@ -222,11 +224,11 @@ const highlightText = (text: string, query: string, keyPrefix: string): ReactNod
     if (piece.toLowerCase() === query.trim().toLowerCase()) {
       return (
         <mark key={`${keyPrefix}-mark-${index}`} className="message-highlight">
-          {piece}
+          <PlatformEmojiText>{piece}</PlatformEmojiText>
         </mark>
       );
     }
-    return <span key={`${keyPrefix}-txt-${index}`}>{piece}</span>;
+    return <PlatformEmojiText key={`${keyPrefix}-txt-${index}`}>{piece}</PlatformEmojiText>;
   });
 };
 
@@ -337,6 +339,8 @@ export const ChatView = ({
   onLoadOlderMessages,
   onEnsureMessagesLoaded
 }: ChatViewProps) => {
+  const [retryingMessageIds, setRetryingMessageIds] = useState<Record<string, boolean>>({});
+  const [retryErrorsByMessageId, setRetryErrorsByMessageId] = useState<Record<string, string>>({});
   const [previewStateByMessageId, setPreviewStateByMessageId] = useState<Record<string, ImagePreviewState>>(() => {
     const seed: Record<string, ImagePreviewState> = {};
     for (const message of messages) {
@@ -1715,6 +1719,23 @@ export const ChatView = ({
               ? `📎 ${message.replyToFileName || message.replyToPreviewText || 'Arquivo'}`
               : message.replyToPreviewText || 'Mensagem indisponível';
 
+          const retryFailedMessage = async () => {
+            if (retryingMessageIds[message.messageId]) return;
+            setRetryingMessageIds((current) => ({ ...current, [message.messageId]: true }));
+            setRetryErrorsByMessageId((current) => ({ ...current, [message.messageId]: '' }));
+            try {
+              await ipcClient.retryMessage(message.messageId);
+            } catch (error) {
+              const raw = error instanceof Error ? error.message : 'Não foi possível tentar novamente.';
+              setRetryErrorsByMessageId((current) => ({
+                ...current,
+                [message.messageId]: raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '')
+              }));
+            } finally {
+              setRetryingMessageIds((current) => ({ ...current, [message.messageId]: false }));
+            }
+          };
+
           return (
             <div key={message.messageId}>
               {startsNewDay && (
@@ -1785,7 +1806,7 @@ export const ChatView = ({
                       }}
                     >
                       <span className="reply-reference-author">{replySenderLabel}</span>
-                      <span className="reply-reference-preview">{replyPreview}</span>
+                      <span className="reply-reference-preview"><PlatformEmojiText>{replyPreview}</PlatformEmojiText></span>
                     </button>
                   )}
                   {isDeleted ? (
@@ -1826,6 +1847,21 @@ export const ChatView = ({
                     </span>
                     {outgoing && <span>{statusLabel(message.status)}</span>}
                   </div>
+                  {outgoing && !isFile && message.status === 'failed' && (
+                    <div className="message-send-retry">
+                      <Button
+                        size="small"
+                        appearance="secondary"
+                        disabled={Boolean(retryingMessageIds[message.messageId])}
+                        onClick={() => void retryFailedMessage()}
+                      >
+                        {retryingMessageIds[message.messageId] ? <><Spinner size="tiny" /> Tentando novamente...</> : 'Tentar novamente'}
+                      </Button>
+                      {retryErrorsByMessageId[message.messageId] && (
+                        <Caption1>{retryErrorsByMessageId[message.messageId]}</Caption1>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {canShowActions && (
@@ -1931,7 +1967,7 @@ export const ChatView = ({
                               setReactionPickerMessageId(null);
                             }}
                           >
-                            {reaction}
+                            <PlatformEmoji emoji={reaction} decorative />
                           </button>
                         ))}
                       </div>
@@ -1965,7 +2001,7 @@ export const ChatView = ({
                               );
                             }}
                           >
-                            <span>{reaction}</span>
+                            <PlatformEmoji emoji={reaction} decorative />
                             <span>{summary.counts[reaction]}</span>
                           </button>
                         ))}
@@ -2117,7 +2153,7 @@ export const ChatView = ({
                     <div key={`${item.deviceId}-${item.reaction}`} className="announcement-details-row">
                       <Avatar emoji={item.avatarEmoji} bg={item.avatarBg} size={28} />
                       <span>{item.displayName}</span>
-                      <strong>{item.reaction}</strong>
+                      <strong><PlatformEmoji emoji={item.reaction} /></strong>
                     </div>
                   ))}
                 </div>

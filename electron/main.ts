@@ -46,6 +46,7 @@ import {
 import { AttachmentRecoveryCoordinator } from './attachmentRecoveryCoordinator';
 import { prepareLanternUserDataPath } from './userDataPath';
 import { UpdateService } from './updateService';
+import { RELAY_ACCEPTED_MESSAGE_STATUS } from './messageStatus';
 
 class LanternApp {
   private mainWindow: BrowserWindow | null = null;
@@ -628,6 +629,7 @@ class LanternApp {
       getMessages: (conversationId, limit, before) =>
         this.getMessagesAndRecoverMissingAttachments(conversationId, limit, before),
       getMessagesByIds: (messageIds) => this.getMessagesByIdsAndRecoverAttachments(messageIds),
+      retryMessage: (messageId) => this.retryMessage(messageId),
       retryAttachment: (messageId) => this.retryAttachment(messageId),
       listConversationMedia: (conversationId, kind, cursor, limit) => {
         if (!this.relay?.isConnected()) throw new Error('Conecte ao Relay para consultar mídias e arquivos.');
@@ -1395,6 +1397,73 @@ class LanternApp {
     this.groupFileDownloadCompletionByFileId.delete(fileId);
   }
 
+  private async retryMessage(messageId: string): Promise<DbMessage> {
+    const id = (messageId || '').trim();
+    const message = this.db.getMessageById(id);
+    if (!message || message.direction !== 'out') {
+      throw new Error('Mensagem enviada não encontrada.');
+    }
+    if (message.status !== 'failed') return message;
+
+    const groupId = this.groupIdFromConversationId(message.conversationId);
+    if (!groupId) return this.messageService.retryFailedMessage(id);
+
+    const group = this.db.getGroupById(groupId);
+    if (!group || group.missingOnRelay) throw new Error('Grupo não encontrado no Relay.');
+    if (!this.relay?.isConnected()) throw new Error('Relay offline. Tente novamente quando a conexão voltar.');
+    const replyTo = this.sanitizeGroupReply(
+      message.replyToMessageId && message.replyToSenderDeviceId && message.replyToType
+        ? {
+            messageId: message.replyToMessageId,
+            senderDeviceId: message.replyToSenderDeviceId,
+            type: message.replyToType,
+            previewText: message.replyToPreviewText,
+            fileName: message.replyToFileName
+          }
+        : null
+    );
+
+    this.db.updateMessageStatus(id, 'sent');
+    const pending = this.db.getMessageById(id) || { ...message, status: 'sent' as const };
+    this.emitEvent({ type: 'message:updated', message: pending });
+    try {
+      if (message.type === 'file') {
+        if (!message.fileId || !message.filePath || !fs.existsSync(message.filePath)) {
+          throw new Error('O arquivo local original não está mais disponível para reenvio.');
+        }
+        const { offer } = await this.fileTransfer.createOffer(
+          group.groupId,
+          message.filePath,
+          message.messageId,
+          message.fileId,
+          message.fileName || undefined
+        );
+        await this.uploadGroupFileToRelay(group, pending, offer, replyTo);
+      } else {
+        await this.relay.sendGroupAction('sendText', {
+          groupId: group.groupId,
+          messageId: message.messageId,
+          text: message.bodyText || '',
+          replyTo,
+          createdAt: message.createdAt
+        });
+      }
+      this.db.updateMessageStatus(id, RELAY_ACCEPTED_MESSAGE_STATUS);
+      const delivered = this.db.getMessageById(id) || {
+        ...message,
+        status: RELAY_ACCEPTED_MESSAGE_STATUS
+      };
+      this.emitEvent({ type: 'message:updated', message: delivered });
+      return delivered;
+    } catch (error) {
+      this.db.updateMessageStatus(id, 'failed');
+      const failed = this.db.getMessageById(id) || { ...message, status: 'failed' as const };
+      this.emitEvent({ type: 'message:updated', message: failed });
+      if (this.isGroupMissingOnRelayError(error)) this.markGroupMissingOnRelay(group.groupId);
+      throw error;
+    }
+  }
+
   private async retryAttachment(messageId: string): Promise<DbMessage> {
     const message = this.db.getMessageById((messageId || '').trim());
     if (!message || message.type !== 'file' || !message.fileId) {
@@ -1676,9 +1745,9 @@ class LanternApp {
       await this.relay.sendFrame(frame);
       if (persistent) {
         this.db.completeOutboundFrame(frame.messageId);
-        // O ACK do Relay confirma persistência canônica. "delivered" é reservado
-        // ao chat:ack emitido pelo destinatário.
-        this.db.updateMessageStatus(frame.messageId, 'sent');
+        // O ACK do Relay confirma que a operação já foi persistida canonicamente.
+        // A confirmação do destinatário é usada apenas para promover a "read".
+        this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
         const updated = this.db.getMessageById(frame.messageId);
         if (updated) this.emitEvent({ type: 'message:updated', message: updated });
       }
@@ -1716,7 +1785,7 @@ class LanternApp {
         try {
           await this.relay.sendFrame(frame);
           this.db.completeOutboundFrame(frame.messageId);
-          this.db.updateMessageStatus(frame.messageId, 'sent');
+          this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
           const updated = this.db.getMessageById(frame.messageId);
           if (updated) this.emitEvent({ type: 'message:updated', message: updated });
         } catch (error) {
@@ -3168,6 +3237,9 @@ class LanternApp {
         editedAt: null, serverSeq: frame.serverSeq ?? null, createdAt: frame.createdAt
       };
       const inserted = this.db.saveMessage(row);
+      // Se o frame voltou pela sincronização canônica, ele necessariamente já
+      // foi aceito pelo Relay, inclusive quando a linha local já existia.
+      this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
       this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: this.db.getMessageById(frame.messageId) || row });
       return;
@@ -3192,6 +3264,7 @@ class LanternApp {
         editedAt: null, serverSeq: frame.serverSeq ?? null, createdAt: frame.createdAt
       };
       const inserted = this.db.saveMessage(row);
+      this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
       this.db.updateMessageServerSeq(frame.messageId, frame.serverSeq);
       const stored = this.db.getMessageById(frame.messageId) || row;
       this.emitEvent({ type: inserted ? 'message:received' : 'message:updated', message: stored });
@@ -5212,7 +5285,7 @@ class LanternApp {
             fileSize: null,
             fileSha256: null,
             filePath: null,
-            status: 'sent',
+            status: RELAY_ACCEPTED_MESSAGE_STATUS,
             reaction: null,
             deletedAt: null,
             replyToMessageId: replyTo?.messageId || null,
@@ -5240,6 +5313,11 @@ class LanternApp {
             }
           }
         }
+        // A presença no snapshot do Relay é uma confirmação de persistência,
+        // não depende de nenhum outro usuário abrir os anúncios.
+        this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
+        const accepted = this.db.getMessageById(frame.messageId);
+        if (accepted) this.emitEvent({ type: 'message:updated', message: accepted });
         continue;
       }
       await this.handleIncomingFrame(frame, 'sync');

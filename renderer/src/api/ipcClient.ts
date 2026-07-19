@@ -55,6 +55,7 @@ export interface ClientAuthState {
   relay: ClientRelayConfig;
   endpoint: string | null;
   user: AuthenticatedUser | null;
+  connectionError: string | null;
 }
 
 export interface GroupInfo {
@@ -382,6 +383,7 @@ export interface LanternApi {
   resyncConversation: (conversationId: string) => Promise<void>;
   getMessages: (conversationId: string, limit: number, before?: number) => Promise<MessageRow[]>;
   getMessagesByIds: (messageIds: string[]) => Promise<MessageRow[]>;
+  retryMessage: (messageId: string) => Promise<MessageRow>;
   retryAttachment: (messageId: string) => Promise<MessageRow>;
   listConversationMedia: (
     conversationId: string,
@@ -542,6 +544,7 @@ export const ipcClient = {
   getMessages: (conversationId: string, limit: number, before?: number) =>
     window.lantern.getMessages(conversationId, limit, before),
   getMessagesByIds: (messageIds: string[]) => window.lantern.getMessagesByIds(messageIds),
+  retryMessage: (messageId: string) => window.lantern.retryMessage(messageId),
   retryAttachment: (messageId: string) => window.lantern.retryAttachment(messageId),
   listConversationMedia: (
     conversationId: string,

@@ -1,3 +1,5 @@
+import { PlatformEmoji } from './PlatformEmoji';
+
 interface AvatarProps {
   emoji: string;
   bg: string;
@@ -23,7 +25,7 @@ export const Avatar = ({ emoji, bg, size = 36 }: AvatarProps) => (
         lineHeight: 1
       }}
     >
-      {emoji}
+      <PlatformEmoji emoji={emoji} decorative size="1em" />
     </span>
   </div>
 );

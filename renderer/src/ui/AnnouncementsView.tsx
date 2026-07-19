@@ -8,6 +8,7 @@ import {
   DialogContent,
   DialogSurface,
   DialogTitle,
+  Spinner,
   Text
 } from '@fluentui/react-components';
 import { ArrowReply20Regular } from '@fluentui/react-icons';
@@ -37,6 +38,7 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { PlatformEmoji, PlatformEmojiText } from './PlatformEmoji';
 import {
   isImageAttachmentName,
   isStickerAttachmentName,
@@ -92,7 +94,8 @@ const renderMessageText = (text: string): ReactNode[] => {
     const raw = match[0];
     const index = match.index;
     if (index > lastIndex) {
-      parts.push(text.slice(lastIndex, index));
+      const fragment = text.slice(lastIndex, index);
+      parts.push(<PlatformEmojiText key={`text-${lastIndex}`}>{fragment}</PlatformEmojiText>);
     }
     const href = raw.startsWith('http://') || raw.startsWith('https://') ? raw : `https://${raw}`;
     parts.push(
@@ -105,7 +108,7 @@ const renderMessageText = (text: string): ReactNode[] => {
           void ipcClient.openExternalUrl(href);
         }}
       >
-        {raw}
+        <PlatformEmojiText>{raw}</PlatformEmojiText>
       </a>
     );
     lastIndex = index + raw.length;
@@ -113,7 +116,7 @@ const renderMessageText = (text: string): ReactNode[] => {
   }
 
   if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
+    parts.push(<PlatformEmojiText key={`text-${lastIndex}`}>{text.slice(lastIndex)}</PlatformEmojiText>);
   }
 
   return parts;
@@ -183,6 +186,8 @@ export const AnnouncementsView = ({
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const [filePreviewByMessageId, setFilePreviewByMessageId] = useState<Record<string, string>>({});
+  const [retryingMessageIds, setRetryingMessageIds] = useState<Record<string, boolean>>({});
+  const [retryErrorsByMessageId, setRetryErrorsByMessageId] = useState<Record<string, string>>({});
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -579,7 +584,7 @@ export const AnnouncementsView = ({
                           }}
                         >
                           <span className="reply-reference-author">{replySenderLabel}</span>
-                          <span className="reply-reference-preview">{replyPreview}</span>
+                          <span className="reply-reference-preview"><PlatformEmojiText>{replyPreview}</PlatformEmojiText></span>
                         </button>
                       )}
                       <div className="announcement-meta">
@@ -604,9 +609,14 @@ export const AnnouncementsView = ({
                       )}
                       <div className="bubble-meta">
                         <span className="bubble-time">
-                          <Checkmark20Regular />
+                          {outgoing && (message.status === 'sent' || message.status === null)
+                            ? <Clock20Regular />
+                            : outgoing && message.status === 'failed'
+                              ? <Dismiss20Regular />
+                              : <Checkmark20Regular />}
                           <span>{formatTime(message.createdAt)}</span>
                         </span>
+                        {outgoing && <span>{message.status === 'failed' ? 'Não enviada' : message.status === 'sent' || message.status === null ? 'Pendente' : 'Entregue'}</span>}
                         {message.editedAt && <span className="message-edited-label">editada</span>}
                         {SHOW_ANNOUNCEMENT_READ_BUTTON && (
                           <button
@@ -618,6 +628,36 @@ export const AnnouncementsView = ({
                           </button>
                         )}
                       </div>
+                      {outgoing && !isFile && message.status === 'failed' && (
+                        <div className="message-send-retry">
+                          <Button
+                            size="small"
+                            appearance="secondary"
+                            disabled={Boolean(retryingMessageIds[message.messageId])}
+                            onClick={() => {
+                              if (retryingMessageIds[message.messageId]) return;
+                              setRetryingMessageIds((current) => ({ ...current, [message.messageId]: true }));
+                              setRetryErrorsByMessageId((current) => ({ ...current, [message.messageId]: '' }));
+                              void ipcClient.retryMessage(message.messageId).catch((error) => {
+                                const raw = error instanceof Error ? error.message : 'Não foi possível tentar novamente.';
+                                setRetryErrorsByMessageId((current) => ({
+                                  ...current,
+                                  [message.messageId]: raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '')
+                                }));
+                              }).finally(() => {
+                                setRetryingMessageIds((current) => ({ ...current, [message.messageId]: false }));
+                              });
+                            }}
+                          >
+                            {retryingMessageIds[message.messageId]
+                              ? <><Spinner size="tiny" /> Tentando novamente...</>
+                              : 'Tentar novamente'}
+                          </Button>
+                          {retryErrorsByMessageId[message.messageId] && (
+                            <Caption1>{retryErrorsByMessageId[message.messageId]}</Caption1>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -692,7 +732,7 @@ export const AnnouncementsView = ({
                             setReactionPickerMessageId(null);
                           }}
                         >
-                          {reaction}
+                          <PlatformEmoji emoji={reaction} decorative />
                         </button>
                       ))}
                     </div>
@@ -720,7 +760,7 @@ export const AnnouncementsView = ({
                           title="Ver quem reagiu"
                           aria-label={`Ver quem reagiu com ${reaction}`}
                         >
-                          <span>{reaction}</span>
+                          <PlatformEmoji emoji={reaction} decorative />
                           <span>{summary.counts[reaction]}</span>
                         </button>
                       ))}
@@ -907,7 +947,7 @@ export const AnnouncementsView = ({
                     <div key={`${item.deviceId}-${item.reaction}`} className="announcement-details-row">
                       <Avatar emoji={item.avatarEmoji} bg={item.avatarBg} size={28} />
                       <span>{item.displayName}</span>
-                      <strong>{item.reaction}</strong>
+                      <strong><PlatformEmoji emoji={item.reaction} /></strong>
                     </div>
                   ))}
                   {detailsDialog?.readDetails.map((item) => (

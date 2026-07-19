@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Checkbox,
@@ -14,18 +14,23 @@ import {
   Spinner,
   Switch
 } from '@fluentui/react-components';
+import {
+  ArrowClockwise20Regular,
+  CheckmarkCircle20Regular,
+  ErrorCircle20Regular,
+  Info20Regular,
+  Search20Regular,
+  Warning20Regular
+} from '@fluentui/react-icons';
 import { ClientLocale, ClientRelayConfig, RelayConnectionMode, ipcClient } from '../api/ipcClient';
 import { localeLabels, translate } from '../i18n';
 import { useLanternStore } from '../state/store';
 import appIcon from '../../../assets/icon.png';
-
-const readableError = (error: unknown, fallback: string): string => {
-  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback;
-  return message
-    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
-    .replace(/^Error:\s*/i, '')
-    .trim() || fallback;
-};
+import {
+  describeLoginError,
+  LoginFeedbackState,
+  readableLoginError
+} from './loginErrorFeedback';
 
 export function LoginView() {
   const authState = useLanternStore((state) => state.authState);
@@ -45,8 +50,12 @@ export function LoginView() {
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [discovering, setDiscovering] = useState(false);
-  const [feedback, setFeedback] = useState('');
-  const [feedbackTone, setFeedbackTone] = useState<'info' | 'success' | 'warning' | 'error'>('info');
+  const [feedback, setFeedback] = useState<LoginFeedbackState | null>(() =>
+    authState?.connectionError
+      ? describeLoginError(new Error(authState.connectionError), authState.relay.mode, false)
+      : null
+  );
+  const [showConnectionValidation, setShowConnectionValidation] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
   const [resetUsername, setResetUsername] = useState('');
   const [resetToken, setResetToken] = useState('');
@@ -55,6 +64,7 @@ export function LoginView() {
   const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
   const [resetFeedback, setResetFeedback] = useState('');
   const [resetBusy, setResetBusy] = useState(false);
+  const connectionRef = useRef<HTMLElement | null>(null);
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(locale, key), [locale]);
 
   const changeLocale = (next: ClientLocale) => {
@@ -63,24 +73,48 @@ export function LoginView() {
   };
 
   const discover = async () => {
+    const portNumber = Number(port);
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      setShowConnectionValidation(true);
+      setFeedback({
+        title: 'Porta inválida',
+        message: 'Informe uma porta entre 1 e 65535.',
+        tone: 'warning',
+        action: 'review-connection'
+      });
+      return;
+    }
     setDiscovering(true);
-    setFeedback('');
-    setFeedbackTone('info');
+    setFeedback(null);
     try {
-      const relays = await ipcClient.discoverRelays(Number(port) || 43190);
+      const relays = await ipcClient.discoverRelays(portNumber);
       const relay = relays[0];
       if (!relay) {
-        setFeedbackTone('warning');
-        return setFeedback(t('noRelay'));
+        setFeedback({
+          title: 'Nenhum Relay encontrado',
+          message: 'Confirme que o Relay está aberto neste computador ou na mesma rede. Verifique também o firewall e tente novamente.',
+          tone: 'warning',
+          action: 'discover'
+        });
+        return;
       }
       setHost(relay.host);
       setPort(String(relay.port));
       setSecure(relay.secure);
-      setFeedbackTone('success');
-      setFeedback(`${t('found')}: ${relay.host}:${relay.port}`);
+      setShowConnectionValidation(false);
+      setFeedback({
+        title: t('found'),
+        message: `${relay.secure ? 'Conexão segura' : 'Conexão local'} em ${relay.host}:${relay.port}. Você já pode entrar.`,
+        tone: 'success',
+        action: null
+      });
     } catch (error) {
-      setFeedbackTone('error');
-      setFeedback(readableError(error, 'Não foi possível procurar o Relay.'));
+      setFeedback({
+        title: 'Falha ao procurar o Relay',
+        message: readableLoginError(error, 'Não foi possível procurar o Relay nesta rede.'),
+        tone: 'error',
+        action: 'discover'
+      });
     } finally {
       setDiscovering(false);
     }
@@ -92,6 +126,32 @@ export function LoginView() {
     port: Number(port) || 43190,
     secure: mode === 'external-manual' ? true : secure
   });
+
+  const connectionErrors = useMemo(() => {
+    const portNumber = Number(port);
+    const portError = !Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535
+      ? 'Informe uma porta entre 1 e 65535.'
+      : '';
+    let hostError = '';
+    if (mode !== 'local-auto') {
+      if (!host.trim()) hostError = 'Informe o endereço do Relay.';
+      else if (/^(?:ws|wss|http|https):\/\//iu.test(host.trim())) {
+        hostError = 'Informe somente o nome ou IP, sem ws:// ou https://.';
+      } else if (/[/?#]/u.test(host.trim())) {
+        hostError = 'O endereço não deve conter caminho, parâmetros ou barras.';
+      }
+    }
+    return { hostError, portError };
+  }, [host, mode, port]);
+
+  const reviewConnection = () => {
+    setShowConnectionValidation(true);
+    connectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.requestAnimationFrame(() => {
+      const selector = connectionErrors.hostError ? 'input:not([inputmode="numeric"])' : 'input[inputmode="numeric"]';
+      connectionRef.current?.querySelector<HTMLInputElement>(selector)?.focus();
+    });
+  };
 
   const checkResetStatus = async () => {
     if (!resetToken) return;
@@ -108,7 +168,7 @@ export function LoginView() {
         setResetFeedback('A solicitação expirou. Envie uma nova solicitação.');
       }
     } catch (error) {
-      setResetFeedback(readableError(error, 'Não foi possível consultar a solicitação.'));
+      setResetFeedback(readableLoginError(error, 'Não foi possível consultar a solicitação.'));
     }
   };
 
@@ -131,7 +191,7 @@ export function LoginView() {
       setResetStatus('pending');
       setResetFeedback('Solicitação enviada. Aguarde a aprovação do administrador.');
     } catch (error) {
-      setResetFeedback(readableError(error, 'Não foi possível enviar a solicitação.'));
+      setResetFeedback(readableLoginError(error, 'Não foi possível enviar a solicitação.'));
     } finally {
       setResetBusy(false);
     }
@@ -149,20 +209,33 @@ export function LoginView() {
       });
       setForgotOpen(false);
       setPassword('');
-      setFeedbackTone('success');
-      setFeedback('Senha redefinida. Entre usando a nova senha.');
+      setFeedback({
+        title: 'Senha redefinida',
+        message: 'Entre usando a nova senha.',
+        tone: 'success',
+        action: null
+      });
     } catch (error) {
-      setResetFeedback(readableError(error, 'Não foi possível redefinir a senha.'));
+      setResetFeedback(readableLoginError(error, 'Não foi possível redefinir a senha.'));
     } finally {
       setResetBusy(false);
     }
   };
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const attemptAuthentication = async () => {
+    if (connectionErrors.hostError || connectionErrors.portError) {
+      setShowConnectionValidation(true);
+      setFeedback({
+        title: 'Revise a conexão',
+        message: connectionErrors.hostError || connectionErrors.portError,
+        tone: 'warning',
+        action: 'review-connection'
+      });
+      reviewConnection();
+      return;
+    }
     setBusy(true);
-    setFeedback('');
-    setFeedbackTone('info');
+    setFeedback(null);
     const relay = currentRelay();
     try {
       if (creating) {
@@ -171,16 +244,28 @@ export function LoginView() {
         await login({ relay, username, password, rememberMe });
       }
     } catch (error) {
-      setFeedbackTone('error');
-      setFeedback(readableError(error, 'Falha ao entrar.'));
+      setFeedback(describeLoginError(error, mode, creating));
     } finally {
       setBusy(false);
     }
   };
 
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void attemptAuthentication();
+  };
+
   const connectionLabel = mode === 'local-auto'
     ? t('localAuto')
     : `${secure || mode === 'external-manual' ? 'wss' : 'ws'}://${host || 'relay'}:${port}`;
+
+  const FeedbackIcon = feedback?.tone === 'error'
+    ? ErrorCircle20Regular
+    : feedback?.tone === 'warning'
+      ? Warning20Regular
+      : feedback?.tone === 'success'
+        ? CheckmarkCircle20Regular
+        : Info20Regular;
 
   return <main className="login-screen login-screen-v2">
     <section className="login-brand login-brand-v2">
@@ -199,8 +284,8 @@ export function LoginView() {
       </header>
 
       <div className="login-account-tabs" role="tablist" aria-label="Acesso">
-        <button type="button" className={!creating ? 'active' : ''} onClick={() => { setCreating(false); setFeedback(''); setFeedbackTone('info'); }}>Entrar</button>
-        <button type="button" className={creating ? 'active' : ''} onClick={() => { setCreating(true); setFeedback(''); setFeedbackTone('info'); }}>Criar conta</button>
+        <button type="button" className={!creating ? 'active' : ''} onClick={() => { setCreating(false); setFeedback(null); }}>Entrar</button>
+        <button type="button" className={creating ? 'active' : ''} onClick={() => { setCreating(true); setFeedback(null); }}>Criar conta</button>
       </div>
 
       <div className="login-fields">
@@ -212,12 +297,26 @@ export function LoginView() {
         </Field>
       </div>
 
-      <section className="login-connection" aria-label="Conexão com o Relay">
+      <section
+        ref={connectionRef}
+        className={`login-connection ${showConnectionValidation && (connectionErrors.hostError || connectionErrors.portError) ? 'invalid' : ''}`}
+        aria-label="Conexão com o Relay"
+      >
         <div className="login-connection-header"><span>Conexão com o Relay</span><small>{connectionLabel}</small></div>
         <div className="login-connection-body">
           <div className="login-mode-tabs">
             {(['local-auto', 'local-manual', 'external-manual'] as RelayConnectionMode[]).map((value) =>
-              <Button key={value} type="button" appearance={mode === value ? 'primary' : 'subtle'} onClick={() => setMode(value)}>
+              <Button
+                key={value}
+                type="button"
+                appearance={mode === value ? 'primary' : 'subtle'}
+                onClick={() => {
+                  setMode(value);
+                  setFeedback(null);
+                  setShowConnectionValidation(false);
+                  if (value === 'local-auto' && connectionErrors.portError) setPort('43190');
+                }}
+              >
                 {t(value === 'local-auto' ? 'localAuto' : value === 'local-manual' ? 'localManual' : 'external')}
               </Button>)}
           </div>
@@ -225,8 +324,38 @@ export function LoginView() {
             {discovering ? <><Spinner size="tiny" /> {t('searching')}</> : t('discover')}
           </Button>}
           {mode !== 'local-auto' && <div className="login-address-row">
-            <Field label={t('host')} required><Input value={host} onChange={(_, d) => setHost(d.value)} placeholder="relay.exemplo.com" /></Field>
-            <Field label={t('port')} required><Input value={port} onChange={(_, d) => setPort(d.value)} inputMode="numeric" /></Field>
+            <Field
+              label={t('host')}
+              required
+              validationState={showConnectionValidation && connectionErrors.hostError ? 'error' : 'none'}
+              validationMessage={showConnectionValidation ? connectionErrors.hostError : ''}
+            >
+              <Input
+                value={host}
+                onChange={(_, d) => {
+                  setHost(d.value);
+                  setShowConnectionValidation(false);
+                  if (feedback?.action === 'review-connection') setFeedback(null);
+                }}
+                placeholder="relay.exemplo.com"
+              />
+            </Field>
+            <Field
+              label={t('port')}
+              required
+              validationState={showConnectionValidation && connectionErrors.portError ? 'error' : 'none'}
+              validationMessage={showConnectionValidation ? connectionErrors.portError : ''}
+            >
+              <Input
+                value={port}
+                onChange={(_, d) => {
+                  setPort(d.value.replace(/[^0-9]/gu, ''));
+                  setShowConnectionValidation(false);
+                  if (feedback?.action === 'review-connection') setFeedback(null);
+                }}
+                inputMode="numeric"
+              />
+            </Field>
           </div>}
           {mode === 'local-manual' && <Switch checked={secure} onChange={(_, d) => setSecure(d.checked)} label={t('secure')} />}
         </div>
@@ -254,8 +383,56 @@ export function LoginView() {
       </div>}
 
       {creating && <small className="login-account-hint">{t('accountHint')}</small>}
-      {feedback && <div className={`login-feedback ${feedbackTone}`} role={feedbackTone === 'error' ? 'alert' : 'status'} aria-live="polite">{feedback}</div>}
-      <Button className="login-submit" type="submit" appearance="primary" size="large" disabled={busy || !username.trim() || (creating && (!displayName.trim() || password.length < 10))}>
+      {feedback && (
+        <div
+          className={`login-feedback ${feedback.tone}`}
+          role={feedback.tone === 'error' ? 'alert' : 'status'}
+          aria-live="polite"
+        >
+          <FeedbackIcon className="login-feedback-icon" aria-hidden="true" />
+          <div className="login-feedback-content">
+            <strong>{feedback.title}</strong>
+            <span>{feedback.message}</span>
+            {feedback.action && (
+              <div className="login-feedback-actions">
+                {feedback.action === 'discover' ? (
+                  <Button
+                    type="button"
+                    appearance="secondary"
+                    size="small"
+                    icon={<Search20Regular />}
+                    disabled={discovering || busy}
+                    onClick={() => void discover()}
+                  >
+                    Procurar novamente
+                  </Button>
+                ) : feedback.action === 'review-connection' ? (
+                  <Button
+                    type="button"
+                    appearance="secondary"
+                    size="small"
+                    onClick={reviewConnection}
+                  >
+                    Revisar conexão
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    appearance="secondary"
+                    size="small"
+                    icon={<ArrowClockwise20Regular />}
+                    disabled={busy}
+                    onClick={() => void attemptAuthentication()}
+                  >
+                    Tentar novamente
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      <Button className="login-submit" type="submit" appearance="primary" size="large" disabled={busy || discovering || !username.trim() || (creating && (!displayName.trim() || password.length < 10))}>
         {busy ? <><Spinner size="tiny" /> {t('entering')}</> : t(creating ? 'createAccount' : 'enter')}
       </Button>
       <p className="login-privacy">Ao continuar, você se conecta ao servidor selecionado.</p>

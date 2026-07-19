@@ -60,7 +60,10 @@
     "rebuild:native": "electron-builder install-app-deps"
   },
   "pkg": {
-    "assets": ["dist-renderer/**/*", "assets/**/*"]
+    "assets": [
+      "dist-renderer/**/*",
+      "assets/**/*"
+    ]
   },
   "dependencies": {
     "@fluentui/react-components": "^9.62.0",
@@ -76,6 +79,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",
+    "@lobehub/fluent-emoji-3d": "^1.1.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.13.1",
     "@types/react": "^18.3.18",

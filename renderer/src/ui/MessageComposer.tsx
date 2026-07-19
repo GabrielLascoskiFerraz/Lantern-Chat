@@ -1,4 +1,4 @@
-import { ClipboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ClipboardEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Input,
@@ -30,6 +30,7 @@ import {
   VehicleCar20Regular
 } from '@fluentui/react-icons';
 import { ipcClient, MessageReplyReference, StickerCatalogItem } from '../api/ipcClient';
+import { PlatformEmoji, PlatformEmojiText } from './PlatformEmoji';
 
 interface MessageComposerProps {
   disabled?: boolean;
@@ -591,6 +592,7 @@ export const MessageComposer = ({
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
   const stickerPickerRef = useRef<HTMLDivElement | null>(null);
   const composerRootRef = useRef<HTMLDivElement | null>(null);
+  const composerMirrorRef = useRef<HTMLDivElement | null>(null);
   const typingStateRef = useRef(false);
   const typingTimeoutRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1413,6 +1415,40 @@ export const MessageComposer = ({
     return textareaRef.current;
   };
 
+  const syncComposerMirror = useCallback((): void => {
+    const textarea = textareaRef.current;
+    const mirror = composerMirrorRef.current;
+    if (!textarea || !mirror) return;
+
+    const styles = window.getComputedStyle(textarea);
+    mirror.style.width = `${textarea.clientWidth}px`;
+    mirror.style.minHeight = `${textarea.clientHeight}px`;
+    mirror.style.paddingTop = styles.paddingTop;
+    mirror.style.paddingRight = styles.paddingRight;
+    mirror.style.paddingBottom = styles.paddingBottom;
+    mirror.style.paddingLeft = styles.paddingLeft;
+    mirror.style.fontFamily = styles.fontFamily;
+    mirror.style.fontSize = styles.fontSize;
+    mirror.style.fontWeight = styles.fontWeight;
+    mirror.style.fontStyle = styles.fontStyle;
+    mirror.style.lineHeight = styles.lineHeight;
+    mirror.style.letterSpacing = styles.letterSpacing;
+    mirror.style.textAlign = styles.textAlign;
+    mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncComposerMirror();
+  }, [text, syncComposerMirror]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(syncComposerMirror);
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [syncComposerMirror]);
+
   const copyToClipboard = async (value: string): Promise<void> => {
     if (!value) return;
     try {
@@ -1738,7 +1774,7 @@ export const MessageComposer = ({
                       title={`Adicionar ${item.emoji}`}
                       onClick={() => chooseChatEmoji(item.emoji)}
                     >
-                      <span aria-hidden="true">{item.emoji}</span>
+                      <PlatformEmoji emoji={item.emoji} decorative />
                     </button>
                   ))}
                 </div>
@@ -1807,52 +1843,62 @@ export const MessageComposer = ({
             </div>
           </div>
         </div>
-        <Textarea
-          className="composer-input"
-          value={text}
-          disabled={disabled}
-          onChange={(_, data) => {
-            const next = data.value;
-            setText(next);
-            if (disabled || !onTypingChange) return;
+        <div className={`composer-input-shell ${text ? 'has-text' : ''}`}>
+          <div className="composer-input-mirror-viewport" aria-hidden="true">
+            <div ref={composerMirrorRef} className="composer-input-mirror-content">
+              <PlatformEmojiText>{text}</PlatformEmojiText>
+              {text.endsWith('\n') ? '\u00a0' : null}
+            </div>
+          </div>
+          <Textarea
+            ref={textareaRef}
+            className="composer-input"
+            value={text}
+            disabled={disabled}
+            onChange={(_, data) => {
+              const next = data.value;
+              setText(next);
+              if (disabled || !onTypingChange) return;
 
-            if (next.trim().length > 0) {
-              setTyping(true);
-              if (typingTimeoutRef.current) {
-                window.clearTimeout(typingTimeoutRef.current);
-              }
-              typingTimeoutRef.current = window.setTimeout(() => {
-                typingTimeoutRef.current = null;
+              if (next.trim().length > 0) {
+                setTyping(true);
+                if (typingTimeoutRef.current) {
+                  window.clearTimeout(typingTimeoutRef.current);
+                }
+                typingTimeoutRef.current = window.setTimeout(() => {
+                  typingTimeoutRef.current = null;
+                  setTyping(false);
+                }, 1200);
+              } else {
+                if (typingTimeoutRef.current) {
+                  window.clearTimeout(typingTimeoutRef.current);
+                  typingTimeoutRef.current = null;
+                }
                 setTyping(false);
-              }, 1200);
-            } else {
+              }
+            }}
+            placeholder={placeholder}
+            resize="none"
+            rows={1}
+            onScroll={syncComposerMirror}
+            onBlur={() => {
+              if (!onTypingChange) return;
               if (typingTimeoutRef.current) {
                 window.clearTimeout(typingTimeoutRef.current);
                 typingTimeoutRef.current = null;
               }
               setTyping(false);
-            }
-          }}
-          placeholder={placeholder}
-          resize="none"
-          rows={1}
-          onBlur={() => {
-            if (!onTypingChange) return;
-            if (typingTimeoutRef.current) {
-              window.clearTimeout(typingTimeoutRef.current);
-              typingTimeoutRef.current = null;
-            }
-            setTyping(false);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              void submit();
-            }
-          }}
-          onPaste={handlePasteAttachment}
-          onContextMenu={handleComposerContextMenu}
-        />
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            onPaste={handlePasteAttachment}
+            onContextMenu={handleComposerContextMenu}
+          />
+        </div>
         <div className="composer-actions">
           {onSendFile && (
             <Button

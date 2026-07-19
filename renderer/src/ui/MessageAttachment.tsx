@@ -106,7 +106,8 @@ export const MessageAttachment = ({
     setManualRetrying(true);
     setManualRetryError('');
     try {
-      await ipcClient.retryAttachment(message.messageId);
+      if (outgoing) await ipcClient.retryMessage(message.messageId);
+      else await ipcClient.retryAttachment(message.messageId);
     } catch (error) {
       const rawMessage = error instanceof Error
         ? error.message

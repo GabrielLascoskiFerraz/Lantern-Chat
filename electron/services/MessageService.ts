@@ -21,6 +21,7 @@ import {
   ProtocolFrame
 } from '../types';
 import { retryDelayMs, sleep } from '../reliability';
+import { RELAY_ACCEPTED_MESSAGE_STATUS } from '../messageStatus';
 
 interface MessageServiceDeps {
   db: DbService;
@@ -234,6 +235,92 @@ export class MessageService {
     });
   }
 
+  async retryFailedMessage(messageId: string): Promise<DbMessage> {
+    const id = (messageId || '').trim();
+    const message = this.db.getMessageById(id);
+    if (!message || message.direction !== 'out') {
+      throw new Error('Mensagem enviada não encontrada.');
+    }
+    if (message.status !== 'failed') return message;
+    if (message.conversationId.startsWith('group:')) {
+      throw new Error('A nova tentativa dessa mensagem deve ser feita pelo serviço de grupos.');
+    }
+
+    const replyTo = this.sanitizeReplyPayload(
+      message.replyToMessageId && message.replyToSenderDeviceId && message.replyToType
+        ? {
+            messageId: message.replyToMessageId,
+            senderDeviceId: message.replyToSenderDeviceId,
+            type: message.replyToType,
+            previewText: message.replyToPreviewText,
+            fileName: message.replyToFileName
+          }
+        : null
+    );
+    const targetUserId = message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID
+      ? null
+      : message.receiverDeviceId || message.conversationId.replace(/^dm:/, '');
+
+    this.db.updateMessageStatus(id, 'sent');
+    const pending = this.db.getMessageById(id) || { ...message, status: 'sent' as const };
+    this.emitEvent({ type: 'message:updated', message: pending });
+
+    try {
+      if (message.type === 'file') {
+        if (!message.fileId || !message.filePath || !fs.existsSync(message.filePath)) {
+          throw new Error('O arquivo local original não está mais disponível para reenvio.');
+        }
+        const { offer } = await this.fileTransfer.createOffer(
+          targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,
+          message.filePath,
+          message.messageId,
+          message.fileId,
+          message.fileName || undefined
+        );
+        const offerWithReply = replyTo ? { ...offer, replyTo } : offer;
+        const offerWithMeta = message.forwardedFromMessageId
+          ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
+          : offerWithReply;
+        await this.uploadAndPublishWithRetry({
+          message: pending,
+          offer,
+          filePath: message.filePath,
+          targetUserId,
+          offerWithMeta
+        });
+      } else if (message.conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+        await this.sendCanonicalFrame({
+          type: 'announce', messageId: message.messageId, from: this.profile.deviceId,
+          to: null, createdAt: message.createdAt,
+          payload: { text: message.bodyText || '', replyTo }
+        });
+      } else {
+        if (!targetUserId) throw new Error('Destinatário da mensagem não encontrado.');
+        await this.sendCanonicalFrame({
+          type: 'chat:text', messageId: message.messageId, from: this.profile.deviceId,
+          to: targetUserId, createdAt: message.createdAt,
+          payload: {
+            text: message.bodyText || '', replyTo,
+            forwardedFromMessageId: message.forwardedFromMessageId || null
+          }
+        });
+      }
+
+      this.db.updateMessageStatus(id, RELAY_ACCEPTED_MESSAGE_STATUS);
+      const delivered = this.db.getMessageById(id) || {
+        ...message,
+        status: RELAY_ACCEPTED_MESSAGE_STATUS
+      };
+      this.emitEvent({ type: 'message:updated', message: delivered });
+      return delivered;
+    } catch (error) {
+      this.db.updateMessageStatus(id, 'failed');
+      const failed = this.db.getMessageById(id) || { ...message, status: 'failed' as const };
+      this.emitEvent({ type: 'message:updated', message: failed });
+      throw error;
+    }
+  }
+
   private async sendFileToConversation(input: {
     targetUserId: string | null;
     conversationId: string;
@@ -307,10 +394,9 @@ export class MessageService {
         targetUserId,
         offerWithMeta
       }).then(() => {
-        // Em conversa direta, o destinatário promove para "delivered" via chat:ack.
-        // Anúncios não possuem um destinatário único, então a persistência no Relay
-        // conclui o envio.
-        this.db.updateMessageStatus(messageId, targetUserId ? 'sent' : 'delivered');
+        // O anexo está entregue assim que conteúdo e metadados são confirmados
+        // pelo Relay; leitura do destinatário continua sendo um estado posterior.
+        this.db.updateMessageStatus(messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
         const updated = this.db.getMessageById(messageId);
         if (updated) this.emitEvent({ type: 'message:updated', message: updated });
       }).catch((error) => {

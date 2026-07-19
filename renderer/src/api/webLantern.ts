@@ -211,9 +211,23 @@ class WebLanternBridge {
     const headers = new Headers(init.headers);
     if (!headers.has('content-type') && init.body) headers.set('content-type', 'application/json');
     if (authenticated && this.token) headers.set('authorization', `Bearer ${this.token}`);
-    const response = await fetch(path, { ...init, headers, cache: 'no-store' });
+    let response: Response;
+    try {
+      response = await fetch(path, { ...init, headers, cache: 'no-store' });
+    } catch {
+      throw new Error('Não foi possível conectar ao Relay. Verifique sua rede e tente novamente.');
+    }
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.message || 'Não foi possível concluir a operação.');
+    if (!response.ok) {
+      if (body.message) throw new Error(String(body.message));
+      if (response.status === 404 || response.status === 405) {
+        throw new Error('O endereço respondeu, mas não parece ser um Relay Lantern. Confira o endereço e a porta.');
+      }
+      if (response.status >= 500) {
+        throw new Error('O Relay encontrou um problema temporário. Aguarde um instante e tente novamente.');
+      }
+      throw new Error(`O Relay recusou a operação (HTTP ${response.status}).`);
+    }
     return body;
   }
 
@@ -233,7 +247,13 @@ class WebLanternBridge {
   }
 
   private authState(): ClientAuthState {
-    return { authenticated: Boolean(this.token && this.user), relay: relayConfig(), endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null, user: this.user };
+    return {
+      authenticated: Boolean(this.token && this.user),
+      relay: relayConfig(),
+      endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null,
+      user: this.user,
+      connectionError: null
+    };
   }
 
   private profile(): Profile {
@@ -1213,6 +1233,54 @@ class WebLanternBridge {
         return Promise.all(rows.map((row) => row.type === 'file' && row.fileId && !row.filePath
           ? this.downloadAttachment(row).catch(() => row)
           : row));
+      },
+      retryMessage: async (messageId) => {
+        const row = Array.from(this.messages.values()).flat()
+          .find((candidate) => candidate.messageId === messageId);
+        if (!row || row.direction !== 'out') throw new Error('Mensagem enviada não encontrada.');
+        if (row.status !== 'failed') return row;
+        const pending = { ...row, status: 'sent' as const };
+        this.mergeMessage(pending);
+        this.emit({ type: 'message:updated', message: pending });
+        try {
+          if (row.type === 'file') {
+            throw new Error('O arquivo original não está mais disponível neste navegador. Selecione-o novamente.');
+          }
+          const replyTo = this.reply(row.replyToMessageId && row.replyToSenderDeviceId && row.replyToType ? {
+            messageId: row.replyToMessageId,
+            senderDeviceId: row.replyToSenderDeviceId,
+            type: row.replyToType,
+            previewText: row.replyToPreviewText,
+            fileName: row.replyToFileName
+          } : null);
+          if (row.conversationId.startsWith('group:')) {
+            await this.groupAction('sendText', {
+              groupId: row.conversationId.slice(6), messageId: row.messageId,
+              createdAt: row.createdAt, text: row.bodyText || '', replyTo
+            });
+          } else {
+            const announcement = row.conversationId === 'announcements';
+            await this.sendFrame({
+              type: announcement ? 'announce' : 'chat:text',
+              messageId: row.messageId,
+              from: this.user!.userId,
+              to: announcement ? null : row.receiverDeviceId || row.conversationId.slice(3),
+              createdAt: row.createdAt,
+              payload: announcement
+                ? { text: row.bodyText || '', replyTo }
+                : { text: row.bodyText || '', replyTo, forwardedFromMessageId: row.forwardedFromMessageId || null }
+            });
+          }
+          const delivered = { ...row, status: 'delivered' as const };
+          this.mergeMessage(delivered);
+          this.emit({ type: 'message:updated', message: delivered });
+          return delivered;
+        } catch (error) {
+          const failed = { ...row, status: 'failed' as const };
+          this.mergeMessage(failed);
+          this.emit({ type: 'message:updated', message: failed });
+          throw error;
+        }
       },
       retryAttachment: async (messageId) => {
         const row = Array.from(this.messages.values()).flat()

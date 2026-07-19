@@ -88,6 +88,7 @@ export interface ClientAuthState {
   relay: ClientRelayConfig;
   endpoint: string | null;
   user: AuthenticatedUser | null;
+  connectionError: string | null;
 }
 
 export type ConversationMediaKind = 'media' | 'document';

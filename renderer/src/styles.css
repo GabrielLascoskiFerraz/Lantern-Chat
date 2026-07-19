@@ -2020,6 +2020,21 @@ body {
   line-height: 1.2;
 }
 
+.message-send-retry {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+  color: var(--danger);
+}
+
+.message-send-retry .fui-Caption1 {
+  width: 100%;
+  text-align: right;
+}
+
 .bubble-favorite-indicator {
   display: inline-flex;
   align-items: center;
@@ -3410,6 +3425,50 @@ body {
   align-items: center;
 }
 
+.composer-input-shell {
+  position: relative;
+  min-width: 0;
+}
+
+.composer-input-shell .composer-input {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+}
+
+.composer-input-mirror-viewport {
+  position: absolute;
+  inset: 1px;
+  z-index: 1;
+  display: none;
+  overflow: hidden;
+  border-radius: 17px;
+  color: var(--teams-text);
+  background: var(--teams-input-bg);
+  pointer-events: none;
+}
+
+.composer-input-mirror-content {
+  box-sizing: border-box;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+  will-change: transform;
+}
+
+:root[data-platform='win32'] .composer-input-shell .composer-input-mirror-viewport {
+  display: block;
+}
+
+:root[data-platform='win32'] .composer-input-shell.has-text .composer-input.fui-Textarea {
+  background: transparent;
+}
+
+:root[data-platform='win32'] .composer-input-shell.has-text .composer-input textarea {
+  color: transparent !important;
+  caret-color: var(--teams-text);
+  -webkit-text-fill-color: transparent;
+}
+
 .composer-input {
   background: var(--teams-input-bg);
   border-radius: 18px;
@@ -4492,6 +4551,13 @@ body {
 .login-address-row > .fui-Field { min-width: 0; }
 .login-address-row .fui-Input { width: 100%; min-width: 0; }
 .login-feedback { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface-subtle); font-size: 13px; line-height: 1.45; }
+.login-card-v2 > .login-feedback { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px; }
+.login-feedback-icon { width: 20px; height: 20px; margin-top: 1px; flex: 0 0 auto; }
+.login-feedback-content { display: grid; min-width: 0; gap: 3px; }
+.login-feedback-content strong { color: currentColor; font-size: 13px; font-weight: 720; }
+.login-feedback-content span { color: color-mix(in srgb, currentColor 86%, var(--text)); }
+.login-feedback-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+.login-feedback-actions .fui-Button { width: max-content; max-width: 100%; }
 .login-feedback.error { border-color:color-mix(in srgb, var(--danger) 25%, transparent); color:var(--danger); background:color-mix(in srgb, var(--danger) 8%, transparent); }
 .login-feedback.success { border-color:color-mix(in srgb, #168b4f 30%, transparent); color:#126d40; background:color-mix(in srgb, #168b4f 9%, transparent); }
 .login-feedback.warning { border-color:color-mix(in srgb, #b56a12 30%, transparent); color:#8a500c; background:color-mix(in srgb, #b56a12 9%, transparent); }
@@ -4515,6 +4581,7 @@ body {
 .login-fields { display: grid; gap: 15px; }
 .login-field-hint { display: block; margin-top: 4px; color: var(--muted); }
 .login-connection { border: 1px solid var(--border); border-radius: 13px; background: color-mix(in srgb, var(--surface-subtle) 65%, transparent); overflow: hidden; }
+.login-connection.invalid { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 10%, transparent); }
 .login-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px 10px; font-weight: 650; }
 .login-connection-header small { max-width: 55%; overflow: hidden; color: var(--muted); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .login-connection-body { display: grid; gap: 12px; padding: 0 14px 14px; }
@@ -5603,7 +5670,6 @@ body {
   max-height: 178px;
   overflow-y: auto;
   padding: 2px 4px 2px 2px;
-  scrollbar-width: thin;
 }
 
 .identity-emoji-grid button {
@@ -6343,4 +6409,17 @@ body {
     justify-content: flex-end;
     padding: 0;
   }
+}
+.platform-emoji-fluent {
+  display: inline-block;
+  flex: 0 0 auto;
+  max-width: none;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  vertical-align: -0.16em;
+}
+
+.platform-emoji-native {
+  display: inline;
 }

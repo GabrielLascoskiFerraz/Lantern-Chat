@@ -42,6 +42,7 @@ import { GroupInfo, GroupMember, Peer, Profile, StartupSettings } from '../api/i
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { CreateGroupDialog } from './CreateGroupDialog';
+import { PlatformEmojiText } from './PlatformEmoji';
 
 interface SidebarProps {
   profile: Profile;
@@ -531,7 +532,9 @@ export const Sidebar = ({
                 {typingByConversation[conversationId] ? (
                   <TypingInline />
                 ) : (
-                  <span className="conversation-preview-text">{previewText}</span>
+                  <span className="conversation-preview-text">
+                    <PlatformEmojiText>{previewText}</PlatformEmojiText>
+                  </span>
                 )}
               </Caption1>
             </div>
@@ -607,7 +610,9 @@ export const Sidebar = ({
                 </span>
               </Caption1>
               <Caption1 className="conversation-preview conversation-preview-slot">
-                <span className="conversation-preview-text">{previewText}</span>
+                <span className="conversation-preview-text">
+                  <PlatformEmojiText>{previewText}</PlatformEmojiText>
+                </span>
               </Caption1>
             </div>
           </div>
@@ -748,7 +753,11 @@ export const Sidebar = ({
             <div className="conversation-text">
               <Text weight="semibold">Anúncios</Text>
               <Caption1 className="conversation-preview conversation-preview-slot">
-                {conversationPreviewById.announcements || 'Mensagens para todos'}
+                <span className="conversation-preview-text">
+                  <PlatformEmojiText>
+                    {conversationPreviewById.announcements || 'Mensagens para todos'}
+                  </PlatformEmojiText>
+                </span>
               </Caption1>
             </div>
           </div>

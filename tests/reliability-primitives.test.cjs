@@ -5,6 +5,8 @@ const path = require('node:path');
 const test = require('node:test');
 const { PriorityTaskQueue, RelayOperationError, Semaphore } = require('../dist-electron/reliability.js');
 const { DbService } = require('../dist-electron/db.js');
+const { RELAY_ACCEPTED_MESSAGE_STATUS } = require('../dist-electron/messageStatus.js');
+const { MessageService } = require('../dist-electron/services/MessageService.js');
 
 test('fila prioriza mensagens persistentes que ainda não começaram', async () => {
   const queue = new PriorityTaskQueue(1);
@@ -38,6 +40,78 @@ test('erros do Relay carregam código e recuperabilidade', () => {
   assert.equal(error.code, 'OPERATION_PENDING');
   assert.equal(error.recoverable, true);
   assert.equal(error.name, 'RelayOperationError');
+});
+
+test('ACK do Relay promove mensagem pendente para entregue antes da leitura', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-message-status-'));
+  try {
+    const db = new DbService(root);
+    const conversationId = db.ensureDmConversation('recipient', 'Destinatário');
+    db.saveMessage({
+      messageId: 'message-status', conversationId, direction: 'out',
+      senderDeviceId: 'sender', receiverDeviceId: 'recipient', type: 'text',
+      bodyText: 'teste', fileId: null, fileName: null, fileSize: null,
+      fileSha256: null, filePath: null, status: 'sent', reaction: null,
+      deletedAt: null, replyToMessageId: null, replyToSenderDeviceId: null,
+      replyToType: null, replyToPreviewText: null, replyToFileName: null,
+      forwardedFromMessageId: null, editedAt: null, createdAt: Date.now()
+    });
+
+    assert.equal(db.getMessageById('message-status').status, 'sent');
+    assert.equal(RELAY_ACCEPTED_MESSAGE_STATUS, 'delivered');
+    db.updateMessageStatus('message-status', RELAY_ACCEPTED_MESSAGE_STATUS);
+    assert.equal(db.getMessageById('message-status').status, 'delivered');
+
+    // Uma atualização atrasada nunca rebaixa o ACK canônico.
+    db.updateMessageStatus('message-status', 'sent');
+    assert.equal(db.getMessageById('message-status').status, 'delivered');
+
+    db.updateMessageStatus('message-status', 'read');
+    assert.equal(db.getMessageById('message-status').status, 'read');
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('nova tentativa reutiliza o messageId e confirma entregue no ACK do Relay', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-message-retry-'));
+  try {
+    const db = new DbService(root);
+    const conversationId = db.ensureDmConversation('recipient', 'Destinatário');
+    const createdAt = Date.now();
+    db.saveMessage({
+      messageId: 'retry-same-id', conversationId, direction: 'out',
+      senderDeviceId: 'sender', receiverDeviceId: 'recipient', type: 'text',
+      bodyText: 'reenviar sem duplicar', fileId: null, fileName: null, fileSize: null,
+      fileSha256: null, filePath: null, status: 'failed', reaction: null,
+      deletedAt: null, replyToMessageId: null, replyToSenderDeviceId: null,
+      replyToType: null, replyToPreviewText: null, replyToFileName: null,
+      forwardedFromMessageId: null, editedAt: null, createdAt
+    });
+    const frames = [];
+    const events = [];
+    const service = new MessageService({
+      db,
+      profile: { deviceId: 'sender' },
+      fileTransfer: {},
+      getPeer: () => undefined,
+      emitEvent: (event) => events.push(event),
+      sendCanonicalFrame: async (frame) => frames.push(frame),
+      uploadCanonicalAttachment: async () => undefined
+    });
+
+    const result = await service.retryFailedMessage('retry-same-id');
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].messageId, 'retry-same-id');
+    assert.equal(frames[0].createdAt, createdAt);
+    assert.equal(result.status, 'delivered');
+    assert.equal(db.getMessageById('retry-same-id').status, 'delivered');
+    assert.deepEqual(events.map((event) => event.message?.status), ['sent', 'delivered']);
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('outbox persiste frames idempotentes entre reaberturas do cliente', () => {
