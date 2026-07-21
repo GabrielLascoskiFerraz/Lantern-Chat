@@ -507,6 +507,8 @@ export const Shell = () => {
         relaySettings={relaySettings}
         startupSettings={startupSettings}
         languageSettings={languageSettings}
+        themeMode={themeMode}
+        onThemeModeChange={setThemeMode}
         onForceRelayRediscovery={forceRelayRediscovery}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {

@@ -1,56 +1,213 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Lantern Relay</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <main class="app-shell">
-      <header class="hero">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lantern Relay</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="dashboard-shell">
+    <aside class="dashboard-nav" aria-label="Relay navigation">
+      <div class="nav-brand">
+        <img class="nav-logo" src="../../assets/icon.png" alt="">
         <div>
-          <p class="eyebrow">LANTERN RELAY</p>
-          <h1 data-i18n="networkBridge">Network bridge</h1>
-          <p id="connection-summary">Loading Relay status…</p>
+          <strong>Lantern</strong>
+          <span>Relay</span>
         </div>
-        <span id="status-pill" class="status-pill offline">Offline</span>
+      </div>
+
+      <div class="nav-scroll">
+        <div class="nav-caption" data-i18n="server">Server</div>
+        <nav class="nav-links">
+          <a class="nav-link active" href="#overview" data-section="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+            <span data-i18n="overview">Overview</span>
+          </a>
+          <a class="nav-link" href="#activity" data-section="activity">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16l4-4 3 2 5-7"/></svg>
+            <span data-i18n="activity">Activity</span>
+          </a>
+          <a class="nav-link" href="#connection" data-section="connection">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5a10 10 0 0 1 14 0M8 16a6 6 0 0 1 8 0M11 19.5a1.5 1.5 0 0 1 2 0"/></svg>
+            <span data-i18n="connection">Connection</span>
+          </a>
+        </nav>
+      </div>
+
+      <div class="nav-footer">
+        <div class="nav-version">
+          <span id="nav-version">Lantern Relay</span>
+          <span id="nav-store" data-i18n="relayReady">Relay ready</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="page">
+      <header class="topbar">
+        <div>
+          <h1 data-i18n="relayOverview">Relay overview</h1>
+          <p id="connection-summary" data-i18n="loadingStatus">Loading Relay status...</p>
+        </div>
+        <div id="status-pill" class="live-pill offline" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="status-label" data-i18n="offline">Offline</span>
+        </div>
       </header>
-      <section class="action-row">
-        <button id="start" class="primary" data-i18n="startRelay">Start Relay</button>
-        <button id="restart" data-i18n="restart">Restart</button>
-        <button id="stop" class="danger" data-i18n="stop">Stop</button>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+
+      <section id="overview" class="page-section overview-section" aria-labelledby="overview-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker" data-i18n="server">Server</span>
+            <h2 id="overview-title" data-i18n="operation">Operation</h2>
+          </div>
+          <span id="last-update" class="section-meta" data-i18n="updating">Updating...</span>
+        </div>
+
+        <div class="operation-card card">
+          <div class="operation-state">
+            <div id="operation-icon" class="operation-icon offline" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 5h14v5H5V5Zm0 9h14v5H5v-5Zm3-6h.01M8 17h.01"/></svg>
+            </div>
+            <div>
+              <strong id="operation-title" data-i18n="relayStoppedTitle">Relay stopped</strong>
+              <span id="operation-detail" data-i18n="relayStoppedDetail">Start the server to accept connections.</span>
+            </div>
+          </div>
+          <div class="operation-actions">
+            <button id="start" class="button primary" type="button" data-i18n="startRelay">Start Relay</button>
+            <button id="restart" class="button" type="button" data-i18n="restart">Restart</button>
+            <button id="stop" class="button danger" type="button" data-i18n="stop">Stop</button>
+          </div>
+        </div>
+
+        <div class="metrics" aria-label="Relay metrics">
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="onlineUsers">Online users</span><i class="metric-icon">●</i></div>
+            <strong id="metric-peers">0</strong>
+            <small id="metric-sessions">0 active sessions</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="activeAnnouncements">Active announcements</span><i class="metric-icon">◈</i></div>
+            <strong id="metric-announcements">0</strong>
+            <small id="metric-announcement-help">Expires in 24h</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="retainedAttachments">Attachments retained</span><i class="metric-icon">⌁</i></div>
+            <strong id="metric-attachments">0</strong>
+            <small id="metric-storage">0 B stored</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="transfers">Transfers</span><i class="metric-icon">⇅</i></div>
+            <strong id="metric-transfers">0</strong>
+            <small id="metric-transfer-health" data-i18n="noFailures">No failures</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="stickers">Stickers</span><i class="metric-icon">✦</i></div>
+            <strong id="metric-stickers">0</strong>
+            <small data-i18n="relayCatalog">Relay catalog</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head"><span data-i18n="uptime">Uptime</span><i class="metric-icon">◷</i></div>
+            <strong id="metric-uptime">—</strong>
+            <small id="metric-started" data-i18n="relayStoppedTitle">Relay stopped</small>
+          </article>
+        </div>
       </section>
-      <section class="network-card">
-        <div class="section-title"><h2 data-i18n="manualConnection">Manual connection</h2><span id="port-label">Port 43190</span></div>
-        <p data-i18n="manualConnectionHelp">Use one of these local IP addresses in Lantern clients when automatic discovery is unavailable.</p>
-        <div id="addresses" class="addresses"></div>
+
+      <section id="activity" class="page-section" aria-labelledby="activity-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker" data-i18n="realTime">Real time</span>
+            <h2 id="activity-title" data-i18n="activity">Activity</h2>
+          </div>
+        </div>
+
+        <div class="activity-grid">
+          <article class="card list-card">
+            <div class="card-header">
+              <div>
+                <h3 data-i18n="connectedUsers">Connected users</h3>
+                <p data-i18n="connectedUsersHelp">One entry for every active Relay connection.</p>
+              </div>
+              <span id="users-count" class="count-badge">0</span>
+            </div>
+            <div id="users" class="entity-list"></div>
+          </article>
+
+          <article class="card list-card">
+            <div class="card-header">
+              <div>
+                <h3 data-i18n="activeAnnouncements">Active announcements</h3>
+                <p data-i18n="activeAnnouncementsHelp">Messages remain available until their configured expiration.</p>
+              </div>
+              <span id="announcements-count" class="count-badge">0</span>
+            </div>
+            <div id="announcements" class="entity-list"></div>
+          </article>
+        </div>
       </section>
-      <section class="metrics" aria-label="Relay metrics">
-        <article><span data-i18n="connectedUsers">Connected users</span><strong id="metric-peers">0</strong></article>
-        <article><span data-i18n="activeAnnouncements">Active announcements</span><strong id="metric-announcements">0</strong></article>
-        <article><span data-i18n="retainedAttachments">Attachments retained</span><strong id="metric-files">0</strong></article>
-        <article><span data-i18n="uptime">Uptime</span><strong id="metric-uptime">--</strong></article>
-      </section>
-      <section class="settings-card">
-        <div class="section-title"><h2 data-i18n="relaySettings">Relay settings</h2><span data-i18n="savedAutomatically">Saved automatically</span></div>
-        <label><span data-i18n="port">Port</span> <input id="port-input" type="number" min="1" max="65535" /></label>
-        <label><span data-i18n="announcementExpiration">Announcement expiration (hours)</span> <input id="ttl-input" type="number" min="1" max="168" /></label>
-        <button id="save-settings" data-i18n="applySettings">Apply settings</button>
-        <label class="autostart-setting">
-          <input id="auto-start-input" type="checkbox" />
-          <span>
-            <strong data-i18n="startWithSystem">Start Relay with the system</strong>
-            <small id="auto-start-help" data-i18n="startWithSystemHelp">Starts the Relay automatically after this user signs in.</small>
-          </span>
-        </label>
-        <p class="helper" data-i18n="settingsHelp">Changing the port restarts the Relay. Changing expiration updates active announcements too.</p>
-      </section>
-      <section class="users-card">
-        <div class="section-title"><h2 data-i18n="connectedUsers">Connected users</h2><span id="users-count">0 online</span></div>
-        <div id="users" class="users"><p class="empty" data-i18n="noUsers">No users connected.</p></div>
+
+      <section id="connection" class="page-section" aria-labelledby="connection-title">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker" data-i18n="network">Network</span>
+            <h2 id="connection-title" data-i18n="connectionAndSettings">Connection and settings</h2>
+          </div>
+          <span id="transport-badge" class="transport-badge" data-i18n="localWs">Local WS</span>
+        </div>
+
+        <div class="connection-grid">
+          <article class="card endpoint-card">
+            <div class="card-header compact">
+              <div>
+                <h3 data-i18n="availableAddresses">Available addresses</h3>
+                <p data-i18n="availableAddressesHelp">Select an address to copy it.</p>
+              </div>
+              <span id="port-label" class="section-meta">Port 43190</span>
+            </div>
+            <div id="addresses" class="addresses"></div>
+            <div class="security-note">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/></svg>
+              <div><strong data-i18n="localNetwork">Local network</strong><span data-i18n="localNetworkHelp">Use this address in Lantern clients when automatic discovery is unavailable.</span></div>
+            </div>
+          </article>
+
+          <article class="card settings-card">
+            <div class="card-header compact">
+              <div>
+                <h3 data-i18n="relaySettings">Relay settings</h3>
+                <p data-i18n="relaySettingsHelp">Port changes restart the Relay when it is active.</p>
+              </div>
+            </div>
+            <div class="settings-form">
+              <label class="field port-field">
+                <span data-i18n="port">Port</span>
+                <input id="port-input" type="number" min="1" max="65535" inputmode="numeric">
+              </label>
+              <label class="field ttl-field">
+                <span data-i18n="announcementExpiration">Announcement expiration (hours)</span>
+                <input id="ttl-input" type="number" min="1" max="168" inputmode="numeric">
+              </label>
+              <label class="autostart-option">
+                <input id="auto-start-input" type="checkbox">
+                <span>
+                  <strong data-i18n="startWithSystem">Start Relay with the system</strong>
+                  <small id="auto-start-help" data-i18n="startWithSystemHelp">Starts the Relay automatically after this user signs in.</small>
+                </span>
+              </label>
+              <div class="settings-footer">
+                <span id="settings-state" data-i18n="settingsSaved">Settings saved</span>
+                <button id="save-settings" class="button primary" type="button" data-i18n="applySettings">Apply settings</button>
+              </div>
+            </div>
+          </article>
+        </div>
       </section>
     </main>
-    <script src="./app.js"></script>
-  </body>
+  </div>
+  <script src="./app.js"></script>
+</body>
 </html>

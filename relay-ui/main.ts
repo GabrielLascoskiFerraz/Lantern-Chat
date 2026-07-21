@@ -190,12 +190,12 @@ const restartRelay = async (): Promise<ReturnType<typeof getSnapshot>> => {
 
 const createWindow = (): void => {
   mainWindow = new BrowserWindow({
-    width: 760,
-    height: 680,
-    minWidth: 620,
+    width: 1120,
+    height: 820,
+    minWidth: 720,
     minHeight: 560,
     title: 'Lantern Relay',
-    backgroundColor: '#edf2fa',
+    backgroundColor: '#edf1f7',
     autoHideMenuBar: true,
     icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {

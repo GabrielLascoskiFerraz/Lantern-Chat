@@ -3098,17 +3098,17 @@ body {
   left: 0;
   bottom: calc(100% + 8px);
   z-index: 30;
-  width: min(420px, 80vw);
-  padding: 8px 8px 6px;
+  width: min(488px, calc(100vw - 28px));
+  padding: 14px;
   border: 1px solid var(--teams-border);
   border-radius: var(--teams-radius-md);
   background: var(--teams-surface);
   box-shadow: var(--teams-shadow-pop);
-  max-height: 300px;
+  max-height: min(440px, calc(100vh - 150px));
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   opacity: 0;
   transform: translateY(6px) scale(0.992);
   visibility: hidden;
@@ -3248,7 +3248,32 @@ body {
 }
 
 .emoji-picker-search {
-  margin-bottom: 2px;
+  margin-bottom: 0;
+}
+
+.emoji-picker-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.emoji-picker-header strong,
+.emoji-picker-header span {
+  display: block;
+}
+
+.emoji-picker-header strong {
+  color: var(--teams-text);
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.emoji-picker-header span {
+  margin-top: 2px;
+  color: var(--teams-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
 }
 
 .emoji-search-input {
@@ -3256,7 +3281,7 @@ body {
 }
 
 .emoji-picker-content {
-  max-height: 236px;
+  max-height: 326px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 2px;
@@ -3276,12 +3301,12 @@ body {
 }
 
 .emoji-picker-categories {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 11px;
   overflow: hidden;
-  max-height: 112px;
+  max-height: 160px;
   opacity: 1;
   transform: translateY(0);
   transition:
@@ -3300,14 +3325,32 @@ body {
 }
 
 .emoji-cat-btn {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--teams-border);
-  background: var(--teams-surface-2);
+  background: var(--teams-surface);
   color: var(--teams-text);
-  border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 12px;
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 11.5px;
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.emoji-cat-btn svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.emoji-cat-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .emoji-cat-btn:hover {
@@ -3315,38 +3358,54 @@ body {
 }
 
 .emoji-cat-btn.active {
-  border-color: color-mix(in srgb, var(--teams-accent) 46%, var(--teams-border));
-  background: color-mix(in srgb, var(--teams-accent) 14%, var(--teams-surface));
+  border-color: color-mix(in srgb, var(--teams-accent) 65%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-accent) 11%, var(--teams-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teams-accent) 12%, transparent);
 }
 
 .emoji-picker-grid {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 5px;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 6px;
+  align-content: start;
 }
 
 .emoji-btn {
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
+  width: 100%;
+  min-width: 40px;
+  height: 40px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--teams-text);
+  background: var(--teams-surface);
   cursor: pointer;
-  font-size: 18px;
-  transition: background-color 120ms ease, transform 120ms ease;
+  font-size: 21px;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 
 .emoji-btn:hover {
   background: var(--teams-row-hover);
-  transform: scale(1.06);
+  border-color: var(--teams-border);
+  transform: translateY(-1px);
+}
+
+.emoji-btn:focus-visible,
+.emoji-cat-btn:focus-visible {
+  outline: 2px solid var(--teams-accent);
+  outline-offset: 2px;
 }
 
 .emoji-picker-empty {
-  margin-top: 8px;
+  min-height: 112px;
+  display: grid;
+  place-items: center;
+  margin-top: 4px;
+  border: 1px dashed var(--teams-border);
+  border-radius: 8px;
   font-size: 12px;
   color: var(--teams-muted);
   text-align: center;
-  padding: 6px 4px 2px;
+  padding: 16px;
 }
 
 .settings-modal {
@@ -3550,6 +3609,164 @@ body {
   font: inherit;
 }
 
+.settings-theme-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-theme-options > button {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--teams-border);
+  border-radius: 8px;
+  color: var(--teams-text);
+  background: var(--teams-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
+}
+
+.settings-theme-options > button:hover {
+  border-color: color-mix(in srgb, var(--teams-accent) 38%, var(--teams-border));
+  background: var(--teams-row-hover);
+}
+
+.settings-theme-options > button.active {
+  border-color: var(--teams-accent);
+  background: color-mix(in srgb, var(--teams-accent) 9%, var(--teams-surface));
+  box-shadow: inset 0 0 0 1px var(--teams-accent);
+}
+
+.settings-theme-options > button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--teams-accent);
+}
+
+.settings-theme-preview {
+  position: relative;
+  display: block;
+  height: 62px;
+  overflow: hidden;
+  border: 1px solid #c7cbd1;
+  border-radius: 5px;
+  background: #f5f6f8;
+}
+
+.settings-theme-preview::before {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: inset 16px 0 0 #eef0f4;
+}
+
+.settings-theme-preview::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 34%;
+  height: 4px;
+  border-radius: 999px;
+  background: #5b5fc7;
+  box-shadow: 0 9px 0 #d7d9de, 0 18px 0 #d7d9de;
+}
+
+.settings-theme-preview.dark {
+  border-color: #3c4658;
+  background: #101722;
+}
+
+.settings-theme-preview.dark::before {
+  background: #202a39;
+  box-shadow: inset 16px 0 0 #18212e;
+}
+
+.settings-theme-preview.dark::after {
+  background: #8b8ff0;
+  box-shadow: 0 9px 0 #495466, 0 18px 0 #495466;
+}
+
+.settings-theme-preview.system {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: none;
+}
+
+.settings-theme-preview.system::before,
+.settings-theme-preview.system::after {
+  display: none;
+}
+
+.settings-theme-preview.system > span {
+  position: relative;
+  display: block;
+  background: #f5f6f8;
+}
+
+.settings-theme-preview.system > span:last-child {
+  background: #101722;
+}
+
+.settings-theme-preview.system > span::before {
+  content: '';
+  position: absolute;
+  inset: 7px 4px 7px 7px;
+  border-radius: 3px 0 0 3px;
+  background: #fff;
+  box-shadow: inset 10px 0 0 #eef0f4;
+}
+
+.settings-theme-preview.system > span:last-child::before {
+  inset: 7px 7px 7px 4px;
+  border-radius: 0 3px 3px 0;
+  background: #202a39;
+  box-shadow: inset 10px 0 0 #18212e;
+}
+
+.settings-theme-option-label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-theme-option-label > svg {
+  color: var(--teams-muted);
+}
+
+.settings-theme-options > button.active .settings-theme-option-label > svg {
+  color: var(--teams-accent);
+}
+
+.settings-theme-option-label > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-theme-option-label strong,
+.settings-theme-option-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-theme-option-label strong {
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.settings-theme-option-label small {
+  color: var(--teams-muted);
+  font-size: 10px;
+}
+
 .settings-language-select:focus-visible {
   outline: 2px solid var(--colorBrandStroke1);
   outline-offset: 2px;
@@ -3558,6 +3775,530 @@ body {
 .settings-modal .fui-DialogActions {
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--teams-border) 82%, transparent);
+}
+
+/* Settings follows the same dashboard hierarchy as the Relay panel while keeping
+   every preference local to the existing client settings flow. */
+.settings-modal .fui-DialogTitle {
+  padding-bottom: 12px;
+}
+
+.settings-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-title-row > div {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-title-row > div > span:first-child {
+  color: var(--teams-text);
+  font-size: 21px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+}
+
+.settings-title-row .fui-Text {
+  color: var(--teams-muted);
+}
+
+.settings-modal .settings-content {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 18px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 2px 4px;
+}
+
+.settings-navigation {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 88%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--teams-surface-2) 64%, transparent);
+}
+
+.settings-navigation button {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px;
+  color: var(--teams-text);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease;
+}
+
+.settings-navigation button:hover {
+  background: var(--teams-row-hover);
+}
+
+.settings-navigation button.active {
+  border-color: color-mix(in srgb, var(--teams-accent) 38%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-accent) 12%, var(--teams-surface));
+}
+
+.settings-navigation button:focus-visible {
+  outline: 2px solid var(--teams-accent);
+  outline-offset: 2px;
+}
+
+.settings-navigation-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--teams-muted);
+  background: color-mix(in srgb, var(--teams-surface) 72%, transparent);
+}
+
+.settings-navigation-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.settings-navigation button.active .settings-navigation-icon {
+  color: var(--teams-accent);
+  background: color-mix(in srgb, var(--teams-accent) 16%, var(--teams-surface));
+}
+
+.settings-navigation button > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-navigation strong,
+.settings-navigation small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-navigation strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-navigation small {
+  color: var(--teams-muted);
+  font-size: 10.5px;
+}
+
+.settings-section-panel {
+  min-width: 0;
+  max-width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.settings-section-panel > section {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: 14px;
+  animation: settingsSectionIn 180ms var(--motion-ease-standard, ease);
+}
+
+.settings-section-heading,
+.settings-option-heading,
+.settings-switch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-section-heading h2,
+.settings-section-heading p,
+.settings-option-heading h3,
+.settings-option-heading p,
+.settings-switch-row h3,
+.settings-switch-row p {
+  margin: 0;
+}
+
+.settings-section-heading h2 {
+  color: var(--teams-text);
+  font-size: 19px;
+  letter-spacing: -0.02em;
+}
+
+.settings-section-heading p,
+.settings-option-heading p,
+.settings-switch-row p,
+.settings-inline-help {
+  color: var(--teams-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.settings-section-heading p {
+  margin-top: 4px;
+}
+
+.settings-profile-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 232px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-preview-card {
+  min-height: 300px;
+  justify-content: center;
+  padding: 24px 18px;
+  border-radius: 20px;
+  background: linear-gradient(155deg, color-mix(in srgb, var(--teams-accent) 15%, var(--teams-surface-2)), var(--teams-surface-2));
+}
+
+.settings-preview-eyebrow {
+  color: var(--teams-accent);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.14em;
+}
+
+.settings-profile-id {
+  color: var(--teams-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.settings-profile-form {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.settings-card {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 88%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--teams-surface) 94%, var(--teams-surface-2));
+}
+
+.settings-basic-profile-card {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-basic-profile-card > .fui-Field {
+  min-width: 0;
+  align-self: start;
+}
+
+.settings-basic-profile-card .fui-Input {
+  min-height: 38px;
+  flex: 0 0 auto;
+}
+
+.settings-identity-card {
+  grid-template-columns: minmax(0, 1.3fr) minmax(180px, 0.7fr);
+  align-items: start;
+}
+
+.settings-identity-card .fui-Field {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.settings-identity-card .emoji-grid,
+.settings-identity-card .emoji-group-tabs,
+.settings-identity-card .custom-emoji-row,
+.settings-identity-card .color-input-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.profile-identity-editor {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 190px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--teams-border) 88%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--teams-surface) 94%, var(--teams-surface-2));
+}
+
+.identity-editor-section {
+  min-width: 0;
+  padding: 15px;
+}
+
+.identity-color-section {
+  border-left: 1px solid color-mix(in srgb, var(--teams-border) 84%, transparent);
+  background: color-mix(in srgb, var(--teams-surface-2) 48%, var(--teams-surface));
+}
+
+.identity-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.identity-section-header h3 {
+  margin: 0;
+  color: var(--teams-text);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.identity-section-header .fui-Text {
+  display: block;
+  margin-top: 3px;
+  color: var(--teams-muted);
+  line-height: 1.4;
+}
+
+.identity-emoji-search {
+  width: 100%;
+  margin-bottom: 9px;
+}
+
+.identity-category-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 9px;
+  overflow: hidden;
+  padding: 1px;
+}
+
+.identity-category-tabs button {
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid var(--teams-border);
+  border-radius: 6px;
+  color: var(--teams-text);
+  background: var(--teams-surface);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.identity-category-tabs button:hover {
+  background: var(--teams-row-hover);
+}
+
+.identity-category-tabs button.active {
+  border-color: color-mix(in srgb, var(--teams-accent) 65%, var(--teams-border));
+  background: color-mix(in srgb, var(--teams-accent) 12%, var(--teams-surface));
+}
+
+.identity-category-tabs button svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.identity-category-tabs button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 40px);
+  gap: 6px;
+  max-height: 178px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px 4px 2px 2px;
+  scrollbar-width: thin;
+}
+
+.identity-emoji-grid button {
+  position: relative;
+  display: grid;
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  place-items: center;
+  border: 1px solid var(--teams-border);
+  border-radius: 7px;
+  color: var(--teams-text);
+  background: var(--teams-surface);
+  font-size: 21px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.identity-emoji-grid button:hover {
+  background: var(--teams-row-hover);
+}
+
+.identity-emoji-grid button.selected {
+  border-color: var(--teams-accent);
+  background: color-mix(in srgb, var(--teams-accent) 10%, var(--teams-surface));
+}
+
+.identity-emoji-grid button svg {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 12px;
+  height: 12px;
+  padding: 1px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--teams-accent);
+}
+
+.identity-empty {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  border: 1px dashed var(--teams-border);
+  border-radius: 7px;
+  color: var(--teams-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.identity-custom-row,
+.identity-custom-color-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.identity-custom-color-row {
+  grid-template-columns: 42px minmax(0, 1fr);
+}
+
+.identity-custom-color-row input[type='color'] {
+  width: 42px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--teams-border);
+  border-radius: 6px;
+  background: var(--teams-surface);
+}
+
+.identity-color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 34px);
+  gap: 10px;
+}
+
+.identity-color-grid button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  padding: 0;
+  border: 2px solid color-mix(in srgb, var(--teams-surface) 92%, transparent);
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--teams-border) 86%, transparent);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.identity-color-grid button:hover {
+  transform: scale(1.08);
+}
+
+.identity-color-grid button.selected {
+  box-shadow: inset 0 0 0 2px var(--teams-surface), 0 0 0 2px var(--teams-accent);
+}
+
+.identity-color-grid button svg {
+  width: 17px;
+  height: 17px;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .35));
+}
+
+.settings-option-card + .settings-option-card {
+  margin-top: 12px;
+}
+
+.settings-option-heading h3,
+.settings-switch-row h3 {
+  color: var(--teams-text);
+  font-size: 14px;
+}
+
+.settings-state-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  flex: 0 0 auto;
+  border: 1px solid var(--teams-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--teams-muted);
+  background: var(--teams-surface-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.settings-state-pill.enabled {
+  color: color-mix(in srgb, #d58400 76%, var(--teams-text));
+  border-color: color-mix(in srgb, #d58400 34%, var(--teams-border));
+}
+
+.settings-relay-status-row,
+.settings-directory-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-relay-status-row {
+  justify-content: space-between;
+}
+
+.settings-directory-row .fui-Input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-directory-row .fui-Button,
+.settings-relay-status-row .fui-Button {
+  white-space: nowrap;
+}
+
+.settings-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@keyframes settingsSectionIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .confirm-modal {
@@ -4132,6 +4873,26 @@ body {
     max-height: 85vh;
   }
 
+  .settings-modal .settings-content {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .settings-profile-layout,
+  .settings-identity-card,
+  .profile-identity-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-preview-card {
+    min-height: 0;
+    position: static;
+  }
+
+  .identity-color-section {
+    border-top: 1px solid color-mix(in srgb, var(--teams-border) 84%, transparent);
+    border-left: 0;
+  }
+
   .emoji-grid {
     grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
     max-height: 128px;
@@ -4147,5 +4908,62 @@ body {
 
   .settings-relay-manual-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .settings-modal .settings-content {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .settings-navigation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-navigation button {
+    grid-template-columns: 28px minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .settings-navigation-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .settings-navigation small {
+    display: none;
+  }
+
+  .settings-section-panel {
+    overflow: visible;
+  }
+
+  .settings-basic-profile-card,
+  .settings-identity-card {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-theme-options {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-option-heading,
+  .settings-switch-row,
+  .settings-relay-status-row,
+  .settings-directory-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-state-pill,
+  .relay-connection-badge {
+    align-self: flex-start;
+    max-width: 100%;
+  }
+
+  .emoji-picker {
+    width: min(488px, calc(100vw - 20px));
+    left: -4px;
   }
 }

@@ -39,6 +39,14 @@ const translations: Record<SupportedLocale, TranslationTable> = {
     'Restore backup': 'Restaurar backup',
     'Language': 'Idioma',
     'Use system language': 'Usar idioma do sistema',
+    Theme: 'Tema',
+    'Choose how Lantern looks on this device.': 'Escolha como o Lantern aparece neste dispositivo.',
+    System: 'Sistema',
+    Light: 'Claro',
+    Dark: 'Escuro',
+    'Follow device': 'Acompanha o dispositivo',
+    'Bright surfaces': 'Superfícies luminosas',
+    'Less screen glare': 'Menos brilho na tela',
     'Portuguese (Brazil)': 'Português (Brasil)',
     'English': 'Inglês',
     'Spanish': 'Espanhol',
@@ -128,6 +136,14 @@ const translations: Record<SupportedLocale, TranslationTable> = {
     'Restore backup': 'Restore backup',
     'Language': 'Language',
     'Use system language': 'Use system language',
+    'Theme': 'Theme',
+    'Choose how Lantern looks on this device.': 'Choose how Lantern looks on this device.',
+    'System': 'System',
+    'Light': 'Light',
+    'Dark': 'Dark',
+    'Follow device': 'Follow device',
+    'Bright surfaces': 'Bright surfaces',
+    'Less screen glare': 'Less screen glare',
     'Portuguese (Brazil)': 'Portuguese (Brazil)',
     'English': 'English',
     'Spanish': 'Spanish',
@@ -217,6 +233,14 @@ const translations: Record<SupportedLocale, TranslationTable> = {
     'Restore backup': 'Restaurar copia',
     'Language': 'Idioma',
     'Use system language': 'Usar idioma del sistema',
+    'Theme': 'Tema',
+    'Choose how Lantern looks on this device.': 'Elige cómo se ve Lantern en este dispositivo.',
+    'System': 'Sistema',
+    'Light': 'Claro',
+    'Dark': 'Oscuro',
+    'Follow device': 'Sigue al dispositivo',
+    'Bright surfaces': 'Superficies claras',
+    'Less screen glare': 'Menos brillo en pantalla',
     'Portuguese (Brazil)': 'Portugués (Brasil)',
     'English': 'Inglés',
     'Spanish': 'Español',
@@ -298,6 +322,14 @@ const translations: Record<SupportedLocale, TranslationTable> = {
     'Restore backup': 'Restaurer une sauvegarde',
     'Language': 'Langue',
     'Use system language': 'Utiliser la langue du système',
+    'Theme': 'Thème',
+    'Choose how Lantern looks on this device.': 'Choisissez l’apparence de Lantern sur cet appareil.',
+    'System': 'Système',
+    'Light': 'Clair',
+    'Dark': 'Sombre',
+    'Follow device': 'Suit l’appareil',
+    'Bright surfaces': 'Surfaces lumineuses',
+    'Less screen glare': 'Moins de luminosité à l’écran',
     'Portuguese (Brazil)': 'Portugais (Brésil)',
     'English': 'Anglais',
     'Spanish': 'Espagnol',
@@ -671,6 +703,62 @@ const legacyTranslations: Record<string, Record<SupportedLocale, string>> = {
   , 'Grupo não encontrado.': { 'pt-BR': 'Grupo não encontrado.', en: 'Group not found.', es: 'Grupo no encontrado.', fr: 'Groupe introuvable.' }
   , 'Relay não retornou o grupo criado.': { 'pt-BR': 'Relay não retornou o grupo criado.', en: 'Relay did not return the created group.', es: 'El Relay no devolvió el grupo creado.', fr: 'Le Relay n’a pas renvoyé le groupe créé.' }
   , 'Arquivo local não está mais disponível para envio.': { 'pt-BR': 'Arquivo local não está mais disponível para envio.', en: 'The local file is no longer available to send.', es: 'El archivo local ya no está disponible para enviar.', fr: 'Le fichier local n’est plus disponible pour l’envoi.' }
+  , 'Personalize Lantern on this device.': { 'pt-BR': 'Personalize o Lantern neste dispositivo.', en: 'Personalize Lantern on this device.', es: 'Personaliza Lantern en este dispositivo.', fr: 'Personnalisez Lantern sur cet appareil.' }
+  , 'Settings sections': { 'pt-BR': 'Seções das configurações', en: 'Settings sections', es: 'Secciones de configuración', fr: 'Sections des paramètres' }
+  , 'Name, status and visual identity': { 'pt-BR': 'Nome, status e identidade visual', en: 'Name, status and visual identity', es: 'Nombre, estado e identidad visual', fr: 'Nom, statut et identité visuelle' }
+  , 'Relay': { 'pt-BR': 'Relay', en: 'Relay', es: 'Relay', fr: 'Relay' }
+  , 'Connection and discovery preferences': { 'pt-BR': 'Preferências de conexão e descoberta', en: 'Connection and discovery preferences', es: 'Preferencias de conexión y detección', fr: 'Préférences de connexion et de découverte' }
+  , 'Notifications': { 'pt-BR': 'Notificações', en: 'Notifications', es: 'Notificaciones', fr: 'Notifications' }
+  , 'Quiet hours and alerts': { 'pt-BR': 'Silêncio e alertas do aplicativo', en: 'Quiet hours and alerts', es: 'Silencio y alertas de la aplicación', fr: 'Silence et alertes de l’application' }
+  , 'Application': { 'pt-BR': 'Aplicativo', en: 'Application', es: 'Aplicación', fr: 'Application' }
+  , 'Startup, files, language and backup': { 'pt-BR': 'Inicialização, arquivos, idioma e backup', en: 'Startup, files, language and backup', es: 'Inicio, archivos, idioma y copia de seguridad', fr: 'Démarrage, fichiers, langue et sauvegarde' }
+  , 'These settings only apply to this device.': { 'pt-BR': 'Estas preferências valem somente para este dispositivo.', en: 'These settings only apply to this device.', es: 'Estas preferencias solo se aplican a este dispositivo.', fr: 'Ces préférences s’appliquent uniquement à cet appareil.' }
+  , 'Profile preview': { 'pt-BR': 'Prévia do perfil', en: 'Profile preview', es: 'Vista previa del perfil', fr: 'Aperçu du profil' }
+  , 'Preview': { 'pt-BR': 'PRÉVIA', en: 'PREVIEW', es: 'VISTA PREVIA', fr: 'APERÇU' }
+  , 'E.g. In a meeting, I will reply later': { 'pt-BR': 'Ex.: Em reunião, respondo depois', en: 'E.g. In a meeting, I will reply later', es: 'Ej.: En reunión, responderé más tarde', fr: 'Ex. : En réunion, je répondrai plus tard' }
+  , 'Status suggestions': { 'pt-BR': 'Sugestões de status', en: 'Status suggestions', es: 'Sugerencias de estado', fr: 'Suggestions de statut' }
+  , 'Faces': { 'pt-BR': 'Rostos', en: 'Faces', es: 'Caras', fr: 'Visages' }
+  , 'Work': { 'pt-BR': 'Trabalho', en: 'Work', es: 'Trabajo', fr: 'Travail' }
+  , 'Animals': { 'pt-BR': 'Animais', en: 'Animals', es: 'Animales', fr: 'Animaux' }
+  , 'Food': { 'pt-BR': 'Comida', en: 'Food', es: 'Comida', fr: 'Alimentation' }
+  , 'Start Lantern automatically after you sign in to your computer.': { 'pt-BR': 'Inicie o Lantern automaticamente após entrar no computador.', en: 'Start Lantern automatically after you sign in to your computer.', es: 'Inicia Lantern automáticamente después de iniciar sesión en tu equipo.', fr: 'Démarrez Lantern automatiquement après votre ouverture de session.' }
+  , 'Not supported on this system': { 'pt-BR': 'Não suportado neste sistema', en: 'Not supported on this system', es: 'No compatible con este sistema', fr: 'Non pris en charge sur ce système' }
+  , 'Select a folder for received files': { 'pt-BR': 'Selecione a pasta para arquivos recebidos', en: 'Select a folder for received files', es: 'Selecciona la carpeta para los archivos recibidos', fr: 'Sélectionnez le dossier des fichiers reçus' }
+  , 'Choose the language used by Lantern on this device.': { 'pt-BR': 'Escolha o idioma usado pelo Lantern neste dispositivo.', en: 'Choose the language used by Lantern on this device.', es: 'Elige el idioma utilizado por Lantern en este dispositivo.', fr: 'Choisissez la langue utilisée par Lantern sur cet appareil.' }
+  , 'Creating backup...': { 'pt-BR': 'Gerando backup...', en: 'Creating backup...', es: 'Creando copia de seguridad...', fr: 'Création de la sauvegarde...' }
+  , 'Preparing restore...': { 'pt-BR': 'Preparando restauração...', en: 'Preparing restore...', es: 'Preparando restauración...', fr: 'Préparation de la restauration...' }
+  , 'Backup canceled.': { 'pt-BR': 'Backup cancelado.', en: 'Backup canceled.', es: 'Copia de seguridad cancelada.', fr: 'Sauvegarde annulée.' }
+  , 'Backup created at:': { 'pt-BR': 'Backup criado em:', en: 'Backup created at:', es: 'Copia de seguridad creada en:', fr: 'Sauvegarde créée dans :' }
+  , 'selected folder': { 'pt-BR': 'pasta selecionada', en: 'selected folder', es: 'carpeta seleccionada', fr: 'dossier sélectionné' }
+  , 'Could not create the local backup.': { 'pt-BR': 'Não foi possível criar o backup local.', en: 'Could not create the local backup.', es: 'No se pudo crear la copia de seguridad local.', fr: 'Impossible de créer la sauvegarde locale.' }
+  , 'Restore canceled.': { 'pt-BR': 'Restauração cancelada.', en: 'Restore canceled.', es: 'Restauración cancelada.', fr: 'Restauration annulée.' }
+  , 'Restore prepared. The app will restart.': { 'pt-BR': 'Restauração preparada. O aplicativo será reiniciado.', en: 'Restore prepared. The app will restart.', es: 'Restauración preparada. La aplicación se reiniciará.', fr: 'Restauration préparée. L’application va redémarrer.' }
+  , 'Could not restore the local backup.': { 'pt-BR': 'Não foi possível restaurar o backup local.', en: 'Could not restore the local backup.', es: 'No se pudo restaurar la copia de seguridad local.', fr: 'Impossible de restaurer la sauvegarde locale.' }
+  , 'Recently used': { 'pt-BR': 'Recentes', en: 'Recently used', es: 'Usados recientemente', fr: 'Récents' }
+  , 'Gestures': { 'pt-BR': 'Gestos', en: 'Gestures', es: 'Gestos', fr: 'Gestes' }
+  , 'People': { 'pt-BR': 'Pessoas', en: 'People', es: 'Personas', fr: 'Personnes' }
+  , 'Objects': { 'pt-BR': 'Objetos', en: 'Objects', es: 'Objetos', fr: 'Objets' }
+  , 'Nature': { 'pt-BR': 'Natureza', en: 'Nature', es: 'Naturaleza', fr: 'Nature' }
+  , 'Activities': { 'pt-BR': 'Atividades', en: 'Activities', es: 'Actividades', fr: 'Activités' }
+  , 'Travel': { 'pt-BR': 'Viagens', en: 'Travel', es: 'Viajes', fr: 'Voyages' }
+  , 'Flags': { 'pt-BR': 'Bandeiras', en: 'Flags', es: 'Banderas', fr: 'Drapeaux' }
+  , 'Symbols': { 'pt-BR': 'Símbolos', en: 'Symbols', es: 'Símbolos', fr: 'Symboles' }
+  , 'Choose an emoji to add to your message.': { 'pt-BR': 'Escolha um emoji para adicionar à mensagem.', en: 'Choose an emoji to add to your message.', es: 'Elige un emoji para añadir al mensaje.', fr: 'Choisissez un emoji à ajouter au message.' }
+  , 'Search emoji (e.g. heart, pizza, cat...)': { 'pt-BR': 'Buscar emoji (ex.: coração, pizza, gato...)', en: 'Search emoji (e.g. heart, pizza, cat...)', es: 'Buscar emoji (p. ej., corazón, pizza, gato...)', fr: 'Rechercher un emoji (ex. cœur, pizza, chat...)' }
+  , 'Emoji categories': { 'pt-BR': 'Categorias de emoji', en: 'Emoji categories', es: 'Categorías de emojis', fr: 'Catégories d’emojis' }
+  , 'Emoji search results': { 'pt-BR': 'Resultados da busca de emoji', en: 'Emoji search results', es: 'Resultados de búsqueda de emojis', fr: 'Résultats de recherche d’emojis' }
+  , 'Add emoji': { 'pt-BR': 'Adicionar emoji', en: 'Add emoji', es: 'Agregar emoji', fr: 'Ajouter un emoji' }
+  , 'Your recently used emojis will appear here.': { 'pt-BR': 'Seus emojis usados recentemente aparecerão aqui.', en: 'Your recently used emojis will appear here.', es: 'Tus emojis usados recientemente aparecerán aquí.', fr: 'Vos emojis récemment utilisés apparaîtront ici.' }
+  , 'Visual identity': { 'pt-BR': 'Identidade visual', en: 'Visual identity', es: 'Identidad visual', fr: 'Identité visuelle' }
+  , 'Choose how you appear in conversations.': { 'pt-BR': 'Escolha como você aparece nas conversas.', en: 'Choose how you appear in conversations.', es: 'Elige cómo apareces en las conversaciones.', fr: 'Choisissez comment vous apparaissez dans les conversations.' }
+  , 'Search by cat, work, party...': { 'pt-BR': 'Buscar por gato, trabalho, festa...', en: 'Search by cat, work, party...', es: 'Buscar por gato, trabajo, fiesta...', fr: 'Rechercher chat, travail, fête...' }
+  , 'Search profile emoji': { 'pt-BR': 'Buscar emoji de perfil', en: 'Search profile emoji', es: 'Buscar emoji de perfil', fr: 'Rechercher un emoji de profil' }
+  , 'No profile emoji found.': { 'pt-BR': 'Nenhum emoji de perfil encontrado.', en: 'No profile emoji found.', es: 'No se encontró ningún emoji de perfil.', fr: 'Aucun emoji de profil trouvé.' }
+  , 'Paste an emoji': { 'pt-BR': 'Cole um emoji', en: 'Paste an emoji', es: 'Pega un emoji', fr: 'Collez un emoji' }
+  , 'Custom emoji': { 'pt-BR': 'Emoji personalizado', en: 'Custom emoji', es: 'Emoji personalizado', fr: 'Emoji personnalisé' }
+  , 'Choose the color of your avatar.': { 'pt-BR': 'Escolha a cor do seu avatar.', en: 'Choose the color of your avatar.', es: 'Elige el color de tu avatar.', fr: 'Choisissez la couleur de votre avatar.' }
+  , 'Use color': { 'pt-BR': 'Usar cor', en: 'Use color', es: 'Usar color', fr: 'Utiliser la couleur' }
+  , 'Custom color': { 'pt-BR': 'Cor personalizada', en: 'Custom color', es: 'Color personalizado', fr: 'Couleur personnalisée' }
 };
 
 const sourceTextByNode = new WeakMap<Text, string>();
