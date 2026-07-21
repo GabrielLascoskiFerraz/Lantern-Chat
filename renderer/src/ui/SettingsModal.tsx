@@ -17,11 +17,21 @@ import {
   Alert20Regular,
   Apps20Regular,
   ArrowSync20Regular,
+  Desktop20Regular,
   LockClosed20Regular,
-  Person20Regular
+  Person20Regular,
+  PlugConnected20Regular
 } from '@fluentui/react-icons';
-import { ipcClient, Profile, StartupSettings } from '../api/ipcClient';
+import {
+  AccountSession,
+  ClientAuthState,
+  ipcClient,
+  Profile,
+  RelaySettings,
+  StartupSettings
+} from '../api/ipcClient';
 import { Avatar } from './Avatar';
+import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileIdentityEditor } from './ProfileIdentityEditor';
 import { isProfileColor } from './profileIdentityOptions';
 import {
@@ -106,6 +116,18 @@ export const SettingsModal = ({
   const [updateSupported, setUpdateSupported] = useState(false);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateFeedback, setUpdateFeedback] = useState('');
+  const [accountSessions, setAccountSessions] = useState<AccountSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState('');
+  const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
+  const [pendingSessionRevoke, setPendingSessionRevoke] = useState<AccountSession | null>(null);
+  const [discardConfirmationOpen, setDiscardConfirmationOpen] = useState(false);
+  const [relayConnection, setRelayConnection] = useState<{
+    settings: RelaySettings;
+    auth: ClientAuthState;
+  } | null>(null);
+  const [relayConnectionLoading, setRelayConnectionLoading] = useState(false);
+  const [relayConnectionError, setRelayConnectionError] = useState('');
 
   const resetDraftFromProps = (): void => {
     setActiveSection('profile');
@@ -125,6 +147,15 @@ export const SettingsModal = ({
     setPasswordBusy(false);
     setSaveBusy(false);
     setSaveFeedback('');
+    setAccountSessions([]);
+    setSessionsError('');
+    setSessionsLoading(false);
+    setRevokingSessionId(null);
+    setPendingSessionRevoke(null);
+    setDiscardConfirmationOpen(false);
+    setRelayConnection(null);
+    setRelayConnectionError('');
+    setRelayConnectionLoading(false);
   };
 
   useEffect(() => {
@@ -133,6 +164,57 @@ export const SettingsModal = ({
       void ipcClient.getUpdateState().then((state) => setUpdateSupported(state.supported)).catch(() => setUpdateSupported(false));
     }
   }, [open, profile, startupSettings]);
+
+  useEffect(() => {
+    if (!open || activeSection !== 'security') return;
+    setSessionsLoading(true);
+    setSessionsError('');
+    void ipcClient.listAccountSessions()
+      .then(setAccountSessions)
+      .catch((error) => {
+        const raw = error instanceof Error ? error.message : 'Não foi possível carregar as sessões.';
+        setSessionsError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+      })
+      .finally(() => setSessionsLoading(false));
+  }, [activeSection, open]);
+
+  const refreshRelayConnection = (): void => {
+    setRelayConnectionLoading(true);
+    setRelayConnectionError('');
+    void Promise.all([ipcClient.getRelaySettings(), ipcClient.getAuthState()])
+      .then(([settings, auth]) => setRelayConnection({ settings, auth }))
+      .catch((error) => {
+        const raw = error instanceof Error ? error.message : 'Não foi possível consultar a conexão.';
+        setRelayConnectionError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+      })
+      .finally(() => setRelayConnectionLoading(false));
+  };
+
+  useEffect(() => {
+    if (!open || activeSection !== 'application') return;
+    refreshRelayConnection();
+  }, [activeSection, open]);
+
+  const relayEndpoint = relayConnection?.settings.endpoint || relayConnection?.auth.endpoint || null;
+  let relayEndpointDetails: { protocol: string; host: string; port: string } | null = null;
+  if (relayEndpoint) {
+    try {
+      const parsed = new URL(relayEndpoint);
+      relayEndpointDetails = {
+        protocol: parsed.protocol === 'wss:' ? 'WSS (segura)' : 'WS (local simples)',
+        host: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'wss:' ? '443' : '80')
+      };
+    } catch {
+      relayEndpointDetails = null;
+    }
+  }
+
+  const relayConnectionModeLabel = relayConnection?.auth.relay.mode === 'local-auto'
+    ? 'Local automático'
+    : relayConnection?.auth.relay.mode === 'local-manual'
+      ? 'Local manual'
+      : 'Externo';
 
   const activeDoNotDisturbUntil = doNotDisturbUntil > Date.now() ? doNotDisturbUntil : 0;
   const doNotDisturbLabel = activeDoNotDisturbUntil
@@ -166,7 +248,10 @@ export const SettingsModal = ({
 
   const requestClose = (): void => {
     if (saveBusy || passwordBusy) return;
-    if (hasChanges && !window.confirm('Descartar as alterações feitas nas configurações?')) return;
+    if (hasChanges) {
+      setDiscardConfirmationOpen(true);
+      return;
+    }
     onClose();
   };
 
@@ -227,7 +312,37 @@ export const SettingsModal = ({
       .finally(() => setPasswordBusy(false));
   };
 
+  const revokeSession = (session: AccountSession): void => {
+    setPendingSessionRevoke(session);
+  };
+
+  const confirmSessionRevoke = (): void => {
+    const session = pendingSessionRevoke;
+    if (!session) return;
+    setPendingSessionRevoke(null);
+    setRevokingSessionId(session.sessionId);
+    setSessionsError('');
+    void ipcClient.revokeAccountSession(session.sessionId)
+      .then((result) => {
+        if (!result.revoked) throw new Error('A sessão já havia sido encerrada ou expirou.');
+        if (!result.current) {
+          setAccountSessions((current) => current.filter((item) => item.sessionId !== session.sessionId));
+        }
+      })
+      .catch((error) => {
+        const raw = error instanceof Error ? error.message : 'Não foi possível encerrar a sessão.';
+        setSessionsError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+      })
+      .finally(() => setRevokingSessionId(null));
+  };
+
+  const formatSessionDate = (value: number): string => new Date(value).toLocaleString('pt-BR', {
+    dateStyle: 'short',
+    timeStyle: 'short'
+  });
+
   return (
+    <>
     <Dialog open={open} onOpenChange={(_, data) => !data.open && requestClose()}>
       <DialogSurface className="settings-modal">
         <DialogBody>
@@ -462,6 +577,44 @@ export const SettingsModal = ({
                       </Button>
                     </div>
                   </div>
+                  <div className="settings-card settings-option-card settings-relay-connection-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Conexão com o Relay</h3>
+                        <p>Servidor utilizado para sincronizar sua conta, conversas e arquivos.</p>
+                      </div>
+                      <div className="settings-relay-heading-actions">
+                        <span className={`settings-state-pill ${relayConnection?.settings.connected ? 'enabled' : ''}`}>
+                          {relayConnectionLoading && !relayConnection
+                            ? 'Consultando...'
+                            : relayConnection?.settings.connected ? 'Conectado' : 'Sem conexão'}
+                        </span>
+                        <Button
+                          appearance="subtle"
+                          icon={relayConnectionLoading ? <Spinner size="tiny" /> : <ArrowSync20Regular />}
+                          disabled={relayConnectionLoading}
+                          onClick={refreshRelayConnection}
+                          aria-label="Atualizar informações da conexão"
+                        />
+                      </div>
+                    </div>
+                    {relayConnectionError ? (
+                      <Text className="settings-password-feedback" role="alert">{relayConnectionError}</Text>
+                    ) : (
+                      <div className="settings-relay-connection-body">
+                        <div className={`settings-relay-connection-icon ${relayConnection?.settings.connected ? 'connected' : ''}`} aria-hidden="true">
+                          <PlugConnected20Regular />
+                        </div>
+                        <dl className="settings-relay-details">
+                          <div><dt>Endereço</dt><dd>{relayEndpoint || 'Nenhum Relay conectado'}</dd></div>
+                          <div><dt>Tipo</dt><dd>{relayConnection ? relayConnectionModeLabel : '—'}</dd></div>
+                          <div><dt>Protocolo</dt><dd>{relayEndpointDetails?.protocol || '—'}</dd></div>
+                          <div><dt>Servidor</dt><dd>{relayEndpointDetails?.host || relayConnection?.settings.host || '—'}</dd></div>
+                          <div><dt>Porta</dt><dd>{relayEndpointDetails?.port || relayConnection?.settings.port || '—'}</dd></div>
+                        </dl>
+                      </div>
+                    )}
+                  </div>
                 </section>
               )}
 
@@ -470,7 +623,7 @@ export const SettingsModal = ({
                   <header className="settings-section-heading">
                     <div>
                       <h2 id="settings-security-title">Segurança</h2>
-                      <p>Atualize a senha usada para acessar sua conta.</p>
+                      <p>Gerencie sua senha e os dispositivos conectados à conta.</p>
                     </div>
                   </header>
                   <div className="settings-card settings-option-card">
@@ -544,6 +697,61 @@ export const SettingsModal = ({
                       </div>
                     )}
                   </div>
+                  <div className="settings-card settings-option-card settings-sessions-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Sessões da conta</h3>
+                        <p>Dispositivos em que sua conta está conectada. Encerre qualquer acesso que você não reconheça.</p>
+                      </div>
+                      <Button
+                        appearance="subtle"
+                        icon={sessionsLoading ? <Spinner size="tiny" /> : <ArrowSync20Regular />}
+                        disabled={sessionsLoading}
+                        onClick={() => {
+                          setSessionsLoading(true);
+                          setSessionsError('');
+                          void ipcClient.listAccountSessions()
+                            .then(setAccountSessions)
+                            .catch((error) => setSessionsError(error instanceof Error ? error.message : 'Não foi possível atualizar as sessões.'))
+                            .finally(() => setSessionsLoading(false));
+                        }}
+                      >
+                        Atualizar
+                      </Button>
+                    </div>
+                    {sessionsError && <Text className="settings-password-feedback" role="alert">{sessionsError}</Text>}
+                    {sessionsLoading && accountSessions.length === 0 ? (
+                      <div className="settings-sessions-state"><Spinner size="small" /><span>Carregando sessões...</span></div>
+                    ) : accountSessions.length === 0 ? (
+                      <div className="settings-sessions-state">Nenhuma sessão ativa encontrada.</div>
+                    ) : (
+                      <div className="settings-sessions-list">
+                        {accountSessions.map((session) => (
+                          <div className="settings-session-row" key={session.sessionId}>
+                            <div className="settings-session-icon" aria-hidden="true"><Desktop20Regular /></div>
+                            <div className="settings-session-info">
+                              <div className="settings-session-title">
+                                <strong>{session.current ? 'Este dispositivo' : 'Outro dispositivo'}</strong>
+                                {session.current && <span className="settings-state-pill enabled">Sessão atual</span>}
+                              </div>
+                              <span>Identificador {session.deviceId.slice(0, 12)}</span>
+                              <span>Atividade: {formatSessionDate(session.lastSeenAt)} · Login: {formatSessionDate(session.createdAt)}</span>
+                              <span>Expira em {formatSessionDate(session.expiresAt)}</span>
+                            </div>
+                            <Button
+                              appearance="secondary"
+                              disabled={revokingSessionId !== null}
+                              onClick={() => revokeSession(session)}
+                            >
+                              {revokingSessionId === session.sessionId
+                                ? <><Spinner size="tiny" /> Encerrando...</>
+                                : 'Encerrar sessão'}
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </section>
               )}
             </div>
@@ -566,5 +774,27 @@ export const SettingsModal = ({
         </DialogBody>
       </DialogSurface>
     </Dialog>
+    <ConfirmDialog
+      open={discardConfirmationOpen}
+      title="Descartar alterações?"
+      description="As alterações ainda não salvas serão perdidas."
+      confirmLabel="Descartar"
+      onCancel={() => setDiscardConfirmationOpen(false)}
+      onConfirm={() => {
+        setDiscardConfirmationOpen(false);
+        onClose();
+      }}
+    />
+    <ConfirmDialog
+      open={Boolean(pendingSessionRevoke)}
+      title={pendingSessionRevoke?.current ? 'Encerrar esta sessão?' : 'Encerrar sessão?'}
+      description={pendingSessionRevoke?.current
+        ? 'Você será desconectado do Lantern neste dispositivo e precisará entrar novamente.'
+        : 'A conta será desconectada daquele dispositivo imediatamente.'}
+      confirmLabel="Encerrar sessão"
+      onCancel={() => setPendingSessionRevoke(null)}
+      onConfirm={confirmSessionRevoke}
+    />
+    </>
   );
 };

@@ -276,6 +276,24 @@ export class AuthService {
     await this.authenticatedRequest('/api/client/password', 'POST', input);
   }
 
+  async listAccountSessions(): Promise<import('./types').AccountSession[]> {
+    const body = await this.authenticatedRequest<{ sessions?: import('./types').AccountSession[] }>(
+      '/api/client/sessions',
+      'GET'
+    );
+    return Array.isArray(body.sessions) ? body.sessions : [];
+  }
+
+  async revokeAccountSession(sessionId: string): Promise<{ revoked: boolean; current: boolean }> {
+    const body = await this.authenticatedRequest<{ revoked?: boolean; current?: boolean }>(
+      `/api/client/sessions/${encodeURIComponent(sessionId)}`,
+      'DELETE'
+    );
+    const result = { revoked: body.revoked === true, current: body.current === true };
+    if (result.revoked && result.current) this.clearSession();
+    return result;
+  }
+
   async completeInitialPassword(newPassword: string): Promise<ClientAuthState> {
     const body = await this.authenticatedRequest<{ user?: AuthenticatedUser; message?: string }>(
       '/api/client/initial-password',
@@ -436,7 +454,7 @@ export class AuthService {
 
   private async authenticatedRequest<T extends Record<string, unknown>>(
     pathname: string,
-    method: 'GET' | 'POST' | 'PATCH' | 'PUT',
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     body?: Record<string, unknown>
   ): Promise<T> {
     if (!this.token || !this.stored.endpoint) throw new Error('Sessão do Relay indisponível.');

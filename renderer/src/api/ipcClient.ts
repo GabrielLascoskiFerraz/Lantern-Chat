@@ -46,6 +46,14 @@ export interface AuthenticatedUser {
   profileSetupCompleted: boolean;
   passwordSetupRequired: boolean;
 }
+export interface AccountSession {
+  sessionId: string;
+  deviceId: string;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  current: boolean;
+}
 export interface UserPreferencesSnapshot {
   conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
   messages: Array<{ messageId: string; favorite: boolean; hidden: boolean; updatedAt: number }>;
@@ -291,6 +299,8 @@ export interface LanternApi {
   getPasswordResetStatus: (requestToken: string) => Promise<'pending' | 'approved' | 'rejected' | 'consumed' | 'expired' | 'invalid'>;
   completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => Promise<void>;
   changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
+  listAccountSessions: () => Promise<AccountSession[]>;
+  revokeAccountSession: (sessionId: string) => Promise<{ revoked: boolean; current: boolean }>;
   completeInitialPassword: (newPassword: string) => Promise<ClientAuthState>;
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) => Promise<ClientAuthState>;
   completeFirstLoginSetup: (input: { avatarEmoji: string; avatarBg: string; openAtLogin: boolean }) => Promise<ClientAuthState>;
@@ -455,6 +465,8 @@ export const ipcClient = {
   getPasswordResetStatus: (requestToken: string) => window.lantern.getPasswordResetStatus(requestToken),
   completePasswordReset: (input: { username: string; requestToken: string; newPassword: string }) => window.lantern.completePasswordReset(input),
   changePassword: (input: { currentPassword: string; newPassword: string }) => window.lantern.changePassword(input),
+  listAccountSessions: () => window.lantern.listAccountSessions(),
+  revokeAccountSession: (sessionId: string) => window.lantern.revokeAccountSession(sessionId),
   completeInitialPassword: (newPassword: string) => window.lantern.completeInitialPassword(newPassword),
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: ClientLocale }) =>
     window.lantern.register(input),

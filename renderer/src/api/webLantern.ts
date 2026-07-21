@@ -1097,6 +1097,16 @@ class WebLanternBridge {
       getPasswordResetStatus: async (requestToken) => (await this.http(`/api/client/password-reset/status?token=${encodeURIComponent(requestToken)}`, {}, false)).status,
       completePasswordReset: async (input) => { await this.http('/api/client/password-reset/complete', { method: 'POST', body: JSON.stringify(input) }, false); },
       changePassword: async (input) => { await this.http('/api/client/password', { method: 'POST', body: JSON.stringify(input) }); },
+      listAccountSessions: async () => {
+        const body = await this.http('/api/client/sessions');
+        return Array.isArray(body.sessions) ? body.sessions as unknown as import('./ipcClient').AccountSession[] : [];
+      },
+      revokeAccountSession: async (sessionId) => {
+        const body = await this.http(`/api/client/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+        const result = { revoked: body.revoked === true, current: body.current === true };
+        if (result.revoked && result.current) await this.logout();
+        return result;
+      },
       completeInitialPassword: async (newPassword) => {
         const body = await this.http('/api/client/initial-password', { method: 'POST', body: JSON.stringify({ newPassword }) });
         this.user = body.user as AuthenticatedUser;

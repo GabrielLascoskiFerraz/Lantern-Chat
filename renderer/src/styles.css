@@ -5546,6 +5546,132 @@ body {
   gap: 8px;
 }
 
+.settings-sessions-card {
+  gap: 14px;
+}
+
+.settings-sessions-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-session-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--teams-border);
+  border-radius: 8px;
+  background: var(--teams-surface-2);
+}
+
+.settings-session-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--teams-accent);
+  background: color-mix(in srgb, var(--teams-accent) 12%, var(--teams-surface));
+}
+
+.settings-session-info {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--teams-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-session-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--teams-text);
+  font-size: 13px;
+}
+
+.settings-sessions-state {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--teams-muted);
+  font-size: 12px;
+}
+
+.settings-relay-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-relay-connection-body {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--teams-border);
+  border-radius: 8px;
+  background: var(--teams-surface-2);
+}
+
+.settings-relay-connection-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--teams-muted);
+  background: color-mix(in srgb, var(--teams-muted) 10%, var(--teams-surface));
+}
+
+.settings-relay-connection-icon.connected {
+  color: #107c10;
+  background: color-mix(in srgb, #16a34a 12%, var(--teams-surface));
+}
+
+.settings-relay-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
+  min-width: 0;
+  margin: 0;
+}
+
+.settings-relay-details > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-relay-details > div:first-child {
+  grid-column: 1 / -1;
+}
+
+.settings-relay-details dt {
+  color: var(--teams-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.settings-relay-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--teams-text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .settings-modal .settings-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -5983,6 +6109,31 @@ body {
   .settings-password-panel > .fui-Field:first-child,
   .settings-password-feedback,
   .settings-password-actions {
+    grid-column: auto;
+  }
+
+  .settings-session-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .settings-session-row > .fui-Button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .settings-relay-connection-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-relay-connection-icon {
+    display: none;
+  }
+
+  .settings-relay-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-relay-details > div:first-child {
     grid-column: auto;
   }
 

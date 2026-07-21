@@ -46,6 +46,15 @@ export interface AuthenticatedUser {
   passwordSetupRequired: boolean;
 }
 
+export interface AccountSession {
+  sessionId: string;
+  deviceId: string;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  current: boolean;
+}
+
 export interface UserPreferencesSnapshot {
   conversations: Array<{
     conversationId: string;

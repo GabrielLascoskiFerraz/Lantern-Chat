@@ -2851,6 +2851,42 @@ export class LanternRelay {
       return;
     }
 
+    if (requestUrl.pathname === '/api/client/sessions' && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
+      if (!account || !token) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      this.writeJson(res, method, {
+        ok: true,
+        sessions: this.centralStore.listUserSessions(account.userId, token)
+      });
+      return;
+    }
+
+    const clientSessionMatch = requestUrl.pathname.match(/^\/api\/client\/sessions\/([a-f0-9]{64})$/);
+    if (clientSessionMatch && method === 'DELETE') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
+      if (!account || !token) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      const sessionId = clientSessionMatch[1];
+      const current = hashToken(token) === sessionId;
+      const revoked = this.centralStore.revokeUserSession(account.userId, sessionId);
+      if (revoked) {
+        for (const relaySession of Array.from(this.sessionsBySocket.values())) {
+          if (relaySession.authToken && hashToken(relaySession.authToken) === sessionId) {
+            this.dropSession(relaySession, 'session-revoked');
+          }
+        }
+      }
+      this.writeJson(res, method, { ok: true, revoked, current });
+      return;
+    }
+
     if (requestUrl.pathname === '/api/client/initial-password' && method === 'POST') {
       const token = this.getBearerToken(req);
       const account = token ? this.centralStore.authenticate(token) : null;

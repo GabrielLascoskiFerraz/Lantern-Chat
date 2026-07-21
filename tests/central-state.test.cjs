@@ -441,3 +441,35 @@ test('redefinição de senha exige aprovação e troca autenticada preserva apen
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('usuário lista e revoga somente as próprias sessões', () => {
+  const root = createTempDir();
+  try {
+    const store = new CentralStore(path.join(root, 'central'), silentLog);
+    const firstUser = store.createUser({
+      username: 'sessions-first', displayName: 'First User', password: 'sessions-first-password'
+    });
+    const secondUser = store.createUser({
+      username: 'sessions-second', displayName: 'Second User', password: 'sessions-second-password'
+    });
+    const current = store.login(firstUser.username, 'sessions-first-password', 'first-current');
+    const other = store.login(firstUser.username, 'sessions-first-password', 'first-other');
+    const foreign = store.login(secondUser.username, 'sessions-second-password', 'second-device');
+
+    const sessions = store.listUserSessions(firstUser.userId, current.token);
+    assert.deepEqual(sessions.map((session) => session.deviceId).sort(), ['first-current', 'first-other']);
+    assert.equal(sessions.filter((session) => session.current).length, 1);
+    assert.equal(sessions.find((session) => session.current).deviceId, 'first-current');
+
+    const otherId = sessions.find((session) => session.deviceId === 'first-other').sessionId;
+    const foreignId = store.listUserSessions(secondUser.userId, foreign.token)[0].sessionId;
+    assert.equal(store.revokeUserSession(firstUser.userId, foreignId), false);
+    assert.ok(store.authenticate(foreign.token));
+    assert.equal(store.revokeUserSession(firstUser.userId, otherId), true);
+    assert.equal(store.authenticate(other.token), null);
+    assert.ok(store.authenticate(current.token));
+    store.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

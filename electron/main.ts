@@ -341,6 +341,12 @@ class LanternApp {
     this.emitEvent({ type: 'auth:changed', state: this.authState });
   }
 
+  private async revokeAccountSession(sessionId: string): Promise<{ revoked: boolean; current: boolean }> {
+    const result = await this.authService.revokeAccountSession(sessionId);
+    if (result.revoked && result.current) await this.logout();
+    return result;
+  }
+
   async start(): Promise<void> {
     app.setName('Lantern');
     app.setAppUserModelId(APP_ID);
@@ -567,6 +573,8 @@ class LanternApp {
       getPasswordResetStatus: (requestToken) => this.authService.getPasswordResetStatus(requestToken),
       completePasswordReset: (input) => this.authService.completePasswordReset(input),
       changePassword: (input) => this.authService.changePassword(input),
+      listAccountSessions: () => this.authService.listAccountSessions(),
+      revokeAccountSession: (sessionId) => this.revokeAccountSession(sessionId),
       completeInitialPassword: (newPassword) => this.completeInitialPassword(newPassword),
       register: async (input) => {
         const state = await this.authService.register(input);

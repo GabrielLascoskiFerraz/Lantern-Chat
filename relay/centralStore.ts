@@ -89,6 +89,10 @@ export interface CentralSessionInfo {
   revokedAt: number | null;
 }
 
+export interface UserSessionInfo extends CentralSessionInfo {
+  current: boolean;
+}
+
 const normalizeLocale = (value: unknown): SupportedLocale =>
   value === 'en' || value === 'es' ? value : 'pt-BR';
 
@@ -1125,6 +1129,37 @@ export class CentralStore {
       revokedAt: number | null;
     }>;
     return rows.map(({ tokenHash, ...row }) => ({ sessionId: tokenHash, ...row }));
+  }
+
+  listUserSessions(userId: string, currentToken: string): UserSessionInfo[] {
+    const currentSessionId = hashToken(currentToken);
+    const now = Date.now();
+    const rows = this.db.prepare(`
+      SELECT sessions.tokenHash, sessions.userId, users.username, users.displayName,
+        sessions.deviceId, sessions.createdAt, sessions.lastSeenAt,
+        sessions.expiresAt, sessions.revokedAt
+      FROM sessions JOIN users ON users.userId = sessions.userId
+      WHERE sessions.userId = ? AND sessions.revokedAt IS NULL AND sessions.expiresAt > ?
+      ORDER BY sessions.lastSeenAt DESC
+    `).all(userId, now) as Array<{
+      tokenHash: string; userId: string; username: string; displayName: string;
+      deviceId: string; createdAt: number; lastSeenAt: number; expiresAt: number;
+      revokedAt: number | null;
+    }>;
+    return rows.map(({ tokenHash, ...session }) => ({
+      sessionId: tokenHash,
+      ...session,
+      current: tokenHash === currentSessionId
+    }));
+  }
+
+  revokeUserSession(userId: string, sessionId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE sessions SET revokedAt = ?
+      WHERE userId = ? AND tokenHash = ? AND revokedAt IS NULL
+    `).run(Date.now(), userId, sessionId);
+    if (result.changes > 0) this.appendAudit('session.revoked', userId, sessionId.slice(0, 16));
+    return result.changes > 0;
   }
 
   revokeSession(sessionId: string, actor = 'admin'): boolean {

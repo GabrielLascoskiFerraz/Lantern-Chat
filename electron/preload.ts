@@ -17,6 +17,9 @@ const api = {
     ipcRenderer.invoke('lantern:completePasswordReset', input),
   changePassword: (input: { currentPassword: string; newPassword: string }) =>
     ipcRenderer.invoke('lantern:changePassword', input),
+  listAccountSessions: () => ipcRenderer.invoke('lantern:listAccountSessions'),
+  revokeAccountSession: (sessionId: string) =>
+    ipcRenderer.invoke('lantern:revokeAccountSession', sessionId),
   completeInitialPassword: (newPassword: string) =>
     ipcRenderer.invoke('lantern:completeInitialPassword', newPassword),
   register: (input: { relay: ClientRelayConfig; username: string; displayName: string; password: string; locale: 'pt-BR' | 'en' | 'es' }) =>
