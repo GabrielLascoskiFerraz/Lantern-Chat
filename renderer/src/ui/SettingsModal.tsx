@@ -17,6 +17,7 @@ import {
   Alert20Regular,
   Apps20Regular,
   ArrowSync20Regular,
+  Delete20Regular,
   Desktop20Regular,
   LockClosed20Regular,
   Person20Regular,
@@ -26,6 +27,8 @@ import {
   AccountSession,
   ClientAuthState,
   ipcClient,
+  LocalStorageClearTarget,
+  LocalStorageUsage,
   Profile,
   RelaySettings,
   StartupSettings
@@ -35,6 +38,9 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ProfileIdentityEditor } from './ProfileIdentityEditor';
 import { isProfileColor } from './profileIdentityOptions';
 import {
+  DensityMode,
+  DensitySelector,
+  densityModeLabel,
   FontSizeMode,
   FontSizeSelector,
   fontSizeModeLabel,
@@ -51,6 +57,8 @@ interface SettingsModalProps {
   onThemeModeChange: (mode: ThemeMode) => void;
   fontSizeMode: FontSizeMode;
   onFontSizeModeChange: (mode: FontSizeMode) => void;
+  densityMode: DensityMode;
+  onDensityModeChange: (mode: DensityMode) => void;
   onClose: () => void;
   onSave: (payload: {
     profile: {
@@ -81,7 +89,15 @@ const SETTINGS_SECTIONS: Array<{
   { id: 'security', icon: LockClosed20Regular, label: 'Segurança', description: 'Senha e acesso à conta' }
 ];
 
-const STATUS_PRESETS = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
+const STATUS_PRESETS = ['Disponível', 'Em reunião', 'Foco total', 'Volto já'];
+
+const formatStorageSize = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** unit;
+  return `${value.toLocaleString('pt-BR', { maximumFractionDigits: unit === 0 ? 0 : 1 })} ${units[unit]}`;
+};
 
 export const SettingsModal = ({
   open,
@@ -91,6 +107,8 @@ export const SettingsModal = ({
   onThemeModeChange,
   fontSizeMode,
   onFontSizeModeChange,
+  densityMode,
+  onDensityModeChange,
   onClose,
   onSave
 }: SettingsModalProps) => {
@@ -128,6 +146,11 @@ export const SettingsModal = ({
   } | null>(null);
   const [relayConnectionLoading, setRelayConnectionLoading] = useState(false);
   const [relayConnectionError, setRelayConnectionError] = useState('');
+  const [storageUsage, setStorageUsage] = useState<LocalStorageUsage | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState('');
+  const [storageClearTarget, setStorageClearTarget] = useState<LocalStorageClearTarget | null>(null);
+  const [storageClearBusy, setStorageClearBusy] = useState(false);
 
   const resetDraftFromProps = (): void => {
     setActiveSection('profile');
@@ -156,6 +179,11 @@ export const SettingsModal = ({
     setRelayConnection(null);
     setRelayConnectionError('');
     setRelayConnectionLoading(false);
+    setStorageUsage(null);
+    setStorageLoading(false);
+    setStorageError('');
+    setStorageClearTarget(null);
+    setStorageClearBusy(false);
   };
 
   useEffect(() => {
@@ -169,13 +197,22 @@ export const SettingsModal = ({
     if (!open || activeSection !== 'security') return;
     setSessionsLoading(true);
     setSessionsError('');
-    void ipcClient.listAccountSessions()
-      .then(setAccountSessions)
-      .catch((error) => {
-        const raw = error instanceof Error ? error.message : 'Não foi possível carregar as sessões.';
-        setSessionsError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
-      })
-      .finally(() => setSessionsLoading(false));
+    const refresh = (initial = false): void => {
+      void ipcClient.listAccountSessions()
+        .then((sessions) => {
+          setAccountSessions(sessions);
+          setSessionsError('');
+        })
+        .catch((error) => {
+          if (!initial) return;
+          const raw = error instanceof Error ? error.message : 'Não foi possível carregar as sessões.';
+          setSessionsError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+        })
+        .finally(() => initial && setSessionsLoading(false));
+    };
+    refresh(true);
+    const timer = window.setInterval(() => refresh(false), 10_000);
+    return () => window.clearInterval(timer);
   }, [activeSection, open]);
 
   const refreshRelayConnection = (): void => {
@@ -190,10 +227,41 @@ export const SettingsModal = ({
       .finally(() => setRelayConnectionLoading(false));
   };
 
+  const refreshStorageUsage = (): void => {
+    setStorageLoading(true);
+    setStorageError('');
+    void ipcClient.getLocalStorageUsage()
+      .then(setStorageUsage)
+      .catch((error) => {
+        const raw = error instanceof Error ? error.message : 'Não foi possível calcular o espaço utilizado.';
+        setStorageError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+      })
+      .finally(() => setStorageLoading(false));
+  };
+
   useEffect(() => {
     if (!open || activeSection !== 'application') return;
     refreshRelayConnection();
+    refreshStorageUsage();
   }, [activeSection, open]);
+
+  const confirmStorageClear = (): void => {
+    if (!storageClearTarget || storageClearBusy) return;
+    const target = storageClearTarget;
+    setStorageClearBusy(true);
+    setStorageError('');
+    void ipcClient.clearLocalStorage(target)
+      .then((usage) => {
+        setStorageUsage(usage);
+        setStorageClearTarget(null);
+      })
+      .catch((error) => {
+        const raw = error instanceof Error ? error.message : 'Não foi possível concluir a limpeza.';
+        setStorageError(raw.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''));
+        setStorageClearTarget(null);
+      })
+      .finally(() => setStorageClearBusy(false));
+  };
 
   const relayEndpoint = relayConnection?.settings.endpoint || relayConnection?.auth.endpoint || null;
   let relayEndpointDetails: { protocol: string; host: string; port: string } | null = null;
@@ -505,6 +573,16 @@ export const SettingsModal = ({
                     </div>
                     <FontSizeSelector value={fontSizeMode} onChange={onFontSizeModeChange} />
                   </div>
+                  <div className="settings-card settings-option-card settings-density-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Densidade da interface</h3>
+                        <p>Ajuste o espaçamento entre listas, controles e áreas de conteúdo neste dispositivo.</p>
+                      </div>
+                      <span className="settings-state-pill">{densityModeLabel(densityMode)}</span>
+                    </div>
+                    <DensitySelector value={densityMode} onChange={onDensityModeChange} />
+                  </div>
                   <div className="settings-card settings-option-card">
                     <div className="settings-switch-row">
                       <div>
@@ -577,26 +655,72 @@ export const SettingsModal = ({
                       </Button>
                     </div>
                   </div>
+                  <div className="settings-card settings-option-card settings-storage-card">
+                    <div className="settings-option-heading">
+                      <div>
+                        <h3>Armazenamento local</h3>
+                        <p>Libere espaço deste dispositivo sem apagar mensagens ou dados armazenados no Relay.</p>
+                      </div>
+                    </div>
+                    <div className="settings-storage-list">
+                      <div className="settings-storage-row">
+                        <div>
+                          <strong>Cache do aplicativo</strong>
+                          <span>Recursos temporários da interface. Conversas e preferências são preservadas.</span>
+                        </div>
+                        <span className="settings-storage-size">{storageLoading && !storageUsage ? 'Calculando…' : formatStorageSize(storageUsage?.appCacheBytes || 0)}</span>
+                        <Button
+                          className="settings-storage-action"
+                          appearance="secondary"
+                          icon={<Delete20Regular />}
+                          disabled={storageClearBusy || !storageUsage?.appCacheBytes}
+                          onClick={() => setStorageClearTarget('app-cache')}
+                        >
+                          Limpar cache
+                        </Button>
+                      </div>
+                      <div className="settings-storage-row">
+                        <div>
+                          <strong>Anexos do Lantern</strong>
+                          <span>{storageUsage?.attachmentCount || 0} arquivo(s) baixado(s). Serão obtidos novamente sob demanda.</span>
+                        </div>
+                        <span className="settings-storage-size">{storageLoading && !storageUsage ? 'Calculando…' : formatStorageSize(storageUsage?.attachmentBytes || 0)}</span>
+                        <Button
+                          className="settings-storage-action"
+                          appearance="secondary"
+                          icon={<Delete20Regular />}
+                          disabled={storageClearBusy || !storageUsage?.attachmentBytes}
+                          onClick={() => setStorageClearTarget('attachments')}
+                        >
+                          Limpar anexos
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="settings-storage-footer">
+                      <span>Total liberável: <strong>{formatStorageSize(storageUsage?.totalBytes || 0)}</strong></span>
+                      <Button
+                        className="settings-storage-action settings-storage-clear-all"
+                        appearance="primary"
+                        icon={<Delete20Regular />}
+                        disabled={storageClearBusy || !storageUsage?.totalBytes}
+                        onClick={() => setStorageClearTarget('all')}
+                      >
+                        Limpar ambos
+                      </Button>
+                    </div>
+                    {storageError && <Text className="settings-password-feedback" role="alert">{storageError}</Text>}
+                  </div>
                   <div className="settings-card settings-option-card settings-relay-connection-card">
                     <div className="settings-option-heading">
                       <div>
                         <h3>Conexão com o Relay</h3>
                         <p>Servidor utilizado para sincronizar sua conta, conversas e arquivos.</p>
                       </div>
-                      <div className="settings-relay-heading-actions">
-                        <span className={`settings-state-pill ${relayConnection?.settings.connected ? 'enabled' : ''}`}>
-                          {relayConnectionLoading && !relayConnection
-                            ? 'Consultando...'
-                            : relayConnection?.settings.connected ? 'Conectado' : 'Sem conexão'}
-                        </span>
-                        <Button
-                          appearance="subtle"
-                          icon={relayConnectionLoading ? <Spinner size="tiny" /> : <ArrowSync20Regular />}
-                          disabled={relayConnectionLoading}
-                          onClick={refreshRelayConnection}
-                          aria-label="Atualizar informações da conexão"
-                        />
-                      </div>
+                      <span className={`settings-state-pill ${relayConnection?.settings.connected ? 'enabled' : ''}`}>
+                        {relayConnectionLoading && !relayConnection
+                          ? 'Consultando...'
+                          : relayConnection?.settings.connected ? 'Conectado' : 'Sem conexão'}
+                      </span>
                     </div>
                     {relayConnectionError ? (
                       <Text className="settings-password-feedback" role="alert">{relayConnectionError}</Text>
@@ -733,6 +857,12 @@ export const SettingsModal = ({
                               <div className="settings-session-title">
                                 <strong>{session.current ? 'Este dispositivo' : 'Outro dispositivo'}</strong>
                                 {session.current && <span className="settings-state-pill enabled">Sessão atual</span>}
+                                {!session.current && (
+                                  <span className={`settings-state-pill settings-session-activity ${session.active ? 'enabled' : ''}`}>
+                                    <span className="settings-session-activity-dot" aria-hidden="true" />
+                                    {session.active ? 'Ativa agora' : 'Sem conexão'}
+                                  </span>
+                                )}
                               </div>
                               <span>Identificador {session.deviceId.slice(0, 12)}</span>
                               <span>Atividade: {formatSessionDate(session.lastSeenAt)} · Login: {formatSessionDate(session.createdAt)}</span>
@@ -774,6 +904,18 @@ export const SettingsModal = ({
         </DialogBody>
       </DialogSurface>
     </Dialog>
+    <ConfirmDialog
+      open={Boolean(storageClearTarget)}
+      title={storageClearTarget === 'all'
+        ? 'Limpar cache e anexos?'
+        : storageClearTarget === 'attachments' ? 'Limpar anexos locais?' : 'Limpar cache do aplicativo?'}
+      description={storageClearTarget === 'attachments' || storageClearTarget === 'all'
+        ? 'As cópias locais dos anexos serão removidas e baixadas novamente do Relay quando você precisar. Mensagens, conversas e dados da conta serão preservados.'
+        : 'Somente recursos temporários da interface serão removidos. Mensagens, anexos e preferências serão preservados.'}
+      confirmLabel={storageClearBusy ? 'Limpando…' : 'Limpar agora'}
+      onCancel={() => !storageClearBusy && setStorageClearTarget(null)}
+      onConfirm={confirmStorageClear}
+    />
     <ConfirmDialog
       open={discardConfirmationOpen}
       title="Descartar alterações?"

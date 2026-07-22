@@ -53,6 +53,7 @@ export interface AccountSession {
   lastSeenAt: number;
   expiresAt: number;
   current: boolean;
+  active: boolean;
 }
 
 export interface UserPreferencesSnapshot {
@@ -133,6 +134,15 @@ export interface DocumentPreviewResult {
   reason?: string | null;
 }
 
+export interface LocalStorageUsage {
+  appCacheBytes: number;
+  attachmentBytes: number;
+  attachmentCount: number;
+  totalBytes: number;
+}
+
+export type LocalStorageClearTarget = 'app-cache' | 'attachments' | 'all';
+
 export interface Peer {
   deviceId: string;
   displayName: string;
@@ -196,6 +206,7 @@ export interface AnnouncementPayload {
   text: string;
   replyTo?: MessageReplyPayload | null;
   editedAt?: number | null;
+  announcementExpiresAt?: number | null;
 }
 
 export interface MessageReplyPayload {
@@ -247,6 +258,7 @@ export interface DbMessage {
   replyToFileName: string | null;
   forwardedFromMessageId?: string | null;
   editedAt?: number | null;
+  announcementExpiresAt?: number | null;
   createdAt: number;
 }
 
@@ -433,6 +445,7 @@ export type AppEvent =
   | { type: 'conversation:cleared'; conversationId: string }
   | { type: 'conversation:synchronized'; conversationId: string }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
+  | { type: 'attachments:cache-cleared'; filePaths: string[] }
   | {
       type: 'message:status';
       messageId: string;

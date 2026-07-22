@@ -69,6 +69,7 @@ interface LanternState {
   themeMode: 'system' | 'light' | 'dark';
   resolvedTheme: 'light' | 'dark';
   fontSizeMode: 'small' | 'medium' | 'large';
+  densityMode: 'compact' | 'standard' | 'comfortable';
   ready: boolean;
   startupError: string | null;
   syncActive: boolean;
@@ -77,6 +78,7 @@ interface LanternState {
   setSettingsOpen: (open: boolean) => void;
   setThemeMode: (mode: 'system' | 'light' | 'dark') => void;
   setFontSizeMode: (mode: 'small' | 'medium' | 'large') => void;
+  setDensityMode: (mode: 'compact' | 'standard' | 'comfortable') => void;
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
   login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<void>;
@@ -179,6 +181,7 @@ interface LanternState {
 const ANNOUNCEMENTS_ID = 'announcements';
 const THEME_KEY = 'lantern.theme';
 const FONT_SIZE_KEY = 'lantern.font-size';
+const DENSITY_KEY = 'lantern.density';
 const MESSAGES_PAGE_SIZE = 80;
 const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
@@ -194,6 +197,14 @@ const getInitialFontSizeMode = (): 'small' | 'medium' | 'large' => {
   if (typeof window === 'undefined') return 'medium';
   const stored = window.localStorage.getItem(FONT_SIZE_KEY);
   return stored === 'small' || stored === 'medium' || stored === 'large' ? stored : 'medium';
+};
+
+const getInitialDensityMode = (): 'compact' | 'standard' | 'comfortable' => {
+  if (typeof window === 'undefined') return 'standard';
+  const stored = window.localStorage.getItem(DENSITY_KEY);
+  return stored === 'compact' || stored === 'standard' || stored === 'comfortable'
+    ? stored
+    : 'standard';
 };
 
 const getSystemDark = (): boolean =>
@@ -391,6 +402,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   themeMode: initialThemeMode,
   resolvedTheme: resolveTheme(initialThemeMode, initialSystemDark),
   fontSizeMode: getInitialFontSizeMode(),
+  densityMode: getInitialDensityMode(),
   ready: false,
   startupError: null,
   syncActive: false,
@@ -410,6 +422,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   setFontSizeMode: (mode) => {
     if (typeof window !== 'undefined') window.localStorage.setItem(FONT_SIZE_KEY, mode);
     set({ fontSizeMode: mode });
+  },
+  setDensityMode: (mode) => {
+    if (typeof window !== 'undefined') window.localStorage.setItem(DENSITY_KEY, mode);
+    set({ densityMode: mode });
   },
   setSystemDark: (isDark) => {
     const mode = get().themeMode;
@@ -1187,6 +1203,24 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             }
           };
         });
+        return;
+      }
+
+      if (event.type === 'attachments:cache-cleared') {
+        const clearedPaths = new Set(event.filePaths);
+        set((state) => ({
+          messagesByConversation: Object.fromEntries(
+            Object.entries(state.messagesByConversation).map(([conversationId, rows]) => [
+              conversationId,
+              rows.map((row) =>
+                row.type === 'file' && row.filePath && clearedPaths.has(row.filePath)
+                  ? { ...row, filePath: null, status: 'delivered' as const }
+                  : row
+              )
+            ])
+          ),
+          transfers: {}
+        }));
         return;
       }
 

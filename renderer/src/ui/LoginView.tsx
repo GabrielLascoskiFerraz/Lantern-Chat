@@ -10,20 +10,21 @@ import {
   DialogTitle,
   Field,
   Input,
-  Select,
   Spinner,
   Switch
 } from '@fluentui/react-components';
 import {
   ArrowClockwise20Regular,
   CheckmarkCircle20Regular,
+  ChevronDown20Regular,
+  ChevronUp20Regular,
   ErrorCircle20Regular,
   Info20Regular,
   Search20Regular,
   Warning20Regular
 } from '@fluentui/react-icons';
 import { ClientLocale, ClientRelayConfig, RelayConnectionMode, ipcClient } from '../api/ipcClient';
-import { localeLabels, translate } from '../i18n';
+import { translate } from '../i18n';
 import { useLanternStore } from '../state/store';
 import appIcon from '../../../assets/icon.png';
 import {
@@ -36,9 +37,12 @@ export function LoginView() {
   const authState = useLanternStore((state) => state.authState);
   const login = useLanternStore((state) => state.login);
   const register = useLanternStore((state) => state.register);
-  const [locale, setLocale] = useState<ClientLocale>(() =>
-    (window.localStorage.getItem('lantern.locale') as ClientLocale) || 'pt-BR'
-  );
+  const [locale] = useState<ClientLocale>(() => {
+    const stored = window.localStorage.getItem('lantern.locale');
+    if (stored === 'pt-BR' || stored === 'en' || stored === 'es') return stored;
+    const detected = navigator.language.toLowerCase();
+    return detected.startsWith('pt') ? 'pt-BR' : detected.startsWith('es') ? 'es' : 'en';
+  });
   const [mode, setMode] = useState<RelayConnectionMode>(authState?.relay.mode || 'local-auto');
   const [host, setHost] = useState(authState?.relay.host || '');
   const [port, setPort] = useState(String(authState?.relay.port || 43190));
@@ -56,6 +60,7 @@ export function LoginView() {
       : null
   );
   const [showConnectionValidation, setShowConnectionValidation] = useState(false);
+  const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
   const [resetUsername, setResetUsername] = useState('');
   const [resetToken, setResetToken] = useState('');
@@ -66,11 +71,6 @@ export function LoginView() {
   const [resetBusy, setResetBusy] = useState(false);
   const connectionRef = useRef<HTMLElement | null>(null);
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(locale, key), [locale]);
-
-  const changeLocale = (next: ClientLocale) => {
-    setLocale(next);
-    window.localStorage.setItem('lantern.locale', next);
-  };
 
   const discover = async () => {
     const portNumber = Number(port);
@@ -145,8 +145,8 @@ export function LoginView() {
   }, [host, mode, port]);
 
   const reviewConnection = () => {
+    setConnectionExpanded(true);
     setShowConnectionValidation(true);
-    connectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     window.requestAnimationFrame(() => {
       const selector = connectionErrors.hostError ? 'input:not([inputmode="numeric"])' : 'input[inputmode="numeric"]';
       connectionRef.current?.querySelector<HTMLInputElement>(selector)?.focus();
@@ -267,20 +267,16 @@ export function LoginView() {
         ? CheckmarkCircle20Regular
         : Info20Regular;
 
-  return <main className="login-screen login-screen-v2">
+  return <main className={`login-screen login-screen-v2 ${creating ? 'is-creating' : ''} ${feedback ? 'has-feedback' : ''}`}>
     <section className="login-brand login-brand-v2">
       <div className="login-identity">
         <img className="login-app-icon" src={appIcon} alt="" />
-        <div className="login-product"><strong>Lantern</strong></div>
       </div>
     </section>
 
     <form className="login-card login-card-v2" onSubmit={submit}>
       <header className="login-card-header">
         <div><span className="login-eyebrow">{creating ? 'NOVA CONTA' : 'BEM-VINDO'}</span><h2>{creating ? 'Criar sua conta' : t('welcome')}</h2></div>
-        <Select aria-label="Idioma" value={locale} onChange={(_, data) => changeLocale(data.value as ClientLocale)}>
-          {Object.entries(localeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </Select>
       </header>
 
       <div className="login-account-tabs" role="tablist" aria-label="Acesso">
@@ -299,11 +295,20 @@ export function LoginView() {
 
       <section
         ref={connectionRef}
-        className={`login-connection ${showConnectionValidation && (connectionErrors.hostError || connectionErrors.portError) ? 'invalid' : ''}`}
+        className={`login-connection ${connectionExpanded ? 'expanded' : 'collapsed'} ${showConnectionValidation && (connectionErrors.hostError || connectionErrors.portError) ? 'invalid' : ''}`}
         aria-label="Conexão com o Relay"
       >
-        <div className="login-connection-header"><span>Conexão com o Relay</span><small>{connectionLabel}</small></div>
-        <div className="login-connection-body">
+        <button
+          type="button"
+          className="login-connection-trigger"
+          aria-expanded={connectionExpanded}
+          aria-controls="login-relay-options"
+          onClick={() => setConnectionExpanded((expanded) => !expanded)}
+        >
+          <span><strong>Conexão com o Relay</strong><small>{connectionLabel}</small></span>
+          {connectionExpanded ? <ChevronUp20Regular aria-hidden="true" /> : <ChevronDown20Regular aria-hidden="true" />}
+        </button>
+        {connectionExpanded && <div id="login-relay-options" className="login-connection-body">
           <div className="login-mode-tabs">
             {(['local-auto', 'local-manual', 'external-manual'] as RelayConnectionMode[]).map((value) =>
               <Button
@@ -358,7 +363,7 @@ export function LoginView() {
             </Field>
           </div>}
           {mode === 'local-manual' && <Switch checked={secure} onChange={(_, d) => setSecure(d.checked)} label={t('secure')} />}
-        </div>
+        </div>}
       </section>
 
       {!creating && <div className="login-session-options">

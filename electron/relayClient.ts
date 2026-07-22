@@ -542,6 +542,7 @@ export class RelayClient {
   private udpProbeInFlight = false;
   private profile: Profile;
   private sessionToken: string;
+  private doNotDisturbUntil = 0;
   private lastPresenceAt = 0;
   private lastPresenceRevision = -1;
   private readonly outboundQueue = new PriorityTaskQueue(4);
@@ -988,6 +989,15 @@ export class RelayClient {
         statusMessage: profile.statusMessage,
         appVersion: APP_VERSION
       }
+    });
+  }
+
+  setDoNotDisturbUntil(value: number): void {
+    this.doNotDisturbUntil = Number.isFinite(value) && value > Date.now() ? Math.floor(value) : 0;
+    if (!this.ready || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.sendEnvelope({
+      type: 'relay:dnd:update',
+      payload: { doNotDisturbUntil: this.doNotDisturbUntil }
     });
   }
 
@@ -1470,6 +1480,7 @@ export class RelayClient {
             avatarEmoji: this.profile.avatarEmoji,
             avatarBg: this.profile.avatarBg,
             statusMessage: this.profile.statusMessage,
+            doNotDisturbUntil: this.doNotDisturbUntil,
             appVersion: APP_VERSION,
             sessionToken: this.sessionToken
           }

@@ -1,4 +1,5 @@
 import {
+  AlignSpaceEvenlyHorizontal20Regular,
   Desktop20Regular,
   TextFont20Regular,
   WeatherMoon20Regular,
@@ -7,12 +8,16 @@ import {
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type FontSizeMode = 'small' | 'medium' | 'large';
+export type DensityMode = 'compact' | 'standard' | 'comfortable';
 
 export const themeModeLabel = (mode: ThemeMode): string =>
   mode === 'system' ? 'Sistema' : mode === 'light' ? 'Claro' : 'Escuro';
 
 export const fontSizeModeLabel = (mode: FontSizeMode): string =>
   mode === 'small' ? 'Pequena' : mode === 'medium' ? 'Padrão' : 'Grande';
+
+export const densityModeLabel = (mode: DensityMode): string =>
+  mode === 'compact' ? 'Compacta' : mode === 'standard' ? 'Padrão' : 'Confortável';
 
 export const ThemeSelector = ({
   value,
@@ -53,6 +58,29 @@ export const FontSizeSelector = ({
       <button key={mode} type="button" className={value === mode ? 'active' : ''} aria-pressed={value === mode} onClick={() => onChange(mode)}>
         <span className={`settings-font-sample ${mode}`} aria-hidden="true">{sample}</span>
         <span className="settings-theme-option-label"><TextFont20Regular aria-hidden="true" /><span><strong>{label}</strong><small>{description}</small></span></span>
+      </button>
+    ))}
+  </div>
+);
+
+export const DensitySelector = ({
+  value,
+  onChange
+}: {
+  value: DensityMode;
+  onChange: (mode: DensityMode) => void;
+}) => (
+  <div className="settings-density-options" role="group" aria-label="Densidade da interface do aplicativo">
+    {([
+      ['compact', 'Compacta', 'Mais itens visíveis', 3],
+      ['standard', 'Padrão', 'Equilíbrio recomendado', 2],
+      ['comfortable', 'Confortável', 'Mais espaço entre elementos', 1]
+    ] as const).map(([mode, label, description, lines]) => (
+      <button key={mode} type="button" className={value === mode ? 'active' : ''} aria-pressed={value === mode} onClick={() => onChange(mode)}>
+        <span className={`settings-density-sample ${mode}`} aria-hidden="true">
+          {Array.from({ length: lines }, (_, index) => <span key={index} />)}
+        </span>
+        <span className="settings-theme-option-label"><AlignSpaceEvenlyHorizontal20Regular aria-hidden="true" /><span><strong>{label}</strong><small>{description}</small></span></span>
       </button>
     ))}
   </div>

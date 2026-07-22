@@ -180,6 +180,7 @@ interface RelayHelloPayload {
   statusMessage: string;
   appVersion: string;
   sessionToken: string;
+  doNotDisturbUntil: number;
 }
 
 interface RelayTransportFrame {
@@ -230,6 +231,7 @@ interface RelaySession {
   groupFileDownloadQueue: Promise<void>;
   attachmentDownloadQueue: Promise<void>;
   authToken: string | null;
+  doNotDisturbUntil: number;
 }
 
 interface RelayAnnouncementState {
@@ -394,6 +396,8 @@ const normalizeHelloPayload = (value: unknown): RelayHelloPayload | null => {
   const statusMessage = asString(record.statusMessage) || 'Disponível';
   const appVersion = asString(record.appVersion) || 'unknown';
   const sessionToken = asString(record.sessionToken);
+  const requestedDndUntil = asFiniteNumber(record.doNotDisturbUntil) || 0;
+  const doNotDisturbUntil = requestedDndUntil > Date.now() ? Math.floor(requestedDndUntil) : 0;
 
   if (!deviceId || !displayName || !avatarEmoji || !avatarBg || !sessionToken) {
     return null;
@@ -406,7 +410,8 @@ const normalizeHelloPayload = (value: unknown): RelayHelloPayload | null => {
     avatarBg,
     statusMessage,
     appVersion,
-    sessionToken
+    sessionToken,
+    doNotDisturbUntil
   };
 };
 
@@ -2248,6 +2253,7 @@ export class LanternRelay {
     state.expiresAt = normalized;
     this.announcementsById.set(messageId, state);
     if (!this.persistAnnouncementStore()) throw new Error('Não foi possível persistir a nova expiração.');
+    this.broadcastAnnouncementSnapshots('expiry_updated');
   }
 
   async stop(reason = 'shutdown'): Promise<void> {
@@ -2456,6 +2462,7 @@ export class LanternRelay {
   private startPresenceBroadcastLoop(): void {
     if (this.presenceBroadcastTimer) return;
     this.presenceBroadcastTimer = setInterval(() => {
+      this.refreshExpiredDoNotDisturbStatuses();
       this.broadcastPresence('periodic');
     }, this.config.presenceBroadcastIntervalMs);
     this.presenceBroadcastTimer.unref?.();
@@ -2858,10 +2865,50 @@ export class LanternRelay {
         this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
         return;
       }
+      const activeSessionIds = new Set(
+        Array.from(this.sessionsBySocket.values())
+          .filter((relaySession) =>
+            Boolean(relaySession.authToken)
+            && relaySession.socket.readyState === WebSocket.OPEN
+          )
+          .map((relaySession) => hashToken(relaySession.authToken!))
+      );
       this.writeJson(res, method, {
         ok: true,
-        sessions: this.centralStore.listUserSessions(account.userId, token)
+        sessions: this.centralStore.listUserSessions(account.userId, token).map((session) => ({
+          ...session,
+          active: activeSessionIds.has(session.sessionId)
+        }))
       });
+      return;
+    }
+
+    const clientAttachmentMatch = requestUrl.pathname.match(/^\/api\/client\/attachments\/([^/]+)$/);
+    if (clientAttachmentMatch && method === 'GET') {
+      const token = this.getBearerToken(req);
+      const account = token ? this.centralStore.authenticateReady(token) : null;
+      if (!account) {
+        this.writeJson(res, method, { ok: false, error: 'UNAUTHORIZED' }, 401);
+        return;
+      }
+      try {
+        await this.serveClientAttachment(
+          decodeURIComponent(clientAttachmentMatch[1]),
+          requestUrl.searchParams.get('scope') === 'group',
+          account.userId,
+          res
+        );
+      } catch (error) {
+        if (!res.headersSent) {
+          this.writeJson(res, method, {
+            ok: false,
+            error: 'ATTACHMENT_UNAVAILABLE',
+            message: error instanceof Error ? error.message : String(error)
+          }, 404);
+        } else {
+          res.destroy(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
       return;
     }
 
@@ -3418,6 +3465,55 @@ export class LanternRelay {
     else fs.createReadStream(filePath, { start, end }).pipe(res);
   }
 
+  private async serveClientAttachment(
+    attachmentId: string,
+    groupAttachment: boolean,
+    userId: string,
+    res: ServerResponse
+  ): Promise<void> {
+    const writeChunk = async (chunk: Buffer): Promise<void> => {
+      if (res.destroyed || res.writableEnded) throw new Error('Conexão encerrada durante o download.');
+      if (res.write(chunk)) return;
+      await new Promise<void>((resolve, reject) => {
+        res.once('drain', resolve);
+        res.once('error', reject);
+      });
+    };
+
+    if (groupAttachment) {
+      const metadata = this.groupStore.getAttachmentMetadata(attachmentId);
+      if (!metadata) throw new Error('Anexo de grupo indisponível no Relay.');
+      const chunks = this.groupStore.createAttachmentChunkStream(attachmentId, userId, 0);
+      // A primeira leitura executa as verificações de associação e destinatário
+      // antes de enviarmos cabeçalhos 200 ao navegador.
+      const first = await chunks.next();
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(metadata.fileSize),
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff'
+      });
+      if (!first.done) await writeChunk(Buffer.from(first.value.dataBase64, 'base64'));
+      for await (const chunk of chunks) {
+        await writeChunk(Buffer.from(chunk.dataBase64, 'base64'));
+      }
+      res.end();
+      return;
+    }
+
+    const metadata = this.centralStore.getAttachmentMetadata(attachmentId, userId);
+    res.writeHead(200, {
+      'content-type': metadata.mimeType || 'application/octet-stream',
+      'content-length': String(metadata.size),
+      'cache-control': 'private, no-store',
+      'x-content-type-options': 'nosniff'
+    });
+    for (let index = 0; index < metadata.totalChunks; index += 1) {
+      await writeChunk(this.centralStore.readAttachmentChunk(attachmentId, userId, index));
+    }
+    res.end();
+  }
+
   private normalizeRemoteAddress(value: string): string {
     return value.replace(/^::ffff:/, '');
   }
@@ -3859,7 +3955,8 @@ export class LanternRelay {
       messageQueue: Promise.resolve(),
       groupFileDownloadQueue: Promise.resolve(),
       attachmentDownloadQueue: Promise.resolve(),
-      authToken: null
+      authToken: null,
+      doNotDisturbUntil: 0
     };
 
     this.sessionsBySocket.set(socket, session);
@@ -3991,6 +4088,9 @@ export class LanternRelay {
         return;
       case 'relay:updateProfile':
         this.handleUpdateProfile(session, envelope.payload);
+        return;
+      case 'relay:dnd:update':
+        this.handleDoNotDisturbUpdate(session, envelope.payload);
         return;
       case 'relay:heartbeat':
         this.sendEnvelope(session.socket, {
@@ -4363,6 +4463,7 @@ export class LanternRelay {
       return;
     }
     session.authToken = hello.sessionToken;
+    session.doNotDisturbUntil = hello.doNotDisturbUntil;
     const canonicalDeviceId = account.userId;
 
     const wasOnline = this.userSessions.hasUser(canonicalDeviceId);
@@ -4387,7 +4488,7 @@ export class LanternRelay {
       department: account.department,
       avatarEmoji: account.avatarEmoji,
       avatarBg: account.avatarBg,
-      statusMessage: account.statusMessage,
+      statusMessage: hello.doNotDisturbUntil > now ? 'Não perturbe' : account.statusMessage,
       appVersion: hello.appVersion,
       connectedAt: session.peer?.connectedAt || now,
       lastSeenAt: now
@@ -4395,6 +4496,7 @@ export class LanternRelay {
     session.clientDeviceId = hello.deviceId;
     session.lastSeenAt = now;
     this.registerUserSession(canonicalDeviceId, session);
+    this.applyEffectivePresenceStatus(canonicalDeviceId);
 
     this.sendEnvelope(session.socket, {
       type: 'relay:hello:ok',
@@ -4457,6 +4559,9 @@ export class LanternRelay {
       avatarBg: asString(record.avatarBg) || session.peer.avatarBg,
       statusMessage: asString(record.statusMessage) || ''
     });
+    const effectiveStatus = this.getEffectiveDoNotDisturbUntil(session.peer.deviceId) > Date.now()
+      ? 'Não perturbe'
+      : account.statusMessage;
 
     session.peer = {
       ...session.peer,
@@ -4464,7 +4569,7 @@ export class LanternRelay {
       department: account.department,
       avatarEmoji: account.avatarEmoji,
       avatarBg: account.avatarBg,
-      statusMessage: account.statusMessage,
+      statusMessage: effectiveStatus,
       lastSeenAt: Date.now()
     };
     for (const sibling of this.getSessionsForUser(session.peer.deviceId)) {
@@ -4475,7 +4580,7 @@ export class LanternRelay {
         department: account.department,
         avatarEmoji: account.avatarEmoji,
         avatarBg: account.avatarBg,
-        statusMessage: account.statusMessage,
+        statusMessage: effectiveStatus,
         lastSeenAt: Date.now()
       };
     }
@@ -4489,6 +4594,56 @@ export class LanternRelay {
       op: 'upsert',
       peer: this.clonePeerWithLiveSeen(session.peer)
     }, 'peer_profile_updated');
+  }
+
+  private handleDoNotDisturbUpdate(session: RelaySession, payload: unknown): void {
+    if (!session.peer) {
+      this.sendError(session, 'NOT_AUTHENTICATED', 'Envie relay:hello antes de alterar o Não perturbe.');
+      return;
+    }
+    const record = asRecord(payload) || {};
+    const requestedUntil = asFiniteNumber(record.doNotDisturbUntil) || 0;
+    session.doNotDisturbUntil = requestedUntil > Date.now() ? Math.floor(requestedUntil) : 0;
+    const userId = session.peer.deviceId;
+    this.applyEffectivePresenceStatus(userId);
+    this.bumpPresenceRevision('dnd_updated');
+    const primary = this.listPrimarySessions().find((item) => item.peer?.deviceId === userId);
+    if (primary?.peer) {
+      this.broadcastPresenceDelta(
+        { op: 'upsert', peer: this.clonePeerWithLiveSeen(primary.peer) },
+        'dnd_updated'
+      );
+    }
+  }
+
+  private getEffectiveDoNotDisturbUntil(userId: string): number {
+    const now = Date.now();
+    return this.getSessionsForUser(userId).reduce(
+      (latest, item) => Math.max(latest, item.doNotDisturbUntil > now ? item.doNotDisturbUntil : 0),
+      0
+    );
+  }
+
+  private applyEffectivePresenceStatus(userId: string): void {
+    const account = this.centralStore.getUser(userId);
+    if (!account) return;
+    const statusMessage = this.getEffectiveDoNotDisturbUntil(userId) > Date.now()
+      ? 'Não perturbe'
+      : account.statusMessage;
+    for (const sibling of this.getSessionsForUser(userId)) {
+      if (!sibling.peer) continue;
+      sibling.peer = { ...sibling.peer, statusMessage, lastSeenAt: Date.now() };
+    }
+  }
+
+  private refreshExpiredDoNotDisturbStatuses(): void {
+    for (const primary of this.listPrimarySessions()) {
+      const userId = primary.peer?.deviceId;
+      if (!userId || primary.peer?.statusMessage !== 'Não perturbe') continue;
+      if (this.getEffectiveDoNotDisturbUntil(userId) > Date.now()) continue;
+      this.applyEffectivePresenceStatus(userId);
+      this.bumpPresenceRevision('dnd_expired');
+    }
   }
 
   private sendGroupSnapshot(session: RelaySession, reason: string, knownSeqByGroup?: Record<string, number>): void {
@@ -5309,6 +5464,7 @@ export class LanternRelay {
       throw new Error('O anúncio não pôde ser confirmado no armazenamento do Relay.');
     }
     this.sweepAnnouncements('announce_received');
+    this.broadcastAnnouncementSnapshots('announcement_updated');
   }
 
   private applyAnnouncementEdit(
@@ -5511,7 +5667,15 @@ export class LanternRelay {
   private listActiveAnnouncementFrames(now = Date.now()): RelayTransportFrame[] {
     return Array.from(this.announcementsById.values())
       .filter((state) => !state.deletedAt && !state.expiredAt && state.expiresAt > now)
-      .map((state) => state.frame)
+      .map((state) => ({
+        ...state.frame,
+        payload: {
+          ...(state.frame.payload && typeof state.frame.payload === 'object'
+            ? state.frame.payload
+            : {}),
+          announcementExpiresAt: state.expiresAt
+        }
+      }))
       .sort((a, b) => {
         if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
         return a.messageId.localeCompare(b.messageId);
@@ -5543,6 +5707,12 @@ export class LanternRelay {
       },
       { level: 'debug' }
     );
+  }
+
+  private broadcastAnnouncementSnapshots(reason: string): void {
+    for (const session of this.sessionsBySocket.values()) {
+      if (session.peer) this.sendAnnouncementSnapshot(session, reason);
+    }
   }
 
   private listAnnouncementReactionsSnapshot(): Record<

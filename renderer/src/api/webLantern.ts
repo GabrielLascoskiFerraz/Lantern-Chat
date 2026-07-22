@@ -167,6 +167,7 @@ class WebLanternBridge {
   private appVersion = 'web';
   private attachmentDownloads = new Map<string, PendingAttachmentDownload>();
   private attachmentDownloadByFileId = new Map<string, Promise<MessageRow>>();
+  private attachmentHydrationFailures = new Map<string, number>();
   private attachmentDownloadQueue: Promise<void> = Promise.resolve();
   private pendingGroupSync: PendingGroupSync | null = null;
 
@@ -295,6 +296,7 @@ class WebLanternBridge {
           avatarEmoji: this.user!.avatarEmoji,
           avatarBg: this.user!.avatarBg,
           statusMessage: this.user!.statusMessage,
+          doNotDisturbUntil: Number(window.localStorage.getItem('lantern.web.dnd') || 0),
           appVersion: this.appVersion,
           sessionToken: this.token
         }
@@ -463,7 +465,9 @@ class WebLanternBridge {
       replyToMessageId: payload.replyTo?.messageId || null, replyToSenderDeviceId: payload.replyTo?.senderDeviceId || null,
       replyToType: payload.replyTo?.type || null, replyToPreviewText: payload.replyTo?.previewText || null,
       replyToFileName: payload.replyTo?.fileName || null, forwardedFromMessageId: payload.forwardedFromMessageId || null,
-      editedAt: Number(payload.editedAt || 0) || null, createdAt: Number(frame.createdAt || Date.now())
+      editedAt: Number(payload.editedAt || 0) || null,
+      announcementExpiresAt: Number(payload.announcementExpiresAt || 0) || null,
+      createdAt: Number(frame.createdAt || Date.now())
     };
   }
 
@@ -963,28 +967,32 @@ class WebLanternBridge {
 
   private async downloadAttachment(row: MessageRow): Promise<MessageRow> {
     if (!row.fileId || row.filePath) return row;
-    const inFlight = this.attachmentDownloadByFileId.get(row.fileId);
+    const attachmentId = row.fileId;
+    const inFlight = this.attachmentDownloadByFileId.get(attachmentId);
     if (inFlight) return inFlight;
 
     const operation = this.runAttachmentDownload(async (): Promise<MessageRow> => {
       await this.connect();
-      const requestId = uuid();
-      const url = await new Promise<string>((resolve, reject) => {
-        const timer = window.setTimeout(() => { this.attachmentDownloads.delete(requestId); reject(new Error('O Relay não iniciou o download do anexo.')); }, 20_000);
-        this.attachmentDownloads.set(requestId, { chunks: [], resolve, reject, timer });
+      const scope = row.conversationId.startsWith('group:') ? '?scope=group' : '';
+      let response: Response | null = null;
+      let lastError: Error | null = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
-          if (row.conversationId.startsWith('group:')) this.send('relay:group:file:request', { requestId, fileId: row.fileId, startIndex: 0 });
-          else this.send('relay:attachment:request', { requestId, attachmentId: row.fileId, startIndex: 0 });
+          response = await fetch(`/api/client/attachments/${encodeURIComponent(attachmentId)}${scope}`, {
+            headers: { authorization: `Bearer ${this.token}` },
+            cache: 'no-store'
+          });
+          if (response.ok) break;
+          const body = await response.clone().json().catch(() => ({})) as Json;
+          throw new Error(String(body.message || `O Relay recusou o anexo (${response.status}).`));
         } catch (error) {
-          window.clearTimeout(timer);
-          this.attachmentDownloads.delete(requestId);
-          reject(error instanceof Error ? error : new Error('Falha ao solicitar o anexo ao Relay.'));
+          lastError = error instanceof Error ? error : new Error('Falha ao baixar o anexo do Relay.');
+          response = null;
+          if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, attempt * 350));
         }
-      });
-      const response = await fetch(url);
-      if (!response.ok) throw new Error('O anexo baixado não pôde ser lido.');
+      }
+      if (!response?.ok) throw lastError || new Error('O anexo não pôde ser recuperado do Relay.');
       const blob = await response.blob();
-      URL.revokeObjectURL(url);
       const file = new File([blob], row.fileName || 'arquivo', { type: blob.type || 'application/octet-stream' });
       if (row.fileSize !== null && row.fileSize !== undefined && file.size !== row.fileSize) {
         throw new Error('O tamanho do anexo recebido não confere com o Relay.');
@@ -994,6 +1002,7 @@ class WebLanternBridge {
       }
       const key = `webfile:${uuid()}`;
       this.files.set(key, { file, url: null });
+      this.attachmentHydrationFailures.delete(row.messageId);
       const latest = (this.messages.get(row.conversationId) || []).find((item) => item.messageId === row.messageId) || row;
       const updated = { ...latest, filePath: key, status: 'delivered' as const };
       this.mergeMessage(updated);
@@ -1004,11 +1013,11 @@ class WebLanternBridge {
       }
       return updated;
     });
-    this.attachmentDownloadByFileId.set(row.fileId, operation);
+    this.attachmentDownloadByFileId.set(attachmentId, operation);
     try {
       return await operation;
     } finally {
-      this.attachmentDownloadByFileId.delete(row.fileId);
+      this.attachmentDownloadByFileId.delete(attachmentId);
     }
   }
 
@@ -1056,7 +1065,7 @@ class WebLanternBridge {
       payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), forwardedFromMessageId: forwardedFromMessageId || null }
     };
     await this.sendFrame(frame);
-    const row = { ...this.messageFromFrame(frame)!, filePath: URL.createObjectURL(file) };
+    const row = { ...this.messageFromFrame(frame)!, filePath };
     this.mergeMessage(row);
     return row;
   }
@@ -1150,7 +1159,51 @@ class WebLanternBridge {
       installUpdate: async () => undefined,
       updateRelaySettings: async () => this.api().getRelaySettings(),
       forceRelayRediscovery: async () => { await this.connect(); return this.api().getRelaySettings(); },
-      updateStartupSettings: async (input) => { if (input.doNotDisturbUntil !== undefined) window.localStorage.setItem('lantern.web.dnd', String(input.doNotDisturbUntil)); return this.api().getStartupSettings(); },
+      updateStartupSettings: async (input) => {
+        if (input.doNotDisturbUntil !== undefined) {
+          const nextUntil = Number(input.doNotDisturbUntil) > Date.now()
+            ? Math.floor(Number(input.doNotDisturbUntil))
+            : 0;
+          window.localStorage.setItem('lantern.web.dnd', String(nextUntil));
+          await this.connect();
+          this.send('relay:dnd:update', { doNotDisturbUntil: nextUntil });
+        }
+        return this.api().getStartupSettings();
+      },
+      getLocalStorageUsage: async () => {
+        const attachmentBytes = Array.from(this.files.values()).reduce((sum, item) => sum + item.file.size, 0);
+        let appCacheBytes = 0;
+        if ('caches' in window) {
+          for (const name of await window.caches.keys()) {
+            const cache = await window.caches.open(name);
+            for (const request of await cache.keys()) {
+              const response = await cache.match(request);
+              if (response) appCacheBytes += (await response.clone().blob()).size;
+            }
+          }
+        }
+        return { appCacheBytes, attachmentBytes, attachmentCount: this.files.size, totalBytes: appCacheBytes + attachmentBytes };
+      },
+      clearLocalStorage: async (target) => {
+        if (target === 'app-cache' || target === 'all') {
+          if ('caches' in window) await Promise.all((await window.caches.keys()).map((name) => window.caches.delete(name)));
+        }
+        if (target === 'attachments' || target === 'all') {
+          const clearedFilePaths = Array.from(this.files.keys());
+          const clearedFilePathSet = new Set(clearedFilePaths);
+          for (const item of this.files.values()) if (item.url) URL.revokeObjectURL(item.url);
+          this.files.clear();
+          for (const [conversationId, rows] of this.messages) {
+            this.messages.set(conversationId, rows.map((row) => {
+              if (row.type !== 'file' || !row.filePath || !clearedFilePathSet.has(row.filePath)) return row;
+              this.attachmentHydrationFailures.delete(row.messageId);
+              return { ...row, filePath: null, status: 'delivered' as const };
+            }));
+          }
+          this.emit({ type: 'attachments:cache-cleared', filePaths: clearedFilePaths });
+        }
+        return this.api().getLocalStorageUsage();
+      },
       sendText: (peerId, text, replyTo) => this.dmText(peerId, text, replyTo),
       sendGroupText: async (groupId, text, replyTo) => { const messageId = uuid(); const createdAt = Date.now(); await this.groupAction('sendText', { groupId, messageId, createdAt, text, replyTo: this.reply(replyTo) }); const row = this.groupMessageFromEvent({ type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'text', senderDeviceId: this.user!.userId, bodyText: text, replyTo, createdAt } } })!; this.mergeMessage(row); return row; },
       sendTyping: async (peerId, isTyping) => { await this.sendFrame({ type: 'typing', messageId: uuid(), from: this.user!.userId, to: peerId, createdAt: Date.now(), payload: { isTyping } }); },
@@ -1171,7 +1224,7 @@ class WebLanternBridge {
         });
         await this.request('relay:group:file:complete', { fileId }, 30_000);
         const row = this.groupMessageFromEvent({ type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'file', senderDeviceId: this.user!.userId, fileId, fileName: file.name, fileSize: file.size, fileSha256: sha256, replyTo, createdAt } } })!;
-        const ready = { ...row, filePath: URL.createObjectURL(file) }; this.mergeMessage(ready); return ready;
+        const ready = { ...row, filePath }; this.mergeMessage(ready); return ready;
       },
       forwardMessageToPeer: async (targetPeerId, sourceMessageId) => {
         const source = Array.from(this.messages.values()).flat().find((item) => item.messageId === sourceMessageId);
@@ -1240,9 +1293,20 @@ class WebLanternBridge {
         const rowsById = new Map(Array.from(this.messages.values()).flat().map((item) => [item.messageId, item]));
         for (const id of ids) if (!rowsById.has(id) && this.mediaMessages.has(id)) rowsById.set(id, this.mediaMessages.get(id)!);
         const rows = ids.map((id) => rowsById.get(id)).filter((item): item is MessageRow => Boolean(item));
-        return Promise.all(rows.map((row) => row.type === 'file' && row.fileId && !row.filePath
-          ? this.downloadAttachment(row).catch(() => row)
-          : row));
+        return Promise.all(rows.map(async (row) => {
+          if (row.type !== 'file' || !row.fileId || row.filePath) return row;
+          try {
+            return await this.downloadAttachment(row);
+          } catch {
+            const failures = (this.attachmentHydrationFailures.get(row.messageId) || 0) + 1;
+            this.attachmentHydrationFailures.set(row.messageId, failures);
+            if (failures < 3) return row;
+            const failed = { ...row, status: 'failed' as const };
+            this.mergeMessage(failed);
+            this.emit({ type: 'message:updated', message: failed });
+            return failed;
+          }
+        }));
       },
       retryMessage: async (messageId) => {
         const row = Array.from(this.messages.values()).flat()
@@ -1299,6 +1363,7 @@ class WebLanternBridge {
           throw new Error('Anexo não encontrado.');
         }
         if (row.filePath) return row;
+        this.attachmentHydrationFailures.delete(messageId);
         const waiting = { ...row, status: 'sent' as const };
         this.mergeMessage(waiting);
         this.emit({ type: 'message:updated', message: waiting });

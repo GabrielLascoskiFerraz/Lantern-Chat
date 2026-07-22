@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AppEvent, ClientRelayConfig, DocumentPreviewResult, MessageReplyPayload } from './types';
+import {
+  AppEvent,
+  ClientRelayConfig,
+  DocumentPreviewResult,
+  LocalStorageClearTarget,
+  LocalStorageUsage,
+  MessageReplyPayload
+} from './types';
 
 type EventCallback = (event: AppEvent) => void;
 
@@ -72,6 +79,10 @@ const api = {
   forceRelayRediscovery: () => ipcRenderer.invoke('lantern:forceRelayRediscovery'),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     ipcRenderer.invoke('lantern:updateStartupSettings', input),
+  getLocalStorageUsage: (): Promise<LocalStorageUsage> =>
+    ipcRenderer.invoke('lantern:getLocalStorageUsage'),
+  clearLocalStorage: (target: LocalStorageClearTarget): Promise<LocalStorageUsage> =>
+    ipcRenderer.invoke('lantern:clearLocalStorage', target),
   getUpdateState: () => ipcRenderer.invoke('lantern:getUpdateState'),
   forceUpdate: () => ipcRenderer.invoke('lantern:forceUpdate'),
   installUpdate: () => ipcRenderer.invoke('lantern:installUpdate'),

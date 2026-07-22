@@ -20,6 +20,8 @@ import {
   GroupMember,
   MessageReplyPayload,
   MessageReactionDetail,
+  LocalStorageClearTarget,
+  LocalStorageUsage,
   Peer,
   Profile,
   StickerCatalogItem
@@ -108,6 +110,8 @@ export interface IpcBindings {
     downloadsDir: string;
     doNotDisturbUntil: number;
   };
+  getLocalStorageUsage: () => Promise<LocalStorageUsage>;
+  clearLocalStorage: (target: LocalStorageClearTarget) => Promise<LocalStorageUsage>;
   sendText: (
     peerId: string,
     text: string,
@@ -501,6 +505,10 @@ export const registerIpc = (
   ipcMain.handle('lantern:forceRelayRediscovery', () => bindings.forceRelayRediscovery());
   ipcMain.handle('lantern:updateStartupSettings', (_event, input) =>
     bindings.updateStartupSettings(input)
+  );
+  ipcMain.handle('lantern:getLocalStorageUsage', () => bindings.getLocalStorageUsage());
+  ipcMain.handle('lantern:clearLocalStorage', (_event, target: LocalStorageClearTarget) =>
+    bindings.clearLocalStorage(target)
   );
   ipcMain.handle('lantern:getUpdateState', () => bindings.getUpdateState());
   ipcMain.handle('lantern:forceUpdate', () => bindings.forceUpdate());

@@ -101,6 +101,13 @@ export const MessageAttachment = ({
     setManualRetryError('');
   }, [message.messageId]);
 
+  useEffect(() => {
+    if (message.filePath) return;
+    hydrationRequestedRef.current = false;
+    setDocumentPreviewOpen(false);
+    setImagePreviewOpen(false);
+  }, [message.filePath]);
+
   const retryAttachment = async () => {
     if (manualRetrying) return;
     setManualRetrying(true);
@@ -122,6 +129,7 @@ export const MessageAttachment = ({
 
   useEffect(() => {
     if (message.filePath || !message.fileId || message.status === 'failed') return;
+    hydrationRequestedRef.current = false;
     const sentinel = hydrationSentinelRef.current;
     if (!sentinel) return;
     let active = true;

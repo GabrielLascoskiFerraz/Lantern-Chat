@@ -42,6 +42,20 @@
 :root[data-font-size='small'] { --lantern-font-scale: .9; }
 :root[data-font-size='large'] { --lantern-font-scale: 1.12; }
 
+:root[data-density='compact'] {
+  --teams-gap-xs: 4px;
+  --teams-gap-sm: 7px;
+  --teams-gap-md: 10px;
+  --teams-gap-lg: 13px;
+}
+
+:root[data-density='comfortable'] {
+  --teams-gap-xs: 8px;
+  --teams-gap-sm: 13px;
+  --teams-gap-md: 18px;
+  --teams-gap-lg: 23px;
+}
+
 .app-root {
   font-size: calc(16px * var(--lantern-font-scale));
 }
@@ -294,6 +308,11 @@ body {
 
 .quick-status-wrap {
   position: relative;
+}
+
+.quick-status-trigger.dnd-active {
+  color: var(--colorNeutralForegroundOnBrand, #fff);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teams-accent) 68%, white);
 }
 
 .quick-status-menu {
@@ -4515,13 +4534,16 @@ body {
 }
 
 .login-screen {
-  min-height: 100vh;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(280px, .85fr) minmax(390px, 1.15fr);
   align-items: center;
   justify-items: center;
-  gap: clamp(36px, 7vw, 112px);
-  padding: clamp(28px, 6vw, 88px);
+  gap: clamp(28px, 5vw, 72px);
+  overflow: hidden;
+  padding: clamp(18px, 3.5vw, 48px);
   background:
     radial-gradient(circle at 12% 20%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 35%),
     linear-gradient(135deg, var(--bg) 0%, color-mix(in srgb, var(--bg) 88%, #4779d8 12%) 100%);
@@ -4530,14 +4552,11 @@ body {
 .login-brand { width: min(100%, 560px); }
 .login-identity { display: flex; align-items: center; gap: 16px; }
 .login-app-icon { width: clamp(68px, 7vw, 92px); height: clamp(68px, 7vw, 92px); object-fit: contain; filter: drop-shadow(0 18px 24px #10234a2b); }
-.login-product { display: grid; gap: 2px; }
-.login-product strong { font-size: 26px; letter-spacing: -.025em; }
-.login-product span { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .18em; }
 .login-copy { margin-top: clamp(30px, 6vh, 64px); }
 .login-brand h1 { margin: 0 0 16px; max-width: 520px; font: 650 clamp(38px, 5vw, 66px)/1.02 Georgia, serif; letter-spacing: -.035em; }
 .login-brand p { max-width: 520px; color: var(--muted); font-size: 17px; line-height: 1.6; }
 .login-card {
-  display: grid; gap: 17px; width: min(100%, 560px); padding: clamp(24px, 3.5vw, 42px);
+  display: grid; gap: 12px; width: min(100%, 600px); max-height: 100%; padding: clamp(20px, 2.6vw, 30px);
   border: 1px solid var(--border); border-radius: 26px; background: color-mix(in srgb, var(--panel) 94%, transparent);
   box-shadow: 0 30px 80px #10234a1c; backdrop-filter: blur(20px);
 }
@@ -4550,7 +4569,7 @@ body {
 .login-address-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, 110px); gap: 12px; min-width: 0; }
 .login-address-row > .fui-Field { min-width: 0; }
 .login-address-row .fui-Input { width: 100%; min-width: 0; }
-.login-feedback { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface-subtle); font-size: 13px; line-height: 1.45; }
+.login-feedback { padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--surface-subtle); font-size: 12px; line-height: 1.35; }
 .login-card-v2 > .login-feedback { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px; }
 .login-feedback-icon { width: 20px; height: 20px; margin-top: 1px; flex: 0 0 auto; }
 .login-feedback-content { display: grid; min-width: 0; gap: 3px; }
@@ -4564,29 +4583,53 @@ body {
 :root[data-theme='dark'] .login-feedback.success { color:#77d9a6; }
 :root[data-theme='dark'] .login-feedback.warning { color:#f0bc77; }
 .login-account-hint { color: var(--muted); line-height: 1.45; }
-.login-screen-v2 { grid-template-columns: minmax(210px, 300px) minmax(420px, 560px); justify-content: center; }
-.login-brand-v2 { align-self: center; }
+.login-screen-v2 { grid-template-columns: minmax(190px, 300px) minmax(440px, 600px); align-items: stretch; justify-content: center; }
+.login-brand-v2 { position: relative; align-self: stretch; }
+.login-brand-v2 .login-identity { position: absolute; inset: 50% 0 auto; transform: translateY(-50%); }
 .login-brand-v2 .login-identity { flex-direction: column; justify-content: center; gap: 12px; text-align: center; }
-.login-brand-v2 .login-app-icon { width: clamp(156px, 17vw, 210px); height: clamp(156px, 17vw, 210px); }
-.login-brand-v2 .login-product strong { font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
+.login-brand-v2 .login-app-icon { width: clamp(136px, 14vw, 190px); height: clamp(136px, 14vw, 190px); }
 .login-brand-v2 .login-copy { margin-top: clamp(34px, 6vh, 70px); }
 .login-brand-v2 .login-copy h1 { font-family: inherit; font-size: clamp(38px, 4.7vw, 64px); font-weight: 720; line-height: 1.02; }
 .login-benefits { display: grid; gap: 11px; margin-top: 30px; color: var(--muted); font-size: 14px; }
 .login-benefits span { display: flex; align-items: center; gap: 10px; }
 .login-benefits b { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.login-card-v2 { gap: 20px; }
+.login-card-v2 { align-self: center; gap: 12px; }
 .login-account-tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 4px; border-radius: 12px; background: var(--surface-subtle); }
-.login-account-tabs button { padding: 10px 14px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-weight: 650; cursor: pointer; }
+.login-account-tabs button { min-height: 36px; padding: 7px 14px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-weight: 650; cursor: pointer; }
 .login-account-tabs button.active { color: #fff; background: var(--accent); box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 28%, transparent); }
-.login-fields { display: grid; gap: 15px; }
+.login-fields { display: grid; gap: 10px; }
+.login-screen-v2.is-creating .login-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.login-screen-v2.is-creating .login-fields > .fui-Field:last-child { grid-column: 1 / -1; }
 .login-field-hint { display: block; margin-top: 4px; color: var(--muted); }
 .login-connection { border: 1px solid var(--border); border-radius: 13px; background: color-mix(in srgb, var(--surface-subtle) 65%, transparent); overflow: hidden; }
+.login-connection.collapsed { border-color: color-mix(in srgb, var(--border) 78%, transparent); background: transparent; }
 .login-connection.invalid { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 10%, transparent); }
-.login-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px 10px; font-weight: 650; }
-.login-connection-header small { max-width: 55%; overflow: hidden; color: var(--muted); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.login-connection-body { display: grid; gap: 12px; padding: 0 14px 14px; }
+.login-connection-trigger {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.login-connection-trigger:hover { background: color-mix(in srgb, var(--surface-subtle) 78%, transparent); }
+.login-connection-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.login-connection-trigger > span { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; flex: 1; }
+.login-connection-trigger strong { font-size: 13px; font-weight: 650; }
+.login-connection-trigger small { max-width: 58%; overflow: hidden; color: var(--muted); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.login-connection-trigger > svg { flex: 0 0 auto; color: var(--muted); }
+.login-connection-body { display: grid; gap: 8px; padding: 0 12px 11px; }
+.login-connection-body > .fui-Button { min-height: 32px; }
+.login-mode-tabs .fui-Button { min-height: 32px; }
 .login-submit { width: 100%; }
-.login-privacy { margin: -8px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
+.login-privacy { margin: -3px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 .login-session-options { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .login-link-button { padding: 4px 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; }
 .login-link-button:hover { text-decoration: underline; }
@@ -4653,37 +4696,35 @@ body {
     font-size: 16px !important;
   }
 
-  .login-screen { grid-template-columns: 1fr; align-content: start; gap: 26px; padding: 24px; overflow: auto; }
+  .login-screen { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); align-content: center; gap: 10px; overflow: hidden; padding: 12px; }
   .login-brand { display: flex; align-items: center; gap: 24px; }
-  .login-brand-v2 { justify-content: center; }
-  .login-brand-v2 .login-app-icon { width: 112px; height: 112px; }
-  .login-brand-v2 .login-product strong { font-size: 20px; }
+  .login-brand-v2 { width: 100%; align-self: auto; justify-content: center; }
+  .login-brand-v2 .login-identity { position: static; flex-direction: row; transform: none; gap: 9px; }
+  .login-brand-v2 .login-app-icon { width: 58px; height: 58px; }
   .login-copy { margin: 0; }
   .login-brand h1 { font-size: clamp(30px, 7vw, 42px); }
   .login-brand p { margin-bottom: 0; }
-  .login-card { width: 100%; }
+  .login-card { width: min(100%, 600px); align-self: center; justify-self: center; padding: 16px 18px; }
   .login-benefits { display: none; }
   .onboarding-layout { grid-template-columns: 1fr; }
   .onboarding-preview { min-height: 210px; }
 }
 
 @media (max-width: 540px) {
-  .login-screen { padding: 16px; gap: 18px; }
-  .login-brand { display: block; }
+  .login-screen { padding: 9px; gap: 7px; }
+  .login-brand { display: flex; }
   .login-brand-v2 .login-copy { margin-top: 18px; }
   .login-brand-v2 .login-copy h1 { font-size: clamp(30px, 9vw, 36px); line-height: 1.06; }
-  .login-brand-v2 .login-app-icon { width: 88px; height: 88px; }
-  .login-brand-v2 .login-product strong { font-size: 18px; }
+  .login-brand-v2 .login-app-icon { width: 46px; height: 46px; }
   .login-identity { gap: 12px; }
   .login-app-icon { width: 58px; height: 58px; }
-  .login-product strong { font-size: 23px; }
-  .login-product span { font-size: 10px; letter-spacing: .13em; }
   .login-brand p { font-size: 15px; line-height: 1.5; }
-  .login-card { gap: 14px; padding: 20px 16px; border-radius: 20px; }
+  .login-card { gap: 9px; padding: 13px; border-radius: 18px; }
   .login-card-header { align-items: flex-start; }
   .login-card-header .fui-Select { max-width: 126px; }
-  .login-mode-tabs { grid-template-columns: 1fr; }
-  .login-address-row { grid-template-columns: 1fr; }
+  .login-mode-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .login-mode-tabs .fui-Button { padding-inline: 3px; font-size: 11px; }
+  .login-address-row { grid-template-columns: minmax(0, 1fr) minmax(76px, 92px); gap: 7px; }
   .login-session-options { align-items: flex-start; }
   .password-reset-dialog-content { min-width: 0; }
   .onboarding-screen { padding: 14px; padding-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 18px)); }
@@ -4694,9 +4735,24 @@ body {
 }
 
 @media (max-height: 760px) and (min-width: 801px) {
-  .login-screen { align-items: start; padding-block: 24px; overflow: auto; }
-  .login-copy { margin-top: 28px; }
-  .login-card { gap: 13px; padding-block: 24px; }
+  .login-screen { padding-block: 12px; overflow: hidden; }
+  .login-brand-v2 .login-app-icon { width: 132px; height: 132px; }
+  .login-card { gap: 8px; padding: 15px 20px; }
+  .login-card-header h2 { font-size: 21px; line-height: 1.05; }
+  .login-eyebrow { font-size: 9px; }
+  .login-account-tabs button { min-height: 32px; padding-block: 5px; }
+  .login-fields { gap: 7px; }
+  .login-field-hint { margin-top: 2px; font-size: 10px; line-height: 1.25; }
+  .login-connection-trigger { min-height: 36px; padding: 6px 10px; }
+  .login-connection-body { gap: 6px; padding: 0 10px 8px; }
+  .login-mode-tabs { padding: 3px; }
+  .login-mode-tabs .fui-Button,
+  .login-connection-body > .fui-Button { min-height: 28px; }
+  .login-session-options { min-height: 28px; }
+  .login-feedback { padding: 7px 9px; font-size: 11px; }
+  .login-feedback-actions { margin-top: 4px; }
+  .login-submit { min-height: 36px; }
+  .login-privacy { font-size: 10px; }
   .onboarding-screen { padding: 18px 24px 26px; }
   .onboarding-card { padding: 22px 30px; }
   .onboarding-copy { margin: 18px 0 20px; }
@@ -4706,6 +4762,38 @@ body {
   .onboarding-options { gap: 13px; }
   .onboarding-emoji-grid button { max-height: 48px; }
   .onboarding-startup-option { padding: 10px 12px; }
+}
+
+@media (max-height: 660px) and (min-width: 801px) {
+  .login-screen { padding-block: 8px; }
+  .login-brand-v2 .login-app-icon { width: 108px; height: 108px; }
+  .login-card { gap: 6px; padding: 11px 16px; }
+  .login-eyebrow,
+  .login-privacy { display: none; }
+  .login-card-header h2 { margin-top: 0; font-size: 19px; }
+  .login-account-tabs button { min-height: 29px; }
+  .login-connection-body { gap: 4px; padding-bottom: 6px; }
+  .login-mode-tabs .fui-Button,
+  .login-connection-body > .fui-Button { min-height: 26px; }
+}
+
+@media (max-width: 800px) and (max-height: 700px) {
+  .login-screen { grid-template-rows: minmax(0, 1fr); }
+  .login-brand-v2 { display: none; }
+  .login-card { gap: 6px; padding: 10px 13px; }
+  .login-eyebrow,
+  .login-privacy { display: none; }
+  .login-card-header h2 { margin-top: 0; font-size: 19px; }
+  .login-account-tabs button { min-height: 30px; padding-block: 4px; }
+  .login-fields { gap: 6px; }
+  .login-field-hint { margin-top: 1px; font-size: 10px; }
+  .login-connection-trigger { min-height: 34px; padding: 5px 9px; }
+  .login-connection-body { gap: 4px; padding: 0 9px 6px; }
+  .login-mode-tabs { padding: 2px; }
+  .login-mode-tabs .fui-Button,
+  .login-connection-body > .fui-Button { min-height: 27px; }
+  .login-feedback { padding: 6px 8px; }
+  .login-feedback-actions { margin-top: 3px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5266,7 +5354,14 @@ body {
   gap: 10px;
 }
 
-.settings-font-size-options > button {
+.settings-density-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-font-size-options > button,
+.settings-density-options > button {
   display: grid;
   min-width: 0;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -5281,18 +5376,21 @@ body {
   cursor: pointer;
 }
 
-.settings-font-size-options > button:hover {
+.settings-font-size-options > button:hover,
+.settings-density-options > button:hover {
   border-color: color-mix(in srgb, var(--teams-accent) 38%, var(--teams-border));
   background: var(--teams-row-hover);
 }
 
-.settings-font-size-options > button.active {
+.settings-font-size-options > button.active,
+.settings-density-options > button.active {
   border-color: var(--teams-accent);
   background: color-mix(in srgb, var(--teams-accent) 9%, var(--teams-surface));
   box-shadow: inset 0 0 0 1px var(--teams-accent);
 }
 
-.settings-font-size-options > button:focus-visible {
+.settings-font-size-options > button:focus-visible,
+.settings-density-options > button:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--teams-accent);
 }
@@ -5311,6 +5409,44 @@ body {
 .settings-font-sample.small { font-size: 12px; }
 .settings-font-sample.medium { font-size: 16px; }
 .settings-font-sample.large { font-size: 20px; }
+
+.settings-density-sample {
+  display: flex;
+  width: 46px;
+  height: 44px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 7px;
+  border-radius: 5px;
+  background: #f0f2f6;
+}
+
+.settings-density-sample span {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: #737a89;
+}
+
+.settings-density-sample.compact { gap: 3px; }
+.settings-density-sample.standard { gap: 7px; }
+.settings-density-sample.comfortable { gap: 0; justify-content: space-around; }
+
+:root[data-density='compact'] .sidebar-topbar { min-height: 62px; padding: 7px 10px; }
+:root[data-density='compact'] .search-wrap { padding: 8px 10px; }
+:root[data-density='compact'] .sidebar-section-title { padding: 7px 12px; }
+:root[data-density='compact'] .conversation-item { min-height: 54px; padding: 7px 12px; }
+:root[data-density='compact'] .sidebar-create-group-empty { min-height: 58px; margin: 8px 12px; padding: 8px 12px; }
+:root[data-density='compact'] .composer { padding: 7px 10px 8px; }
+:root[data-density='compact'] .composer-row { gap: 7px; }
+
+:root[data-density='comfortable'] .sidebar-topbar { min-height: 80px; padding: 13px 15px; }
+:root[data-density='comfortable'] .search-wrap { padding: 15px; }
+:root[data-density='comfortable'] .sidebar-section-title { padding: 13px 16px; }
+:root[data-density='comfortable'] .conversation-item { min-height: 72px; padding: 13px 16px; }
+:root[data-density='comfortable'] .sidebar-create-group-empty { min-height: 82px; margin: 15px; padding: 15px 16px; }
+:root[data-density='comfortable'] .composer { padding: 13px 17px 15px; }
+:root[data-density='comfortable'] .composer-row { gap: 13px; }
 
 .settings-theme-options > button {
   display: grid;
@@ -5511,6 +5647,77 @@ body {
   gap: 9px;
 }
 
+.settings-storage-list {
+  overflow: hidden;
+  border: 1px solid var(--teams-border);
+  border-radius: 8px;
+  background: var(--teams-surface);
+}
+
+.settings-storage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px;
+}
+
+.settings-storage-row + .settings-storage-row {
+  border-top: 1px solid var(--teams-border);
+}
+
+.settings-storage-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settings-storage-row strong {
+  color: var(--teams-text);
+  font-size: 13px;
+}
+
+.settings-storage-row > div > span {
+  overflow-wrap: anywhere;
+  color: var(--teams-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-storage-size {
+  min-width: 74px;
+  color: var(--teams-text);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.settings-storage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--teams-muted);
+  font-size: 12px;
+}
+
+.settings-storage-footer strong {
+  color: var(--teams-text);
+}
+
+.settings-storage-action.fui-Button {
+  width: 178px;
+  min-width: 178px;
+  justify-content: center;
+}
+
+.settings-modal .settings-storage-clear-all.fui-Button,
+.settings-modal .settings-storage-clear-all.fui-Button span,
+.settings-modal .settings-storage-clear-all.fui-Button svg {
+  color: #fff !important;
+}
+
 .settings-inline-help {
   color: var(--teams-muted);
 }
@@ -5595,6 +5802,23 @@ body {
   font-size: 13px;
 }
 
+.settings-session-activity {
+  gap: 6px;
+}
+
+.settings-session-activity-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--teams-muted);
+}
+
+.settings-session-activity.enabled .settings-session-activity-dot {
+  background: #16a34a;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 14%, transparent);
+}
+
 .settings-sessions-state {
   display: flex;
   min-height: 64px;
@@ -5603,12 +5827,6 @@ body {
   gap: 8px;
   color: var(--teams-muted);
   font-size: 12px;
-}
-
-.settings-relay-heading-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .settings-relay-connection-body {
@@ -6097,6 +6315,10 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .settings-density-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .settings-theme-options > button {
     grid-template-columns: 96px minmax(0, 1fr);
     align-items: center;
@@ -6171,6 +6393,26 @@ body {
 
   .settings-directory-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-storage-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  .settings-storage-row > .fui-Button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .settings-storage-action.fui-Button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .settings-storage-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .settings-modal .settings-actions {

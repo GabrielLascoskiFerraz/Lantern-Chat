@@ -65,6 +65,7 @@ export const runMigrations = (db: Database.Database): void => {
       replyToFileName TEXT,
       forwardedFromMessageId TEXT,
       editedAt INTEGER,
+      announcementExpiresAt INTEGER,
       createdAt INTEGER NOT NULL
     );
 
@@ -313,6 +314,9 @@ export const runMigrations = (db: Database.Database): void => {
   }
   if (!messageColumns.some((column) => column.name === 'serverSeq')) {
     db.exec('ALTER TABLE messages ADD COLUMN serverSeq INTEGER;');
+  }
+  if (!messageColumns.some((column) => column.name === 'announcementExpiresAt')) {
+    db.exec('ALTER TABLE messages ADD COLUMN announcementExpiresAt INTEGER;');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_messages_server_seq ON messages(serverSeq);');
 

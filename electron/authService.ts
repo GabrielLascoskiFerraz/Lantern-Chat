@@ -118,35 +118,67 @@ export class AuthService {
   }
 
   async restore(): Promise<ClientAuthState> {
-    if (!this.token || !this.stored.endpoint) return this.getState();
-    try {
-      const response = await this.fetchRelay(this.stored.endpoint, '/api/client/session', {
-        headers: { authorization: `Bearer ${this.token}` }
-      }, 8_000);
-      if (response.status === 401 || response.status === 403) {
-        this.clearSession();
-        return this.getState();
-      }
-      if (!response.ok) {
-        this.connectionError = relayHttpErrorMessage(
-          response,
-          undefined,
-          'O Relay não conseguiu restaurar sua sessão. Tente novamente.'
-        );
-        return this.getState();
-      }
-      const body = (await response.json()) as { user?: AuthenticatedUser };
-      if (!body.user) {
-        this.clearSession();
-        return this.getState();
-      }
-      this.user = body.user;
-      this.connectionError = null;
-    } catch (error) {
-      this.connectionError = error instanceof Error
-        ? error.message
-        : 'Não foi possível conectar ao Relay.';
+    if (!this.token || (!this.stored.endpoint && this.stored.relay.mode !== 'local-auto')) {
+      return this.getState();
     }
+    const endpoints: string[] = [];
+    if (this.stored.relay.mode === 'local-auto') {
+      // O endereço da rede local pode mudar entre duas execuções. Além disso,
+      // no modo dev o cliente e o Relay são iniciados em paralelo.
+      const resolved = await this.resolveEndpoint(this.stored.relay).catch(() => null);
+      if (resolved) endpoints.push(resolved);
+    }
+    if (this.stored.endpoint) endpoints.push(this.stored.endpoint);
+
+    const uniqueEndpoints = Array.from(new Set(endpoints.filter(Boolean)));
+    const attemptsPerEndpoint = this.stored.relay.mode === 'local-auto' ? 3 : 1;
+    let lastError: unknown = null;
+    let rejectedCredentials = false;
+
+    for (const endpoint of uniqueEndpoints) {
+      for (let attempt = 0; attempt < attemptsPerEndpoint; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** (attempt - 1)));
+        }
+        try {
+          const response = await this.fetchRelay(endpoint, '/api/client/session', {
+            headers: { authorization: `Bearer ${this.token}` }
+          }, 4_000);
+          if (response.status === 401 || response.status === 403) {
+            rejectedCredentials = true;
+            break;
+          }
+          if (!response.ok) {
+            lastError = new Error(relayHttpErrorMessage(
+              response,
+              undefined,
+              'O Relay não conseguiu restaurar sua sessão. Tente novamente.'
+            ));
+            continue;
+          }
+          const body = (await response.json()) as { user?: AuthenticatedUser };
+          if (!body.user) {
+            rejectedCredentials = true;
+            break;
+          }
+          this.user = body.user;
+          this.stored.endpoint = endpoint;
+          this.connectionError = null;
+          this.persist();
+          return this.getState();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    }
+
+    if (rejectedCredentials && !lastError) {
+      this.clearSession();
+      return this.getState();
+    }
+    this.connectionError = lastError instanceof Error
+      ? relayConnectionMessage(lastError)
+      : 'Não foi possível conectar ao Relay.';
     return this.getState();
   }
 

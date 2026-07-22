@@ -83,6 +83,19 @@ const SHOW_ANNOUNCEMENT_READ_BUTTON = false;
 const formatTime = (value: number): string =>
   new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
+const formatAnnouncementExpiry = (expiresAt: number | null | undefined, now: number): string => {
+  if (!expiresAt) return 'expiração automática';
+  const remainingMs = expiresAt - now;
+  if (remainingMs <= 0) return 'expirando…';
+  const totalMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
+  const days = Math.floor(totalMinutes / 1_440);
+  const hours = Math.floor((totalMinutes % 1_440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `expira em ${days}d${hours > 0 ? ` ${hours}h` : ''}`;
+  if (hours > 0) return `expira em ${hours}h${minutes > 0 ? ` ${minutes}min` : ''}`;
+  return `expira em ${minutes}min`;
+};
+
 const renderMessageText = (text: string): ReactNode[] => {
   const regex = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
   const parts: ReactNode[] = [];
@@ -164,6 +177,7 @@ export const AnnouncementsView = ({
   onReactToMessage,
   onDeleteMessage
 }: AnnouncementsViewProps) => {
+  const [expiryClockNow, setExpiryClockNow] = useState(Date.now());
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
@@ -193,6 +207,13 @@ export const AnnouncementsView = ({
   const stickToBottomRef = useRef(true);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const jumpHighlightTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setExpiryClockNow(Date.now());
+    if (!messages.some((message) => Boolean(message.announcementExpiresAt))) return undefined;
+    const timer = window.setInterval(() => setExpiryClockNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [messages]);
 
   const copySelectedText = async (text: string): Promise<void> => {
     const value = text.trim();
@@ -423,6 +444,20 @@ export const AnnouncementsView = ({
   }, [messages]);
 
   useEffect(() => {
+    const availablePreviewIds = new Set(
+      messages
+        .filter((message) => message.type === 'file' && Boolean(message.filePath))
+        .map((message) => message.messageId)
+    );
+    setFilePreviewByMessageId((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([messageId]) => availablePreviewIds.has(messageId))
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [messages]);
+
+  useEffect(() => {
     let cancelled = false;
     const pending = messages.filter(
       (message) =>
@@ -591,7 +626,7 @@ export const AnnouncementsView = ({
                         <span className="announcement-sender">{senderName}</span>
                         <span className="announcement-expiry-clock">
                           <Clock20Regular />
-                          expiração automática
+                          {formatAnnouncementExpiry(message.announcementExpiresAt, expiryClockNow)}
                         </span>
                       </div>
                       {isFile ? (

@@ -74,6 +74,44 @@ test('ACK do Relay promove mensagem pendente para entregue antes da leitura', ()
   }
 });
 
+test('limpeza de anexos remove apenas caminhos locais recebidos e preserva as mensagens', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-attachment-cache-clear-'));
+  try {
+    const db = new DbService(root);
+    const receivedPath = path.join(root, 'received.png');
+    const originalPath = path.join(root, 'original.png');
+    fs.writeFileSync(receivedPath, 'recebido');
+    fs.writeFileSync(originalPath, 'original');
+    const conversationId = db.ensureDmConversation('peer', 'Contato');
+    const base = {
+      conversationId, receiverDeviceId: null, type: 'file', bodyText: null,
+      fileName: 'imagem.png', fileSize: 8, fileSha256: 'hash', status: 'delivered',
+      reaction: null, deletedAt: null, replyToMessageId: null,
+      replyToSenderDeviceId: null, replyToType: null, replyToPreviewText: null,
+      replyToFileName: null, forwardedFromMessageId: null, editedAt: null,
+      createdAt: Date.now()
+    };
+    db.saveMessage({
+      ...base, messageId: 'received-file', direction: 'in', senderDeviceId: 'peer',
+      fileId: 'received-id', filePath: receivedPath
+    });
+    db.saveMessage({
+      ...base, messageId: 'sent-file', direction: 'out', senderDeviceId: 'self',
+      receiverDeviceId: 'peer', fileId: 'sent-id', filePath: originalPath,
+      createdAt: Date.now() + 1
+    });
+
+    assert.deepEqual(db.getDownloadedAttachmentCachePaths(), [receivedPath]);
+    db.clearDownloadedAttachmentCache();
+    assert.equal(db.getMessageById('received-file').filePath, null);
+    assert.equal(db.getMessageById('sent-file').filePath, originalPath);
+    assert.equal(db.getMessageById('received-file').messageId, 'received-file');
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('nova tentativa reutiliza o messageId e confirma entregue no ACK do Relay', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-message-retry-'));
   try {

@@ -35,6 +35,7 @@ import {
   MailUnread20Regular,
   PeopleTeam20Regular,
   PeopleTeamAdd24Regular,
+  Prohibited20Regular,
   Add20Regular
   ,SignOut20Regular
 } from '@fluentui/react-icons';
@@ -131,6 +132,7 @@ export const Sidebar = ({
   const [pendingClearConversationId, setPendingClearConversationId] = useState<string | null>(null);
   const [pendingLeaveGroupId, setPendingLeaveGroupId] = useState<string | null>(null);
   const [pendingDeleteGroupId, setPendingDeleteGroupId] = useState<string | null>(null);
+  const [logoutConfirmationOpen, setLogoutConfirmationOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [quickStatusOpen, setQuickStatusOpen] = useState(false);
   const [quickStatusClosing, setQuickStatusClosing] = useState(false);
@@ -146,10 +148,24 @@ export const Sidebar = ({
   const previousOrderSignature = useRef<string>('');
   const [contactsScrollTop, setContactsScrollTop] = useState(0);
   const [contactsViewportHeight, setContactsViewportHeight] = useState(0);
-  const statusOptions = ['Disponível', 'Em reunião', 'Foco total', 'Volto já', 'Não perturbe'];
+  const statusOptions = ['Disponível', 'Em reunião', 'Foco total', 'Volto já'];
   const CONTACT_ITEM_HEIGHT = 70;
   const CONTACT_OVERSCAN = 8;
   const activeDoNotDisturbUntil = Math.max(0, Number(startupSettings?.doNotDisturbUntil || 0));
+  const [dndClock, setDndClock] = useState(Date.now());
+  const doNotDisturbActive = activeDoNotDisturbUntil > dndClock;
+  const visibleStatusMessage = doNotDisturbActive ? 'Não perturbe' : profile.statusMessage;
+
+  useEffect(() => {
+    const now = Date.now();
+    setDndClock(now);
+    if (activeDoNotDisturbUntil <= now) return;
+    const timer = window.setTimeout(
+      () => setDndClock(Date.now()),
+      Math.min(activeDoNotDisturbUntil - now + 25, 2_147_483_647)
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeDoNotDisturbUntil]);
   const setDoNotDisturbFor = (milliseconds: number): void => {
     void onDoNotDisturbUntilChange(Date.now() + milliseconds);
   };
@@ -633,17 +649,19 @@ export const Sidebar = ({
           <Avatar emoji={profile.avatarEmoji} bg={profile.avatarBg} size={34} />
           <div className="conversation-text">
             <Text weight="semibold">{profile.displayName}</Text>
-            <Caption1>{profile.statusMessage || profile.deviceId.slice(0, 8)}</Caption1>
+            <Caption1>{visibleStatusMessage || profile.deviceId.slice(0, 8)}</Caption1>
           </div>
         </div>
         <div className="sidebar-topbar-actions">
           <div className="quick-status-wrap" ref={quickStatusRef}>
             <Button
               ref={quickStatusButtonRef}
-              appearance="subtle"
-              icon={<Chat20Regular />}
-              aria-label="Trocar status"
-              title="Trocar status"
+              appearance={doNotDisturbActive ? 'primary' : 'subtle'}
+              className={doNotDisturbActive ? 'quick-status-trigger dnd-active' : 'quick-status-trigger'}
+              icon={doNotDisturbActive ? <Prohibited20Regular /> : <Chat20Regular />}
+              aria-label={doNotDisturbActive ? 'Não perturbe ativo. Alterar status' : 'Trocar status'}
+              aria-pressed={doNotDisturbActive}
+              title={doNotDisturbActive ? 'Não perturbe ativo' : 'Trocar status'}
               onClick={toggleQuickStatusMenu}
             />
             {quickStatusOpen && (
@@ -689,10 +707,10 @@ export const Sidebar = ({
                 </div>
                 <div className="quick-status-dnd">
                   <div className="quick-status-dnd-title">
-                    <WeatherMoon20Regular />
+                    <Prohibited20Regular />
                     <span>Não perturbe</span>
-                    <span className={`quick-status-dnd-badge ${activeDoNotDisturbUntil > Date.now() ? 'active' : ''}`}>
-                      {activeDoNotDisturbUntil > Date.now() ? 'Ativo' : 'Desativado'}
+                    <span className={`quick-status-dnd-badge ${doNotDisturbActive ? 'active' : ''}`}>
+                      {doNotDisturbActive ? 'Ativo' : 'Desativado'}
                     </span>
                   </div>
                   <div className="quick-status-dnd-actions">
@@ -705,7 +723,7 @@ export const Sidebar = ({
                     <button type="button" onClick={setDoNotDisturbUntilTomorrow}>
                       Até amanhã
                     </button>
-                    {activeDoNotDisturbUntil > Date.now() && (
+                    {doNotDisturbActive && (
                       <button type="button" onClick={() => void onDoNotDisturbUntilChange(0)}>
                         Desativar
                       </button>
@@ -716,7 +734,13 @@ export const Sidebar = ({
             )}
           </div>
           <Button appearance="subtle" icon={<Settings20Regular />} onClick={onOpenSettings} />
-          <Button appearance="subtle" icon={<SignOut20Regular />} aria-label="Sair da conta" title="Sair da conta" onClick={() => void onLogout()} />
+          <Button
+            appearance="subtle"
+            icon={<SignOut20Regular />}
+            aria-label="Sair da conta"
+            title="Sair da conta"
+            onClick={() => setLogoutConfirmationOpen(true)}
+          />
           <Button
             appearance={themeMode === 'system' ? 'primary' : 'subtle'}
             icon={<Desktop20Regular />}
@@ -1060,6 +1084,17 @@ export const Sidebar = ({
             void onDeleteGroup(pendingDeleteGroupId);
           }
           setPendingDeleteGroupId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={logoutConfirmationOpen}
+        title="Sair da conta?"
+        description="Você será desconectado do Lantern neste dispositivo. Suas conversas e seus dados continuarão armazenados no Relay."
+        confirmLabel="Sair da conta"
+        onCancel={() => setLogoutConfirmationOpen(false)}
+        onConfirm={() => {
+          setLogoutConfirmationOpen(false);
+          void onLogout();
         }}
       />
     </aside>

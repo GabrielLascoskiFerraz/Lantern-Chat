@@ -135,6 +135,8 @@ export const Shell = () => {
     setThemeMode,
     fontSizeMode,
     setFontSizeMode,
+    densityMode,
+    setDensityMode,
     syncActive,
     loadingConversationId,
     loadInitial,
@@ -516,6 +518,8 @@ export const Shell = () => {
         onThemeModeChange={setThemeMode}
         fontSizeMode={fontSizeMode}
         onFontSizeModeChange={setFontSizeMode}
+        densityMode={densityMode}
+        onDensityModeChange={setDensityMode}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
           await updateProfile(payload.profile);

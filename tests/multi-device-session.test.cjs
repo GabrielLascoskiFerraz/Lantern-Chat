@@ -129,6 +129,56 @@ test('um usuário mantém múltiplos dispositivos e recebe em todas as sessões'
   }
 });
 
+test('Não perturbe altera apenas a presença temporária e restaura o status salvo', async () => {
+  fs.mkdirSync(root, { recursive: true });
+  const port = await getFreePort();
+  const store = new CentralStore(path.join(root, 'central'), () => undefined);
+  const observerUser = store.createUser({
+    username: 'dnd-observer', displayName: 'Observer', password: 'observer-password'
+  });
+  const targetUser = store.createUser({
+    username: 'dnd-target', displayName: 'Target', password: 'target-password'
+  });
+  store.updateUser(targetUser.userId, { statusMessage: 'Foco total' });
+  const observerAuth = store.login('dnd-observer', 'observer-password', 'observer-device');
+  const targetAuth = store.login('dnd-target', 'target-password', 'target-device');
+  store.close();
+
+  const relay = new LanternRelay(config(port));
+  const sockets = [];
+  try {
+    await relay.start();
+    const observer = await connect(port, observerAuth.token, observerUser, 'observer-device');
+    const target = await connect(port, targetAuth.token, targetUser, 'target-device');
+    sockets.push(observer.socket, target.socket);
+
+    target.socket.send(JSON.stringify({
+      type: 'relay:dnd:update',
+      payload: { doNotDisturbUntil: Date.now() + 60_000 }
+    }));
+    await waitFor(() => observer.messages.some((item) =>
+      item.type === 'relay:presence:delta'
+      && item.payload?.peer?.deviceId === targetUser.userId
+      && item.payload?.peer?.statusMessage === 'Não perturbe'
+    ));
+    assert.equal(relay.centralStore.getUser(targetUser.userId).statusMessage, 'Foco total');
+
+    target.socket.send(JSON.stringify({
+      type: 'relay:dnd:update',
+      payload: { doNotDisturbUntil: 0 }
+    }));
+    await waitFor(() => observer.messages.some((item) =>
+      item.type === 'relay:presence:delta'
+      && item.payload?.peer?.deviceId === targetUser.userId
+      && item.payload?.peer?.statusMessage === 'Foco total'
+    ));
+  } finally {
+    for (const socket of sockets) socket.close();
+    await relay.stop('test');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('confirmação durável não espera a distribuição aos sockets destinatários', async () => {
   fs.mkdirSync(root, { recursive: true });
   const port = await getFreePort();

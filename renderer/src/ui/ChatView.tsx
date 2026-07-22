@@ -1162,6 +1162,27 @@ export const ChatView = ({
   }, [normalizedQuery]);
 
   useEffect(() => {
+    const invalidatedIds = messages
+      .filter((message) => message.type === 'file' && !message.filePath)
+      .map((message) => message.messageId);
+    if (invalidatedIds.length === 0) return;
+    const invalidated = new Set(invalidatedIds);
+    for (const messageId of invalidated) imagePreviewStateCache.delete(messageId);
+    setPreviewStateByMessageId((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([messageId]) => !invalidated.has(messageId))
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setVisiblePreviewByMessageId((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([messageId]) => !invalidated.has(messageId))
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [messages]);
+
+  useEffect(() => {
     let cancelled = false;
     const loadPreviews = async () => {
       const pending = messages.filter(

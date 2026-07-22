@@ -108,6 +108,55 @@ export class DbService {
     this.resetCacheForAuthenticatedProfile(placeholder);
   }
 
+  getDownloadedAttachmentCachePaths(): string[] {
+    const messagePaths = this.db
+      .prepare(
+        `SELECT filePath AS path
+         FROM messages
+         WHERE direction = 'in'
+           AND type = 'file'
+           AND filePath IS NOT NULL`
+      )
+      .all() as Array<{ path: string | null }>;
+    const groupPaths = this.db
+      .prepare(
+        `SELECT localPath AS path FROM group_attachment_downloads WHERE localPath IS NOT NULL
+         UNION ALL
+         SELECT tempPath AS path FROM group_attachment_downloads WHERE tempPath IS NOT NULL`
+      )
+      .all() as Array<{ path: string | null }>;
+
+    return Array.from(new Set([...messagePaths, ...groupPaths]
+      .map((row) => row.path)
+      .filter((value): value is string => Boolean(value))));
+  }
+
+  clearDownloadedAttachmentCache(): void {
+    const clear = this.db.transaction(() => {
+      this.db.exec(`
+        UPDATE messages
+        SET filePath = NULL
+        WHERE direction = 'in' AND type = 'file';
+
+        UPDATE group_attachment_downloads
+        SET status = 'pending',
+            localPath = NULL,
+            tempPath = NULL,
+            receivedBytes = 0,
+            nextChunkIndex = 0,
+            retryCount = 0,
+            lastError = NULL,
+            lastAttemptAt = NULL,
+            requestId = NULL,
+            receivedAt = NULL,
+            updatedAt = strftime('%s', 'now') * 1000;
+
+        DELETE FROM attachment_download_checkpoints;
+      `);
+    });
+    clear();
+  }
+
   getProfile(): Profile {
     const row = this.db.prepare('SELECT * FROM profile LIMIT 1').get() as Profile | undefined;
     if (row) {
@@ -1059,6 +1108,7 @@ export class DbService {
          replyToFileName,
          forwardedFromMessageId,
          editedAt,
+         announcementExpiresAt,
          serverSeq,
          createdAt
        )
@@ -1086,6 +1136,7 @@ export class DbService {
          @replyToFileName,
          @forwardedFromMessageId,
          @editedAt,
+         @announcementExpiresAt,
          @serverSeq,
          @createdAt
        )`
@@ -1116,6 +1167,7 @@ export class DbService {
         replyToFileName: row.replyToFileName ?? null,
         forwardedFromMessageId: row.forwardedFromMessageId ?? null,
         editedAt: row.editedAt ?? null,
+        announcementExpiresAt: row.announcementExpiresAt ?? null,
         serverSeq: row.serverSeq ?? null
       };
 
@@ -1127,6 +1179,13 @@ export class DbService {
     });
 
     return tx(message);
+  }
+
+  setAnnouncementExpiresAt(messageId: string, expiresAt: number | null): DbMessage | undefined {
+    this.db
+      .prepare('UPDATE messages SET announcementExpiresAt = ? WHERE messageId = ?')
+      .run(expiresAt, messageId);
+    return this.getMessageById(messageId);
   }
 
   updateMessageStatus(

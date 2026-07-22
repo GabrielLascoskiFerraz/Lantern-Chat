@@ -53,6 +53,7 @@ export interface AccountSession {
   lastSeenAt: number;
   expiresAt: number;
   current: boolean;
+  active: boolean;
 }
 export interface UserPreferencesSnapshot {
   conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
@@ -131,6 +132,7 @@ export interface MessageRow {
   replyToFileName: string | null;
   forwardedFromMessageId?: string | null;
   editedAt?: number | null;
+  announcementExpiresAt?: number | null;
   createdAt: number;
   localOnly?: boolean;
 }
@@ -218,6 +220,15 @@ export interface StartupSettings {
   doNotDisturbUntil: number;
 }
 
+export interface LocalStorageUsage {
+  appCacheBytes: number;
+  attachmentBytes: number;
+  attachmentCount: number;
+  totalBytes: number;
+}
+
+export type LocalStorageClearTarget = 'app-cache' | 'attachments' | 'all';
+
 export interface UpdateInstallerInfo {
   platform: 'win32' | 'darwin' | 'linux';
   fileName: string;
@@ -253,6 +264,7 @@ export type AppEvent =
   | { type: 'conversation:cleared'; conversationId: string }
   | { type: 'conversation:synchronized'; conversationId: string }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
+  | { type: 'attachments:cache-cleared'; filePaths: string[] }
   | {
       type: 'message:status';
       messageId: string;
@@ -345,6 +357,8 @@ export interface LanternApi {
   }) => Promise<RelaySettings>;
   forceRelayRediscovery: () => Promise<RelaySettings>;
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) => Promise<StartupSettings>;
+  getLocalStorageUsage: () => Promise<LocalStorageUsage>;
+  clearLocalStorage: (target: LocalStorageClearTarget) => Promise<LocalStorageUsage>;
   getUpdateState: () => Promise<AppUpdateState>;
   forceUpdate: () => Promise<AppUpdateState>;
   installUpdate: () => Promise<void>;
@@ -517,6 +531,8 @@ export const ipcClient = {
   forceRelayRediscovery: () => window.lantern.forceRelayRediscovery(),
   updateStartupSettings: (input: { openAtLogin: boolean; downloadsDir?: string; doNotDisturbUntil?: number }) =>
     window.lantern.updateStartupSettings(input),
+  getLocalStorageUsage: () => window.lantern.getLocalStorageUsage(),
+  clearLocalStorage: (target: LocalStorageClearTarget) => window.lantern.clearLocalStorage(target),
   getUpdateState: () => window.lantern.getUpdateState(),
   forceUpdate: () => window.lantern.forceUpdate(),
   installUpdate: () => window.lantern.installUpdate(),

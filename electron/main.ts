@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { app, BrowserWindow, dialog, Menu } from 'electron';
+import { app, BrowserWindow, dialog, Menu, session } from 'electron';
 import { randomUUID } from 'node:crypto';
 import {
   ANNOUNCEMENTS_CONVERSATION_ID,
@@ -35,6 +35,8 @@ import {
   GroupInfo,
   GroupMember,
   GroupSnapshot,
+  LocalStorageClearTarget,
+  LocalStorageUsage,
   MessageReplyPayload,
   Peer,
   Profile,
@@ -557,6 +559,7 @@ class LanternApp {
     } else {
       this.relay.setEndpointSettings(this.relaySettings);
     }
+    this.relay.setDoNotDisturbUntil(this.db.getDoNotDisturbUntil());
 
     this.notifications.setNavigateHandler((conversationId) => {
       this.mainWindow?.show();
@@ -609,6 +612,8 @@ class LanternApp {
       updateRelaySettings: (input) => this.updateRelaySettings(input),
       forceRelayRediscovery: () => this.forceRelayRediscovery(),
       updateStartupSettings: (input) => this.updateStartupSettings(input),
+      getLocalStorageUsage: () => this.getLocalStorageUsage(),
+      clearLocalStorage: (target) => this.clearLocalStorage(target),
       sendText: (peerId, text, replyTo) => this.messageService.sendText(peerId, text, replyTo),
       sendGroupText: (groupId, text, replyTo) => this.sendGroupText(groupId, text, replyTo),
       sendTyping: (peerId, isTyping) => this.sendTyping(peerId, isTyping),
@@ -919,6 +924,7 @@ class LanternApp {
     if (typeof input.doNotDisturbUntil === 'number') {
       const nextDndUntil = this.db.setDoNotDisturbUntil(input.doNotDisturbUntil);
       this.notifications.setDoNotDisturbUntil(nextDndUntil);
+      this.relay?.setDoNotDisturbUntil(nextDndUntil);
     }
 
     const supported = this.isStartupSettingsSupported();
@@ -932,6 +938,62 @@ class LanternApp {
       openAsHidden: false
     });
     return this.getStartupSettingsSnapshot();
+  }
+
+  private getFileUsage(paths: string[]): { bytes: number; count: number } {
+    let bytes = 0;
+    let count = 0;
+    for (const filePath of new Set(paths.map((value) => path.resolve(value)))) {
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) continue;
+        bytes += stat.size;
+        count += 1;
+      } catch {
+        // Arquivos removidos externamente não fazem mais parte do cache local.
+      }
+    }
+    return { bytes, count };
+  }
+
+  private async getLocalStorageUsage(): Promise<LocalStorageUsage> {
+    const appCacheBytes = await session.defaultSession.getCacheSize().catch(() => 0);
+    const attachments = this.getFileUsage(this.db.getDownloadedAttachmentCachePaths());
+    return {
+      appCacheBytes,
+      attachmentBytes: attachments.bytes,
+      attachmentCount: attachments.count,
+      totalBytes: appCacheBytes + attachments.bytes
+    };
+  }
+
+  private async clearLocalStorage(target: LocalStorageClearTarget): Promise<LocalStorageUsage> {
+    if (!['app-cache', 'attachments', 'all'].includes(target)) {
+      throw new Error('Tipo de limpeza inválido.');
+    }
+
+    if (target === 'app-cache' || target === 'all') {
+      await session.defaultSession.clearCache();
+    }
+
+    if (target === 'attachments' || target === 'all') {
+      const paths = this.db.getDownloadedAttachmentCachePaths();
+      this.db.clearDownloadedAttachmentCache();
+      for (const filePath of paths) {
+        try {
+          fs.rmSync(filePath, { force: true });
+        } catch (error) {
+          console.warn(
+            '[Lantern][Storage] não foi possível remover anexo local:',
+            filePath,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      }
+      this.emitEvent({ type: 'attachments:cache-cleared', filePaths: paths });
+    }
+
+    return this.getLocalStorageUsage();
   }
 
   private updateRelaySettings(input: {
@@ -5263,12 +5325,19 @@ class LanternApp {
     const snapshotIds = new Set(announceFrames.map((frame) => frame.messageId));
 
     for (const frame of announceFrames) {
+      const expiresAtValue = Number(
+        (frame.payload as { announcementExpiresAt?: unknown } | null)?.announcementExpiresAt
+      );
+      const announcementExpiresAt =
+        Number.isFinite(expiresAtValue) && expiresAtValue > 0 ? Math.trunc(expiresAtValue) : null;
       if (frame.type === 'file:offer') {
         if (frame.from === this.profile.deviceId) {
           await this.applyOwnCanonicalFrame(frame);
         } else {
           await this.handleIncomingFrame(frame, 'sync');
         }
+        const updated = this.db.setAnnouncementExpiresAt(frame.messageId, announcementExpiresAt);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
         continue;
       }
       if (frame.from === this.profile.deviceId) {
@@ -5306,21 +5375,24 @@ class LanternApp {
               typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)
                 ? this.normalizeInboundCreatedAt(payload.editedAt)
                 : null,
+            announcementExpiresAt,
             createdAt
           });
         } else {
           const payload = frame.payload as AnnouncementPayload;
           if (typeof payload.editedAt === 'number' && Number.isFinite(payload.editedAt)) {
-            const updated = this.db.updateMessageText(
+            const editedMessage = this.db.updateMessageText(
               frame.messageId,
               payload.text,
               this.normalizeInboundCreatedAt(payload.editedAt)
             );
-            if (updated) {
-              this.emitEvent({ type: 'message:updated', message: updated });
+            if (editedMessage) {
+              this.emitEvent({ type: 'message:updated', message: editedMessage });
             }
           }
         }
+        const updated = this.db.setAnnouncementExpiresAt(frame.messageId, announcementExpiresAt);
+        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
         // A presença no snapshot do Relay é uma confirmação de persistência,
         // não depende de nenhum outro usuário abrir os anúncios.
         this.db.updateMessageStatus(frame.messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
@@ -5329,6 +5401,8 @@ class LanternApp {
         continue;
       }
       await this.handleIncomingFrame(frame, 'sync');
+      const updated = this.db.setAnnouncementExpiresAt(frame.messageId, announcementExpiresAt);
+      if (updated) this.emitEvent({ type: 'message:updated', message: updated });
     }
 
     const localIds = this.db.getActiveAnnouncementMessageIds();

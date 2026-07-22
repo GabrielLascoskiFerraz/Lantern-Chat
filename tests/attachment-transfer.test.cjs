@@ -137,6 +137,12 @@ test('anexos diretos, de anúncios e de grupos baixam imediatamente do Relay', a
       .sort((left, right) => left.payload.index - right.payload.index)
       .map((item) => Buffer.from(item.payload.dataBase64, 'base64'));
     assert.deepEqual(Buffer.concat(directChunks), bytes);
+    const directWebResponse = await fetch(
+      `http://127.0.0.1:${port}/api/client/attachments/${attachmentId}`,
+      { headers: { authorization: `Bearer ${recipientAuth.token}` } }
+    );
+    assert.equal(directWebResponse.status, 200);
+    assert.deepEqual(Buffer.from(await directWebResponse.arrayBuffer()), bytes);
 
     const announcementBytes = Buffer.from('GIF canônico publicado para todos');
     const announcementAttachmentId = randomUUID();
@@ -260,6 +266,12 @@ test('anexos diretos, de anúncios e de grupos baixam imediatamente do Relay', a
       .sort((left, right) => left.payload.index - right.payload.index)
       .map((item) => Buffer.from(item.payload.dataBase64, 'base64'));
     assert.deepEqual(Buffer.concat(groupChunks), groupBytes);
+    const groupWebResponse = await fetch(
+      `http://127.0.0.1:${port}/api/client/attachments/${groupFileId}?scope=group`,
+      { headers: { authorization: `Bearer ${recipientAuth.token}` } }
+    );
+    assert.equal(groupWebResponse.status, 200);
+    assert.deepEqual(Buffer.from(await groupWebResponse.arrayBuffer()), groupBytes);
     assert.equal(recipient.socket.readyState, WebSocket.OPEN);
 
     for (const socket of sockets.splice(0)) socket.close();
@@ -289,6 +301,12 @@ test('anexos diretos, de anúncios e de grupos baixam imediatamente do Relay', a
         item.type === 'relay:announcement:snapshot' &&
         item.payload?.frames?.some((frame) => frame.messageId === announcementMessageId)
       ));
+      const restoredWebResponse = await fetch(
+        `http://127.0.0.1:${port}/api/client/attachments/${announcementAttachmentId}`,
+        { headers: { authorization: `Bearer ${recipientAuth.token}` } }
+      );
+      assert.equal(restoredWebResponse.status, 200);
+      assert.deepEqual(Buffer.from(await restoredWebResponse.arrayBuffer()), announcementBytes);
 
       const afterRestartRequestId = randomUUID();
       afterRestart.socket.send(JSON.stringify({
