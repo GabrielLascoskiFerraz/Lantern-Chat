@@ -35,6 +35,7 @@ import {
 } from '../api/ipcClient';
 import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { PasswordInput } from './PasswordInput';
 import { ProfileIdentityEditor } from './ProfileIdentityEditor';
 import { isProfileColor } from './profileIdentityOptions';
 import {
@@ -843,24 +844,21 @@ export const SettingsModal = ({
                     {passwordExpanded && (
                       <div className="settings-password-panel">
                         <Field label="Senha atual">
-                          <Input
-                            type="password"
+                          <PasswordInput
                             value={currentPassword}
                             onChange={(_, data) => setCurrentPassword(data.value)}
                             autoComplete="current-password"
                           />
                         </Field>
                         <Field label="Nova senha" hint="Use pelo menos 10 caracteres.">
-                          <Input
-                            type="password"
+                          <PasswordInput
                             value={newPassword}
                             onChange={(_, data) => setNewPassword(data.value)}
                             autoComplete="new-password"
                           />
                         </Field>
                         <Field label="Confirmar nova senha">
-                          <Input
-                            type="password"
+                          <PasswordInput
                             value={newPasswordConfirm}
                             onChange={(_, data) => setNewPasswordConfirm(data.value)}
                             autoComplete="new-password"

@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
-import { Button, Field, Input, Spinner, Switch, Text } from '@fluentui/react-components';
+import { useEffect, useMemo, useState } from 'react';
+import { Button, Field, Spinner, Switch, Text } from '@fluentui/react-components';
 import { ArrowLeft20Regular, ArrowRight20Regular } from '@fluentui/react-icons';
 import { useLanternStore } from '../state/store';
 import { Avatar } from './Avatar';
 import { ProfileIdentityEditor } from './ProfileIdentityEditor';
-import { FontSizeSelector, ThemeSelector } from './AppearancePreferences';
+import { DensitySelector, FontSizeSelector, ThemeSelector } from './AppearancePreferences';
+import { PasswordInput } from './PasswordInput';
 import appIcon from '../../../assets/icon.png';
 
 const PROFILE_STEPS = [
@@ -19,9 +20,24 @@ const PROFILE_STEPS = [
     description: 'A cor forma o fundo do seu avatar e ajuda seus contatos a reconhecer você.'
   },
   {
-    id: 'device',
-    title: 'Ajuste o Lantern neste dispositivo',
-    description: 'Tema, tamanho da fonte e inicialização podem ser alterados depois em Configurações.'
+    id: 'theme',
+    title: 'Escolha o tema',
+    description: 'Use o tema do sistema ou escolha uma aparência clara ou escura.'
+  },
+  {
+    id: 'font',
+    title: 'Ajuste o tamanho da fonte',
+    description: 'Escolha o tamanho que oferece a leitura mais confortável para você.'
+  },
+  {
+    id: 'density',
+    title: 'Escolha a densidade',
+    description: 'Defina quanto espaço o Lantern deve usar entre listas, controles e conteúdos.'
+  },
+  {
+    id: 'startup',
+    title: 'Defina a inicialização',
+    description: 'Escolha se o Lantern deve abrir automaticamente com este computador.'
   }
 ] as const;
 
@@ -34,11 +50,13 @@ export const FirstLoginSetupView = () => {
   const setThemeMode = useLanternStore((state) => state.setThemeMode);
   const fontSizeMode = useLanternStore((state) => state.fontSizeMode);
   const setFontSizeMode = useLanternStore((state) => state.setFontSizeMode);
+  const densityMode = useLanternStore((state) => state.densityMode);
+  const setDensityMode = useLanternStore((state) => state.setDensityMode);
   const user = authState?.user;
   const [step, setStep] = useState(0);
   const [emoji, setEmoji] = useState(user?.avatarEmoji || '🙂');
   const [color, setColor] = useState(user?.avatarBg || '#147ad6');
-  const [openAtLogin, setOpenAtLogin] = useState(Boolean(startupSettings?.openAtLogin));
+  const [openAtLogin, setOpenAtLogin] = useState(true);
   const [password, setPassword] = useState('');
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [busy, setBusy] = useState(false);
@@ -53,6 +71,14 @@ export const FirstLoginSetupView = () => {
     ...(!user?.profileSetupCompleted ? PROFILE_STEPS : [])
   ], [user?.passwordSetupRequired, user?.profileSetupCompleted]);
   const currentStep = steps[Math.min(step, Math.max(0, steps.length - 1))];
+
+  useEffect(() => {
+    if (!user || user.profileSetupCompleted) return;
+    setThemeMode('system');
+    setFontSizeMode('medium');
+    setDensityMode('standard');
+    setOpenAtLogin(true);
+  }, [setDensityMode, setFontSizeMode, setThemeMode, user?.profileSetupCompleted, user?.username]);
 
   const submit = async () => {
     setBusy(true);
@@ -120,13 +146,14 @@ export const FirstLoginSetupView = () => {
           </aside>
 
           <div className="onboarding-options">
+            <div className="onboarding-step-content">
             {currentStep.id === 'password' && (
               <div className="onboarding-password-step">
                 <Field label="Nova senha" required hint="Use pelo menos 10 caracteres.">
-                  <Input type="password" autoComplete="new-password" value={password} onChange={(_, data) => setPassword(data.value)} autoFocus />
+                  <PasswordInput autoComplete="new-password" value={password} onChange={(_, data) => setPassword(data.value)} autoFocus />
                 </Field>
                 <Field label="Confirmar nova senha" required>
-                  <Input type="password" autoComplete="new-password" value={passwordConfirmation} onChange={(_, data) => setPasswordConfirmation(data.value)} />
+                  <PasswordInput autoComplete="new-password" value={passwordConfirmation} onChange={(_, data) => setPasswordConfirmation(data.value)} />
                 </Field>
                 <div className="onboarding-password-note">Depois de criar a senha, o acesso sem senha será desativado permanentemente.</div>
               </div>
@@ -140,22 +167,34 @@ export const FirstLoginSetupView = () => {
               <ProfileIdentityEditor emoji={emoji} color={color} onEmojiChange={setEmoji} onColorChange={setColor} compact section="color" />
             )}
 
-            {currentStep.id === 'device' && (
-              <div className="onboarding-device-preferences">
-                <section className="onboarding-preference-section">
-                  <header><h2>Tema</h2><p>Escolha a aparência do aplicativo.</p></header>
-                  <ThemeSelector value={themeMode} onChange={setThemeMode} />
-                </section>
-                <section className="onboarding-preference-section">
-                  <header><h2>Tamanho da fonte</h2><p>Ajuste a leitura e a quantidade de conteúdo na tela.</p></header>
-                  <FontSizeSelector value={fontSizeMode} onChange={setFontSizeMode} />
-                </section>
-                <div className="onboarding-startup-option">
-                  <div><strong>Abrir o Lantern ao iniciar o sistema</strong><span>Preferência válida somente para este computador.</span></div>
-                  <Switch checked={openAtLogin} disabled={!startupSettings?.supported} onChange={(_, data) => setOpenAtLogin(Boolean(data.checked))} aria-label="Abrir o Lantern ao iniciar o sistema" />
-                </div>
+            {currentStep.id === 'theme' && (
+              <section className="onboarding-preference-section">
+                <header><h2>Tema do aplicativo</h2><p>A alteração aparece imediatamente para você avaliar.</p></header>
+                <ThemeSelector value={themeMode} onChange={setThemeMode} />
+              </section>
+            )}
+
+            {currentStep.id === 'font' && (
+              <section className="onboarding-preference-section">
+                <header><h2>Tamanho da fonte</h2><p>Ajuste a leitura e a quantidade de conteúdo na tela.</p></header>
+                <FontSizeSelector value={fontSizeMode} onChange={setFontSizeMode} />
+              </section>
+            )}
+
+            {currentStep.id === 'density' && (
+              <section className="onboarding-preference-section">
+                <header><h2>Densidade da interface</h2><p>Escolha entre uma interface compacta, padrão ou confortável.</p></header>
+                <DensitySelector value={densityMode} onChange={setDensityMode} />
+              </section>
+            )}
+
+            {currentStep.id === 'startup' && (
+              <div className="onboarding-startup-option">
+                <div><strong>Abrir o Lantern ao iniciar o sistema</strong><span>Preferência válida somente para este computador.</span></div>
+                <Switch checked={openAtLogin} disabled={!startupSettings?.supported} onChange={(_, data) => setOpenAtLogin(Boolean(data.checked))} aria-label="Abrir o Lantern ao iniciar o sistema" />
               </div>
             )}
+            </div>
 
             {error && <div className="login-feedback" role="alert">{error}</div>}
             <div className="onboarding-actions">

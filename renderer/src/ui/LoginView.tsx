@@ -32,6 +32,7 @@ import {
   LoginFeedbackState,
   readableLoginError
 } from './loginErrorFeedback';
+import { PasswordInput } from './PasswordInput';
 
 export function LoginView() {
   const authState = useLanternStore((state) => state.authState);
@@ -288,7 +289,7 @@ export function LoginView() {
         {creating && <Field label={t('displayName')} required><Input autoFocus autoComplete="name" value={displayName} onChange={(_, d) => setDisplayName(d.value)} placeholder="Como você quer ser chamado" /></Field>}
         <Field label={t('username')} required><Input autoFocus={!creating} autoComplete="username" value={username} onChange={(_, d) => setUsername(d.value)} placeholder="seu.usuario" /></Field>
         <Field label={t('password')} required={creating}>
-          <Input type="password" autoComplete={creating ? 'new-password' : 'current-password'} value={password} onChange={(_, d) => setPassword(d.value)} />
+          <PasswordInput autoComplete={creating ? 'new-password' : 'current-password'} value={password} onChange={(_, d) => setPassword(d.value)} />
           <small className="login-field-hint">{creating ? 'Use pelo menos 10 caracteres.' : 'No primeiro acesso de uma conta criada pelo administrador, deixe em branco.'}</small>
         </Field>
       </div>
@@ -459,10 +460,10 @@ export function LoginView() {
             </Field>
             {resetStatus === 'approved' && <>
               <Field label="Nova senha" required>
-                <Input type="password" value={resetPassword} onChange={(_, data) => setResetPassword(data.value)} autoComplete="new-password" />
+                <PasswordInput value={resetPassword} onChange={(_, data) => setResetPassword(data.value)} autoComplete="new-password" />
               </Field>
               <Field label="Confirmar nova senha" required>
-                <Input type="password" value={resetPasswordConfirm} onChange={(_, data) => setResetPasswordConfirm(data.value)} autoComplete="new-password" />
+                <PasswordInput value={resetPasswordConfirm} onChange={(_, data) => setResetPasswordConfirm(data.value)} autoComplete="new-password" />
               </Field>
               <small>Use pelo menos 10 caracteres.</small>
             </>}

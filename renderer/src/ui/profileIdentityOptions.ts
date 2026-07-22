@@ -5,7 +5,7 @@ export interface ProfileEmojiOption {
 }
 
 export interface ProfileEmojiCategory {
-  id: 'expressions' | 'people' | 'nature' | 'food' | 'activities';
+  id: 'expressions' | 'people' | 'animals' | 'nature' | 'food' | 'activities' | 'places';
   label: string;
   options: ProfileEmojiOption[];
 }
@@ -128,8 +128,8 @@ export const PROFILE_EMOJI_CATEGORIES: ProfileEmojiCategory[] = [
     ]
   },
   {
-    id: 'nature',
-    label: 'Animais e natureza',
+    id: 'animals',
+    label: 'Animais',
     options: [
       option('🐶', 'Cachorro', 'animal'),
       option('🐱', 'Gato', 'animal'),
@@ -151,10 +151,6 @@ export const PROFILE_EMOJI_CATEGORIES: ProfileEmojiCategory[] = [
       option('🦋', 'Borboleta', 'animal'),
       option('🐝', 'Abelha', 'animal'),
       option('🦦', 'Lontra', 'animal'),
-      option('🌻', 'Girassol', 'flor'),
-      option('🌵', 'Cacto', 'planta'),
-      option('🌈', 'Arco-íris', 'natureza'),
-      option('⭐', 'Estrela', 'céu'),
       option('🐻', 'Urso', 'animal', 'floresta'),
       option('🐻‍❄️', 'Urso polar', 'animal', 'gelo'),
       option('🐺', 'Lobo', 'animal', 'floresta'),
@@ -172,7 +168,17 @@ export const PROFILE_EMOJI_CATEGORIES: ProfileEmojiCategory[] = [
       option('🦈', 'Tubarão', 'animal', 'mar'),
       option('🦭', 'Foca', 'animal', 'mar'),
       option('🪼', 'Água-viva', 'animal', 'mar'),
-      option('🐞', 'Joaninha', 'animal', 'inseto'),
+      option('🐞', 'Joaninha', 'animal', 'inseto')
+    ]
+  },
+  {
+    id: 'nature',
+    label: 'Natureza',
+    options: [
+      option('🌻', 'Girassol', 'flor', 'planta'),
+      option('🌵', 'Cacto', 'planta', 'deserto'),
+      option('🌈', 'Arco-íris', 'céu', 'clima'),
+      option('⭐', 'Estrela', 'céu', 'espaço'),
       option('🌹', 'Rosa', 'flor', 'amor'),
       option('🌸', 'Flor de cerejeira', 'flor', 'primavera'),
       option('🍀', 'Trevo', 'sorte', 'planta'),
@@ -251,7 +257,6 @@ export const PROFILE_EMOJI_CATEGORIES: ProfileEmojiCategory[] = [
       option('🏆', 'Troféu', 'vitória'),
       option('🥇', 'Medalha', 'vitória'),
       option('🧩', 'Quebra-cabeça', 'jogo'),
-      option('🧭', 'Bússola', 'direção'),
       option('🔔', 'Sino', 'notificação'),
       option('📣', 'Megafone', 'anúncio'),
       option('🛡️', 'Escudo', 'proteção'),
@@ -273,13 +278,20 @@ export const PROFILE_EMOJI_CATEGORIES: ProfileEmojiCategory[] = [
       option('🏓', 'Tênis de mesa', 'esporte', 'pingue-pongue'),
       option('🏊', 'Natação', 'esporte', 'piscina'),
       option('🚴', 'Ciclismo', 'esporte', 'bicicleta'),
-      option('✈️', 'Avião', 'viagem', 'transporte'),
-      option('🚗', 'Carro', 'viagem', 'transporte'),
-      option('🏠', 'Casa', 'lugar', 'lar'),
-      option('🌍', 'Planeta Terra', 'mundo', 'viagem'),
       option('♻️', 'Reciclagem', 'sustentabilidade', 'verde'),
       option('⛓️‍💥', 'Corrente quebrada', 'liberdade', 'desconectar'),
       option('🫟', 'Mancha', 'tinta', 'respingos')
+    ]
+  },
+  {
+    id: 'places',
+    label: 'Viagens e lugares',
+    options: [
+      option('🧭', 'Bússola', 'direção', 'viagem'),
+      option('✈️', 'Avião', 'viagem', 'transporte'),
+      option('🚗', 'Carro', 'viagem', 'transporte'),
+      option('🏠', 'Casa', 'lugar', 'lar'),
+      option('🌍', 'Planeta Terra', 'mundo', 'viagem')
     ]
   }
 ];

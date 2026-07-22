@@ -8,7 +8,9 @@ import {
   Food20Regular,
   Games20Regular,
   History20Regular,
-  Search20Regular
+  LeafTwo20Regular,
+  Search20Regular,
+  VehicleCar20Regular
 } from '@fluentui/react-icons';
 import { PlatformEmoji } from './PlatformEmoji';
 import {
@@ -28,9 +30,11 @@ const CATEGORY_PRESENTATION = {
   recent: { shortLabel: 'Recentes', icon: History20Regular },
   expressions: { shortLabel: 'Rostos', icon: Emoji20Regular },
   people: { shortLabel: 'Trabalho', icon: Briefcase20Regular },
-  nature: { shortLabel: 'Animais', icon: AnimalCat20Regular },
+  animals: { shortLabel: 'Animais', icon: AnimalCat20Regular },
+  nature: { shortLabel: 'Natureza', icon: LeafTwo20Regular },
   food: { shortLabel: 'Comidas', icon: Food20Regular },
-  activities: { shortLabel: 'Atividades', icon: Games20Regular }
+  activities: { shortLabel: 'Atividades', icon: Games20Regular },
+  places: { shortLabel: 'Viagens', icon: VehicleCar20Regular }
 };
 
 interface ProfileIdentityEditorProps {
