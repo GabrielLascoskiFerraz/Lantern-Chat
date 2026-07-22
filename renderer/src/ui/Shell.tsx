@@ -137,6 +137,7 @@ export const Shell = () => {
     setFontSizeMode,
     densityMode,
     setDensityMode,
+    previewAppearance,
     syncActive,
     loadingConversationId,
     loadInitial,
@@ -515,15 +516,20 @@ export const Shell = () => {
         profile={profile}
         startupSettings={startupSettings}
         themeMode={themeMode}
-        onThemeModeChange={setThemeMode}
         fontSizeMode={fontSizeMode}
-        onFontSizeModeChange={setFontSizeMode}
         densityMode={densityMode}
-        onDensityModeChange={setDensityMode}
+        onAppearancePreview={previewAppearance}
         onClose={() => setSettingsOpen(false)}
         onSave={async (payload) => {
-          await updateProfile(payload.profile);
-          await updateStartupSettings(payload.startup);
+          const operations: Promise<void>[] = [];
+          if (payload.profile) operations.push(updateProfile(payload.profile));
+          if (payload.startup) operations.push(updateStartupSettings(payload.startup));
+          await Promise.all(operations);
+          if (payload.appearance) {
+            setThemeMode(payload.appearance.themeMode);
+            setFontSizeMode(payload.appearance.fontSizeMode);
+            setDensityMode(payload.appearance.densityMode);
+          }
           setSettingsOpen(false);
         }}
       />

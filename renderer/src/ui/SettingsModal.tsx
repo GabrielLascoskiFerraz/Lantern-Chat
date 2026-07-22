@@ -54,25 +54,40 @@ interface SettingsModalProps {
   profile: Profile;
   startupSettings: StartupSettings | null;
   themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
   fontSizeMode: FontSizeMode;
-  onFontSizeModeChange: (mode: FontSizeMode) => void;
   densityMode: DensityMode;
-  onDensityModeChange: (mode: DensityMode) => void;
+  onAppearancePreview: (appearance: AppearanceSettings) => void;
   onClose: () => void;
   onSave: (payload: {
-    profile: {
+    profile?: {
       displayName: string;
       avatarEmoji: string;
       avatarBg: string;
       statusMessage: string;
     };
-    startup: {
+    startup?: {
       openAtLogin: boolean;
       downloadsDir: string;
       doNotDisturbUntil: number;
     };
+    appearance?: AppearanceSettings;
   }) => Promise<void>;
+}
+
+interface AppearanceSettings {
+  themeMode: ThemeMode;
+  fontSizeMode: FontSizeMode;
+  densityMode: DensityMode;
+}
+
+interface SettingsBaseline extends AppearanceSettings {
+  displayName: string;
+  statusMessage: string;
+  avatarEmoji: string;
+  avatarBg: string;
+  openAtLogin: boolean;
+  downloadsDir: string;
+  doNotDisturbUntil: number;
 }
 
 type SettingsSection = 'profile' | 'notifications' | 'application' | 'security';
@@ -104,11 +119,9 @@ export const SettingsModal = ({
   profile,
   startupSettings,
   themeMode,
-  onThemeModeChange,
   fontSizeMode,
-  onFontSizeModeChange,
   densityMode,
-  onDensityModeChange,
+  onAppearancePreview,
   onClose,
   onSave
 }: SettingsModalProps) => {
@@ -122,6 +135,21 @@ export const SettingsModal = ({
   const [doNotDisturbUntil, setDoNotDisturbUntil] = useState(
     Number(startupSettings?.doNotDisturbUntil || 0)
   );
+  const [draftThemeMode, setDraftThemeMode] = useState(themeMode);
+  const [draftFontSizeMode, setDraftFontSizeMode] = useState(fontSizeMode);
+  const [draftDensityMode, setDraftDensityMode] = useState(densityMode);
+  const [baseline, setBaseline] = useState<SettingsBaseline>(() => ({
+    displayName: profile.displayName,
+    statusMessage: profile.statusMessage,
+    avatarEmoji: profile.avatarEmoji,
+    avatarBg: profile.avatarBg,
+    openAtLogin: Boolean(startupSettings?.openAtLogin),
+    downloadsDir: startupSettings?.downloadsDir || '',
+    doNotDisturbUntil: Number(startupSettings?.doNotDisturbUntil || 0),
+    themeMode,
+    fontSizeMode,
+    densityMode
+  }));
   const [passwordExpanded, setPasswordExpanded] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -153,14 +181,30 @@ export const SettingsModal = ({
   const [storageClearBusy, setStorageClearBusy] = useState(false);
 
   const resetDraftFromProps = (): void => {
+    const nextBaseline: SettingsBaseline = {
+      displayName: profile.displayName,
+      statusMessage: profile.statusMessage,
+      avatarEmoji: profile.avatarEmoji,
+      avatarBg: profile.avatarBg,
+      openAtLogin: Boolean(startupSettings?.openAtLogin),
+      downloadsDir: startupSettings?.downloadsDir || '',
+      doNotDisturbUntil: Number(startupSettings?.doNotDisturbUntil || 0),
+      themeMode,
+      fontSizeMode,
+      densityMode
+    };
+    setBaseline(nextBaseline);
     setActiveSection('profile');
-    setDisplayName(profile.displayName);
-    setStatusMessage(profile.statusMessage);
-    setAvatarEmoji(profile.avatarEmoji);
-    setAvatarBg(profile.avatarBg);
-    setOpenAtLogin(Boolean(startupSettings?.openAtLogin));
-    setDownloadsDir(startupSettings?.downloadsDir || '');
-    setDoNotDisturbUntil(Number(startupSettings?.doNotDisturbUntil || 0));
+    setDisplayName(nextBaseline.displayName);
+    setStatusMessage(nextBaseline.statusMessage);
+    setAvatarEmoji(nextBaseline.avatarEmoji);
+    setAvatarBg(nextBaseline.avatarBg);
+    setOpenAtLogin(nextBaseline.openAtLogin);
+    setDownloadsDir(nextBaseline.downloadsDir);
+    setDoNotDisturbUntil(nextBaseline.doNotDisturbUntil);
+    setDraftThemeMode(nextBaseline.themeMode);
+    setDraftFontSizeMode(nextBaseline.fontSizeMode);
+    setDraftDensityMode(nextBaseline.densityMode);
     setPasswordExpanded(false);
     setCurrentPassword('');
     setNewPassword('');
@@ -191,7 +235,7 @@ export const SettingsModal = ({
       resetDraftFromProps();
       void ipcClient.getUpdateState().then((state) => setUpdateSupported(state.supported)).catch(() => setUpdateSupported(false));
     }
-  }, [open, profile, startupSettings]);
+  }, [open]);
 
   useEffect(() => {
     if (!open || activeSection !== 'security') return;
@@ -292,27 +336,52 @@ export const SettingsModal = ({
       })}`
     : 'Desativado';
 
-  const hasChanges = useMemo(
+  const profileHasChanges = useMemo(
     () =>
-      displayName !== profile.displayName ||
-      statusMessage !== profile.statusMessage ||
-      avatarEmoji !== profile.avatarEmoji ||
-      avatarBg.toLowerCase() !== profile.avatarBg.toLowerCase() ||
-      openAtLogin !== Boolean(startupSettings?.openAtLogin) ||
-      downloadsDir !== (startupSettings?.downloadsDir || '') ||
-      doNotDisturbUntil !== Number(startupSettings?.doNotDisturbUntil || 0),
+      displayName !== baseline.displayName ||
+      statusMessage !== baseline.statusMessage ||
+      avatarEmoji !== baseline.avatarEmoji ||
+      avatarBg.toLowerCase() !== baseline.avatarBg.toLowerCase(),
     [
       avatarBg,
       avatarEmoji,
+      baseline,
       displayName,
-      doNotDisturbUntil,
-      downloadsDir,
-      openAtLogin,
-      profile,
-      startupSettings,
       statusMessage
     ]
   );
+  const startupHasChanges = useMemo(
+    () =>
+      openAtLogin !== baseline.openAtLogin ||
+      downloadsDir !== baseline.downloadsDir ||
+      doNotDisturbUntil !== baseline.doNotDisturbUntil,
+    [baseline, doNotDisturbUntil, downloadsDir, openAtLogin]
+  );
+  const appearanceHasChanges =
+    draftThemeMode !== baseline.themeMode ||
+    draftFontSizeMode !== baseline.fontSizeMode ||
+    draftDensityMode !== baseline.densityMode;
+  const hasChanges = profileHasChanges || startupHasChanges || appearanceHasChanges;
+
+  const previewAppearance = (next: Partial<AppearanceSettings>): void => {
+    const appearance: AppearanceSettings = {
+      themeMode: next.themeMode ?? draftThemeMode,
+      fontSizeMode: next.fontSizeMode ?? draftFontSizeMode,
+      densityMode: next.densityMode ?? draftDensityMode
+    };
+    setDraftThemeMode(appearance.themeMode);
+    setDraftFontSizeMode(appearance.fontSizeMode);
+    setDraftDensityMode(appearance.densityMode);
+    onAppearancePreview(appearance);
+  };
+
+  const restoreAppearancePreview = (): void => {
+    onAppearancePreview({
+      themeMode: baseline.themeMode,
+      fontSizeMode: baseline.fontSizeMode,
+      densityMode: baseline.densityMode
+    });
+  };
 
   const requestClose = (): void => {
     if (saveBusy || passwordBusy) return;
@@ -340,17 +409,28 @@ export const SettingsModal = ({
     setSaveFeedback('');
     try {
       await onSave({
-        profile: {
-          displayName: displayName.trim() || profile.displayName,
-          avatarEmoji: avatarEmoji.trim() || profile.avatarEmoji,
-          avatarBg: isProfileColor(avatarBg) ? avatarBg.trim() : profile.avatarBg,
-          statusMessage: statusMessage.trim() || 'Disponível'
-        },
-        startup: {
-          openAtLogin,
-          downloadsDir: downloadsDir.trim() || (startupSettings?.downloadsDir || ''),
-          doNotDisturbUntil: activeDoNotDisturbUntil
-        }
+        profile: profileHasChanges
+          ? {
+              displayName: displayName.trim() || baseline.displayName,
+              avatarEmoji: avatarEmoji.trim() || baseline.avatarEmoji,
+              avatarBg: isProfileColor(avatarBg) ? avatarBg.trim() : baseline.avatarBg,
+              statusMessage: statusMessage.trim() || 'Disponível'
+            }
+          : undefined,
+        startup: startupHasChanges
+          ? {
+              openAtLogin,
+              downloadsDir: downloadsDir.trim() || baseline.downloadsDir,
+              doNotDisturbUntil: activeDoNotDisturbUntil
+            }
+          : undefined,
+        appearance: appearanceHasChanges
+          ? {
+              themeMode: draftThemeMode,
+              fontSizeMode: draftFontSizeMode,
+              densityMode: draftDensityMode
+            }
+          : undefined
       });
     } catch (error) {
       setSaveFeedback(error instanceof Error ? error.message : 'Não foi possível salvar as configurações.');
@@ -557,11 +637,11 @@ export const SettingsModal = ({
                     <div className="settings-option-heading">
                       <div>
                         <h3>Tema do aplicativo</h3>
-                        <p>Escolha a aparência do Lantern. A alteração é aplicada imediatamente neste dispositivo.</p>
+                        <p>Visualize a aparência do Lantern e confirme no botão Salvar alterações.</p>
                       </div>
-                      <span className="settings-state-pill">{themeModeLabel(themeMode)}</span>
+                      <span className="settings-state-pill">{themeModeLabel(draftThemeMode)}</span>
                     </div>
-                    <ThemeSelector value={themeMode} onChange={onThemeModeChange} />
+                    <ThemeSelector value={draftThemeMode} onChange={(mode) => previewAppearance({ themeMode: mode })} />
                   </div>
                   <div className="settings-card settings-option-card settings-font-card">
                     <div className="settings-option-heading">
@@ -569,9 +649,9 @@ export const SettingsModal = ({
                         <h3>Tamanho da fonte</h3>
                         <p>Ajuste a escala dos textos e controles para este dispositivo.</p>
                       </div>
-                      <span className="settings-state-pill">{fontSizeModeLabel(fontSizeMode)}</span>
+                      <span className="settings-state-pill">{fontSizeModeLabel(draftFontSizeMode)}</span>
                     </div>
-                    <FontSizeSelector value={fontSizeMode} onChange={onFontSizeModeChange} />
+                    <FontSizeSelector value={draftFontSizeMode} onChange={(mode) => previewAppearance({ fontSizeMode: mode })} />
                   </div>
                   <div className="settings-card settings-option-card settings-density-card">
                     <div className="settings-option-heading">
@@ -579,9 +659,9 @@ export const SettingsModal = ({
                         <h3>Densidade da interface</h3>
                         <p>Ajuste o espaçamento entre listas, controles e áreas de conteúdo neste dispositivo.</p>
                       </div>
-                      <span className="settings-state-pill">{densityModeLabel(densityMode)}</span>
+                      <span className="settings-state-pill">{densityModeLabel(draftDensityMode)}</span>
                     </div>
-                    <DensitySelector value={densityMode} onChange={onDensityModeChange} />
+                    <DensitySelector value={draftDensityMode} onChange={(mode) => previewAppearance({ densityMode: mode })} />
                   </div>
                   <div className="settings-card settings-option-card">
                     <div className="settings-switch-row">
@@ -889,9 +969,13 @@ export const SettingsModal = ({
 
           <DialogActions className="settings-actions">
             <div className="settings-actions-feedback" aria-live="polite">
-              {saveFeedback || (hasChanges ? 'As alterações ainda não foram salvas.' : 'Tudo atualizado.')}
+              {saveFeedback || (hasChanges
+                ? 'As alterações ainda não foram salvas.'
+                : 'Nenhuma alteração pendente.')}
             </div>
-            <Button appearance="secondary" disabled={saveBusy || passwordBusy} onClick={requestClose}>Cancelar</Button>
+            <Button appearance="secondary" disabled={saveBusy || passwordBusy} onClick={requestClose}>
+              {hasChanges ? 'Cancelar' : 'Fechar'}
+            </Button>
             <Button
               className="settings-save-btn"
               appearance="primary"
@@ -919,11 +1003,12 @@ export const SettingsModal = ({
     <ConfirmDialog
       open={discardConfirmationOpen}
       title="Descartar alterações?"
-      description="As alterações ainda não salvas serão perdidas."
+      description="As alterações ainda não salvas serão perdidas e a prévia de aparência será restaurada."
       confirmLabel="Descartar"
       onCancel={() => setDiscardConfirmationOpen(false)}
       onConfirm={() => {
         setDiscardConfirmationOpen(false);
+        restoreAppearancePreview();
         onClose();
       }}
     />

@@ -142,7 +142,10 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute('data-density', densityMode);
-  }, [densityMode]);
+    const densityScale = DENSITY_SCALE[densityMode];
+    document.documentElement.style.setProperty('--lantern-density-scale', String(densityScale));
+    document.documentElement.style.setProperty('--lantern-effective-font-scale', String(FONT_SCALE[fontSizeMode]));
+  }, [densityMode, fontSizeMode]);
 
   useEffect(() => {
     const locale = authState?.user?.locale || window.localStorage.getItem('lantern.locale') || 'pt-BR';

@@ -79,6 +79,11 @@ interface LanternState {
   setThemeMode: (mode: 'system' | 'light' | 'dark') => void;
   setFontSizeMode: (mode: 'small' | 'medium' | 'large') => void;
   setDensityMode: (mode: 'compact' | 'standard' | 'comfortable') => void;
+  previewAppearance: (input: {
+    themeMode: 'system' | 'light' | 'dark';
+    fontSizeMode: 'small' | 'medium' | 'large';
+    densityMode: 'compact' | 'standard' | 'comfortable';
+  }) => void;
   setSystemDark: (isDark: boolean) => void;
   loadInitial: () => Promise<void>;
   login: (input: { relay: ClientRelayConfig; username: string; password: string; rememberMe?: boolean }) => Promise<void>;
@@ -426,6 +431,15 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   setDensityMode: (mode) => {
     if (typeof window !== 'undefined') window.localStorage.setItem(DENSITY_KEY, mode);
     set({ densityMode: mode });
+  },
+  previewAppearance: ({ themeMode, fontSizeMode, densityMode }) => {
+    const systemDark = getSystemDark();
+    set({
+      themeMode,
+      resolvedTheme: resolveTheme(themeMode, systemDark),
+      fontSizeMode,
+      densityMode
+    });
   },
   setSystemDark: (isDark) => {
     const mode = get().themeMode;
