@@ -18,6 +18,14 @@ import {
   mergeFetchedMessagesWithLiveUpdates,
   mergeRepairedConversationPage
 } from './messageMerge';
+import { sortCanonicalMessages } from '../utils/messageOrder';
+import {
+  AppearanceAccountScope,
+  AppearancePreferences,
+  DEFAULT_APPEARANCE,
+  persistAppearanceForAccount as persistStoredAppearance,
+  readAppearanceForAccount as readStoredAppearance
+} from './appearancePersistence';
 
 interface TransferProgress {
   direction: 'send' | 'receive';
@@ -162,7 +170,6 @@ interface LanternState {
   ) => Promise<void>;
   getFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<void>;
-  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<void>;
   exportConversation: (conversationId: string, format: 'txt' | 'html') => Promise<void>;
   resyncConversation: (conversationId: string) => Promise<void>;
   markConversationUnread: (conversationId: string) => Promise<void>;
@@ -184,32 +191,40 @@ interface LanternState {
 }
 
 const ANNOUNCEMENTS_ID = 'announcements';
-const THEME_KEY = 'lantern.theme';
-const FONT_SIZE_KEY = 'lantern.font-size';
-const DENSITY_KEY = 'lantern.density';
 const MESSAGES_PAGE_SIZE = 80;
 const TRANSFER_CLEANUP_DELAY_MS = 2600;
 
-const getInitialThemeMode = (): 'system' | 'light' | 'dark' => {
-  if (typeof window === 'undefined') {
-    return 'system';
-  }
-  const stored = window.localStorage.getItem(THEME_KEY);
-  return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+const appearanceScopeForAuth = (
+  authState: ClientAuthState | null
+): AppearanceAccountScope | null => {
+  const userId = authState?.user?.userId?.trim();
+  if (!authState || !userId) return null;
+  return {
+    userId,
+    relay: authState.relay,
+    endpoint: authState.endpoint
+  };
 };
 
-const getInitialFontSizeMode = (): 'small' | 'medium' | 'large' => {
-  if (typeof window === 'undefined') return 'medium';
-  const stored = window.localStorage.getItem(FONT_SIZE_KEY);
-  return stored === 'small' || stored === 'medium' || stored === 'large' ? stored : 'medium';
+const readAppearanceForAccount = (authState: ClientAuthState): AppearancePreferences => {
+  if (typeof window === 'undefined') return { ...DEFAULT_APPEARANCE };
+  const scope = appearanceScopeForAuth(authState);
+  if (!scope) return { ...DEFAULT_APPEARANCE };
+  return readStoredAppearance(window.localStorage, scope, {
+    // Contas ainda no primeiro acesso começam nos padrões definidos pelo
+    // produto e jamais herdam a preferência global de outra conta.
+    migrateLegacy: Boolean(authState.user?.profileSetupCompleted)
+  });
 };
 
-const getInitialDensityMode = (): 'compact' | 'standard' | 'comfortable' => {
-  if (typeof window === 'undefined') return 'standard';
-  const stored = window.localStorage.getItem(DENSITY_KEY);
-  return stored === 'compact' || stored === 'standard' || stored === 'comfortable'
-    ? stored
-    : 'standard';
+const persistAppearanceForAccount = (
+  authState: ClientAuthState | null,
+  appearance: AppearancePreferences
+): void => {
+  if (typeof window === 'undefined' || !authState) return;
+  const scope = appearanceScopeForAuth(authState);
+  if (!scope) return;
+  persistStoredAppearance(window.localStorage, scope, appearance);
 };
 
 const getSystemDark = (): boolean =>
@@ -225,7 +240,7 @@ const resolveTheme = (
   return mode;
 };
 
-const initialThemeMode = getInitialThemeMode();
+const initialThemeMode = DEFAULT_APPEARANCE.themeMode;
 const initialSystemDark = getSystemDark();
 let unsubscribeEvents: (() => void) | null = null;
 let previewRefreshTimer: number | null = null;
@@ -309,21 +324,11 @@ const appendUniqueMessage = (rows: MessageRow[], incoming: MessageRow): MessageR
   if (rows.some((row) => row.messageId === incoming.messageId)) {
     return rows;
   }
-  return [...rows, incoming].sort((a, b) => {
-    const at = Number(a.createdAt) || 0;
-    const bt = Number(b.createdAt) || 0;
-    if (at !== bt) return at - bt;
-    return a.messageId.localeCompare(b.messageId);
-  });
+  return sortCanonicalMessages([...rows, incoming]);
 };
 
 const normalizeMessageOrder = (rows: MessageRow[]): MessageRow[] =>
-  [...rows].sort((a, b) => {
-    const at = Number(a.createdAt) || 0;
-    const bt = Number(b.createdAt) || 0;
-    if (at !== bt) return at - bt;
-    return a.messageId.localeCompare(b.messageId);
-  });
+  sortCanonicalMessages(rows);
 
 const mergeOrderedMessages = (existing: MessageRow[], incoming: MessageRow[]): MessageRow[] => {
   if (incoming.length === 0) return existing;
@@ -406,8 +411,8 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   settingsOpen: false,
   themeMode: initialThemeMode,
   resolvedTheme: resolveTheme(initialThemeMode, initialSystemDark),
-  fontSizeMode: getInitialFontSizeMode(),
-  densityMode: getInitialDensityMode(),
+  fontSizeMode: DEFAULT_APPEARANCE.fontSizeMode,
+  densityMode: DEFAULT_APPEARANCE.densityMode,
   ready: false,
   startupError: null,
   syncActive: false,
@@ -415,9 +420,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
   setSearch: (value) => set({ search: value }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setThemeMode: (mode) => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(THEME_KEY, mode);
-    }
+    const state = get();
+    persistAppearanceForAccount(state.authState, {
+      themeMode: mode,
+      fontSizeMode: state.fontSizeMode,
+      densityMode: state.densityMode
+    });
     const systemDark = getSystemDark();
     set({
       themeMode: mode,
@@ -425,11 +433,21 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     });
   },
   setFontSizeMode: (mode) => {
-    if (typeof window !== 'undefined') window.localStorage.setItem(FONT_SIZE_KEY, mode);
+    const state = get();
+    persistAppearanceForAccount(state.authState, {
+      themeMode: state.themeMode,
+      fontSizeMode: mode,
+      densityMode: state.densityMode
+    });
     set({ fontSizeMode: mode });
   },
   setDensityMode: (mode) => {
-    if (typeof window !== 'undefined') window.localStorage.setItem(DENSITY_KEY, mode);
+    const state = get();
+    persistAppearanceForAccount(state.authState, {
+      themeMode: state.themeMode,
+      fontSizeMode: state.fontSizeMode,
+      densityMode: mode
+    });
     set({ densityMode: mode });
   },
   previewAppearance: ({ themeMode, fontSizeMode, densityMode }) => {
@@ -455,6 +473,13 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         set({ authState, profile: null, ready: true, loadingConversationId: null });
         return;
       }
+      const appearance = readAppearanceForAccount(authState);
+      const appearanceState = {
+        themeMode: appearance.themeMode,
+        resolvedTheme: resolveTheme(appearance.themeMode, getSystemDark()),
+        fontSizeMode: appearance.fontSizeMode,
+        densityMode: appearance.densityMode
+      };
       if (authState.user?.passwordSetupRequired || !authState.user?.profileSetupCompleted) {
         const [profile, relaySettings, startupSettings] = await Promise.all([
           ipcClient.getProfile(),
@@ -466,6 +491,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
           profile,
           relaySettings,
           startupSettings,
+          ...appearanceState,
           ready: true,
           startupError: null,
           loadingConversationId: null
@@ -515,99 +541,101 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         ...groups.map((group) => `group:${group.groupId}`),
         ...peers.map((peer) => `dm:${peer.deviceId}`)
       ];
-    const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
+      const conversationPreviewById = await ipcClient.getConversationPreviews(conversationIds);
 
-    const selectedAtLoad = get().selectedConversationId;
-    const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
+      const selectedAtLoad = get().selectedConversationId;
+      const selectedUnreadAtLoad = unreadByConversation[selectedAtLoad] || 0;
 
-    set({
-      authState,
-      profile,
-      relaySettings,
-      startupSettings,
-      peers,
-      groups,
-      groupMembersById: Object.fromEntries(groupMembersEntries),
-      groupPinnedMessageIdsById: Object.fromEntries(groupPinnedEntries),
-      onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
-      archivedConversationIds,
-      pinnedConversationIds,
-      unreadByConversation,
-      openedUnreadCountByConversation: {
-        [selectedAtLoad]: selectedUnreadAtLoad
-      },
-      unreadAnchorMessageIdByConversation: {
-        [selectedAtLoad]: null
-      },
-      conversationPreviewById,
-      settingsOpen: false,
-      ready: true,
-      loadingConversationId: selectedAtLoad
-    });
+      set({
+        authState,
+        profile,
+        ...appearanceState,
+        relaySettings,
+        startupSettings,
+        peers,
+        groups,
+        groupMembersById: Object.fromEntries(groupMembersEntries),
+        groupPinnedMessageIdsById: Object.fromEntries(groupPinnedEntries),
+        onlinePeerIds: onlinePeers.map((peer) => peer.deviceId).sort((a, b) => a.localeCompare(b)),
+        archivedConversationIds,
+        pinnedConversationIds,
+        unreadByConversation,
+        openedUnreadCountByConversation: {
+          [selectedAtLoad]: selectedUnreadAtLoad
+        },
+        unreadAnchorMessageIdByConversation: {
+          [selectedAtLoad]: null
+        },
+        conversationPreviewById,
+        settingsOpen: false,
+        ready: true,
+        loadingConversationId: selectedAtLoad
+      });
 
-    const current = get().selectedConversationId;
-    const initialMessages = normalizeMessageOrder(
-      await ipcClient.getMessages(current, MESSAGES_PAGE_SIZE)
-    );
-    const hasMoreHistory = initialMessages.length === MESSAGES_PAGE_SIZE;
-    const initialMessageIds = initialMessages.map((row) => row.messageId);
-    const [initialMessageReactions, initialFavorites, initialAnnouncementReads] =
-      initialMessageIds.length > 0
-        ? await Promise.all([
-            current === ANNOUNCEMENTS_ID
-              ? ipcClient.getAnnouncementReactions(initialMessageIds)
-              : ipcClient.getMessageReactions(initialMessageIds),
-            ipcClient.getMessageFavorites(initialMessageIds),
-            current === ANNOUNCEMENTS_ID
-              ? ipcClient.getAnnouncementReadSummary(initialMessageIds)
-              : Promise.resolve({})
-          ])
-        : [{}, {}, {}];
-    const initialUnreadCount = selectedUnreadAtLoad;
-    const initialUnreadAnchorMessageId =
-      initialUnreadCount > 0 && initialMessages.length > 0
-        ? initialMessages[Math.max(0, initialMessages.length - Math.min(initialUnreadCount, initialMessages.length))]
-            ?.messageId || null
-        : null;
+      const current = get().selectedConversationId;
+      const initialMessages = normalizeMessageOrder(
+        await ipcClient.getMessages(current, MESSAGES_PAGE_SIZE)
+      );
+      const hasMoreHistory = initialMessages.length === MESSAGES_PAGE_SIZE;
+      const initialMessageIds = initialMessages.map((row) => row.messageId);
+      const [initialMessageReactions, initialFavorites, initialAnnouncementReads] =
+        initialMessageIds.length > 0
+          ? await Promise.all([
+              current === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReactions(initialMessageIds)
+                : ipcClient.getMessageReactions(initialMessageIds),
+              ipcClient.getMessageFavorites(initialMessageIds),
+              current === ANNOUNCEMENTS_ID
+                ? ipcClient.getAnnouncementReadSummary(initialMessageIds)
+                : Promise.resolve({})
+            ])
+          : [{}, {}, {}];
+      const initialUnreadCount = selectedUnreadAtLoad;
+      const initialUnreadAnchorMessageId =
+        initialUnreadCount > 0 && initialMessages.length > 0
+          ? initialMessages[
+              Math.max(0, initialMessages.length - Math.min(initialUnreadCount, initialMessages.length))
+            ]?.messageId || null
+          : null;
 
-    set((state) => ({
-      messagesByConversation: {
-        ...state.messagesByConversation,
-        [current]: initialMessages
-      },
-      hasMoreHistoryByConversation: {
-        ...state.hasMoreHistoryByConversation,
-        [current]: hasMoreHistory
-      },
-      loadingOlderByConversation: {
-        ...state.loadingOlderByConversation,
-        [current]: false
-      },
-      announcementReactionsByMessage: {
-        ...state.announcementReactionsByMessage,
-        ...initialMessageReactions
-      },
-      announcementReadsByMessage: {
-        ...state.announcementReadsByMessage,
-        ...initialAnnouncementReads
-      },
-      favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, initialFavorites),
-      unreadAnchorMessageIdByConversation: {
-        ...state.unreadAnchorMessageIdByConversation,
-        [current]: initialUnreadAnchorMessageId
-      },
-      loadingConversationId:
-        state.loadingConversationId === current ? null : state.loadingConversationId
-    }));
+      set((state) => ({
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [current]: initialMessages
+        },
+        hasMoreHistoryByConversation: {
+          ...state.hasMoreHistoryByConversation,
+          [current]: hasMoreHistory
+        },
+        loadingOlderByConversation: {
+          ...state.loadingOlderByConversation,
+          [current]: false
+        },
+        announcementReactionsByMessage: {
+          ...state.announcementReactionsByMessage,
+          ...initialMessageReactions
+        },
+        announcementReadsByMessage: {
+          ...state.announcementReadsByMessage,
+          ...initialAnnouncementReads
+        },
+        favoriteByMessageId: mergeFavoriteMap(state.favoriteByMessageId, initialFavorites),
+        unreadAnchorMessageIdByConversation: {
+          ...state.unreadAnchorMessageIdByConversation,
+          [current]: initialUnreadAnchorMessageId
+        },
+        loadingConversationId:
+          state.loadingConversationId === current ? null : state.loadingConversationId
+      }));
 
-    await ipcClient.markConversationRead(current);
-    await ipcClient.setActiveConversation(current);
-    set((state) => ({
-      unreadByConversation: {
-        ...state.unreadByConversation,
-        [current]: 0
-      }
-    }));
+      await ipcClient.markConversationRead(current);
+      await ipcClient.setActiveConversation(current);
+      set((state) => ({
+        unreadByConversation: {
+          ...state.unreadByConversation,
+          [current]: 0
+        }
+      }));
 
     if (unsubscribeEvents) {
       unsubscribeEvents();
@@ -1630,6 +1658,10 @@ export const useLanternStore = create<LanternState>((set, get) => ({
     }
     const oldest = currentRows[0];
     const before = oldest?.createdAt;
+    const beforeSeq =
+      Number.isFinite(oldest?.serverSeq) && Number(oldest?.serverSeq) > 0
+        ? Math.trunc(Number(oldest?.serverSeq))
+        : undefined;
 
     set((state) => ({
       loadingOlderByConversation: {
@@ -1640,7 +1672,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
     try {
       const olderRows = normalizeMessageOrder(
-        await ipcClient.getMessages(conversationId, safeLimit, before)
+        await ipcClient.getMessages(conversationId, safeLimit, before, beforeSeq)
       );
 
       if (olderRows.length === 0) {
@@ -2112,40 +2144,6 @@ export const useLanternStore = create<LanternState>((set, get) => ({
         if (conversationId !== ANNOUNCEMENTS_ID) {
           return state.announcementReadsByMessage;
         }
-        const next = { ...state.announcementReadsByMessage };
-        delete next[messageId];
-        return next;
-      })()
-    }));
-    void ipcClient.getConversationPreviews([conversationId]).then((previewMap) => {
-      set((state) => {
-        const merged = mergePreviewMapIfChanged(state.conversationPreviewById, previewMap);
-        if (!merged) return state;
-        return { conversationPreviewById: merged };
-      });
-    });
-  },
-  deleteMessageForMe: async (conversationId, messageId) => {
-    const hidden = await ipcClient.deleteMessageForMe(conversationId, messageId);
-    if (!hidden) return;
-    set((state) => ({
-      messagesByConversation: {
-        ...state.messagesByConversation,
-        [conversationId]: (state.messagesByConversation[conversationId] || []).filter(
-          (row) => row.messageId !== messageId
-        )
-      },
-      favoriteByMessageId: (() => {
-        const next = { ...state.favoriteByMessageId };
-        delete next[messageId];
-        return next;
-      })(),
-      announcementReactionsByMessage: (() => {
-        const next = { ...state.announcementReactionsByMessage };
-        delete next[messageId];
-        return next;
-      })(),
-      announcementReadsByMessage: (() => {
         const next = { ...state.announcementReadsByMessage };
         delete next[messageId];
         return next;

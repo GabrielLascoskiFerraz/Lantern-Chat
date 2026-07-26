@@ -282,7 +282,7 @@ export class AuthService {
     await this.authenticatedRequest('/api/client/preferences/conversation', 'PUT', input);
   }
 
-  async updateMessagePreference(input: { messageId: string; favorite?: boolean; hidden?: boolean }): Promise<void> {
+  async updateMessagePreference(input: { messageId: string; favorite?: boolean }): Promise<void> {
     await this.authenticatedRequest('/api/client/preferences/message', 'PUT', input);
   }
 

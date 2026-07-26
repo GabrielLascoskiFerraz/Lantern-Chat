@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { LanternRelay, RelayConfig } from '../relay/main';
-import { readConvertedBackupManifest } from '../relay/convertedBackup';
+import { validateConvertedBackup } from '../relay/convertedBackup';
 import { isUpdatePlatform } from '../relay/updateStore';
 
 interface RelayUiSettings {
@@ -46,7 +46,7 @@ const runConvertedBackupImport = (bundlePath: string): Promise<Record<string, un
     child.once('error', reject);
     child.once('close', (code) => {
       if (code !== 0) {
-        reject(new Error(stderr.trim() || 'O backup convertido não pôde ser importado.'));
+        reject(new Error(stderr.trim() || 'O backup não pôde ser importado.'));
         return;
       }
       try {
@@ -159,7 +159,7 @@ ipcMain.handle('relay-ui:backup', async () => {
 });
 ipcMain.handle('relay-ui:importConvertedBackup', async () => {
   const openOptions: OpenDialogOptions = {
-    title: 'Selecionar backup convertido do Lantern',
+    title: 'Selecionar backup do Lantern Relay',
     buttonLabel: 'Selecionar backup',
     properties: ['openDirectory']
   };
@@ -168,11 +168,11 @@ ipcMain.handle('relay-ui:importConvertedBackup', async () => {
     : await dialog.showOpenDialog(openOptions);
   if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
   const bundlePath = selection.filePaths[0];
-  const manifest = readConvertedBackupManifest(bundlePath);
+  const manifest = validateConvertedBackup(bundlePath);
   const counts = manifest.counts || {};
   const messageOptions: Electron.MessageBoxOptions = {
     type: 'warning',
-    title: 'Importar backup convertido',
+    title: 'Importar backup do Relay',
     message: 'Substituir os dados atuais do Lantern Relay?',
     detail: [
       `Backup: ${path.basename(bundlePath)}`,
@@ -204,7 +204,9 @@ ipcMain.handle('relay-ui:importConvertedBackup', async () => {
     return {
       canceled: false,
       ...result,
-      credentialsFile: path.join(bundlePath, result.manifest.credentialsFile),
+      credentialsFile: result.manifest.credentialsFile
+        ? path.join(bundlePath, result.manifest.credentialsFile)
+        : null,
       restarted: wasRunning
     };
   } catch (error) {

@@ -49,7 +49,8 @@ test('store reconcilia grupos e contatos depois de registrar o listener inicial'
     getAuthState: async () => ({
       authenticated: true,
       endpoint: 'ws://relay',
-      user: { passwordSetupRequired: false, profileSetupCompleted: true }
+      relay: { mode: 'local-auto', host: '', port: 43190, secure: false },
+      user: { userId: 'me', passwordSetupRequired: false, profileSetupCompleted: true }
     }),
     getProfile: async () => ({ deviceId: 'me', displayName: 'Eu' }),
     getRelaySettings: async () => ({
@@ -130,6 +131,28 @@ test('store reconcilia grupos e contatos depois de registrar o listener inicial'
         mergeRepairedConversationPage: (rows) => rows
       };
     }
+    if (request.endsWith('/appearancePersistence') || request === './appearancePersistence') {
+      return {
+        DEFAULT_APPEARANCE: {
+          themeMode: 'system',
+          fontSizeMode: 'medium',
+          densityMode: 'standard'
+        },
+        readAppearanceForAccount: () => ({
+          themeMode: 'light',
+          fontSizeMode: 'large',
+          densityMode: 'compact'
+        }),
+        persistAppearanceForAccount: () => true
+      };
+    }
+    if (request.endsWith('/utils/messageOrder') || request === '../utils/messageOrder') {
+      return {
+        sortCanonicalMessages: (rows) => [...rows].sort(
+          (left, right) => left.createdAt - right.createdAt || left.messageId.localeCompare(right.messageId)
+        )
+      };
+    }
     return originalLoad.call(this, request, parent, isMain);
   };
   t.after(() => { Module._load = originalLoad; });
@@ -145,6 +168,9 @@ test('store reconcilia grupos e contatos depois de registrar o listener inicial'
   const state = loaded.exports.useLanternStore.getState();
   assert.equal(state.groups[0]?.groupId, group.groupId);
   assert.equal(state.peers[0]?.deviceId, peer.deviceId);
+  assert.equal(state.themeMode, 'light');
+  assert.equal(state.fontSizeMode, 'large');
+  assert.equal(state.densityMode, 'compact');
   assert.ok(calls.indexOf('onEvent') < calls.indexOf('getGroups:2'));
   assert.ok(calls.indexOf('onEvent') < calls.indexOf('getKnownPeers:2'));
 });

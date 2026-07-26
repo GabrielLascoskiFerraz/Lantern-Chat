@@ -6,17 +6,20 @@ const test = require('node:test');
 const ts = require('typescript');
 
 const sourceFile = path.join(__dirname, '..', 'renderer', 'src', 'state', 'messageMerge.ts');
-const compiled = ts.transpileModule(fs.readFileSync(sourceFile, 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-}).outputText;
-const loaded = new Module(sourceFile, module);
-loaded.filename = sourceFile;
-loaded.paths = module.paths;
-loaded._compile(compiled, sourceFile);
+const previousTsLoader = Module._extensions['.ts'];
+Module._extensions['.ts'] = (loadedModule, filename) => {
+  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  loadedModule._compile(compiled, filename);
+};
+const loaded = require(sourceFile);
+if (previousTsLoader) Module._extensions['.ts'] = previousTsLoader;
+else delete Module._extensions['.ts'];
 const {
   mergeFetchedMessagesWithLiveUpdates,
   mergeRepairedConversationPage
-} = loaded.exports;
+} = loaded;
 
 const fileMessage = (overrides = {}) => ({
   messageId: 'file-1', conversationId: 'dm:peer', direction: 'in',
@@ -52,4 +55,34 @@ test('reparo atualiza a página recente sem apagar histórico antigo já carrega
   const merged = mergeRepairedConversationPage([repaired], [older, recent], [older, recent]);
   assert.deepEqual(merged.map((message) => message.messageId), ['old', 'recent']);
   assert.equal(merged[1].filePath, '/tmp/recent.gif');
+});
+
+test('merge converge por serverSeq mesmo quando snapshot e canal ao vivo chegam fora de ordem', () => {
+  const first = fileMessage({
+    messageId: 'canonical-1',
+    fileId: 'canonical-file-1',
+    serverSeq: 701,
+    createdAt: 9_000
+  });
+  const second = fileMessage({
+    messageId: 'canonical-2',
+    fileId: 'canonical-file-2',
+    serverSeq: 702,
+    createdAt: 1
+  });
+  const third = fileMessage({
+    messageId: 'canonical-3',
+    fileId: 'canonical-file-3',
+    serverSeq: 703,
+    createdAt: 4_000
+  });
+  const merged = mergeFetchedMessagesWithLiveUpdates(
+    [third, first],
+    [],
+    [second]
+  );
+  assert.deepEqual(
+    merged.map((message) => message.messageId),
+    ['canonical-1', 'canonical-2', 'canonical-3']
+  );
 });

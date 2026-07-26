@@ -599,7 +599,7 @@ $('import-backup').addEventListener('click', async () => {
     if (latestState?.running) await refreshManagement();
     const rollbackLabel = result.rollbackDir ? 'rollback preservado' : 'nova instalação';
     showFeedback(
-      `Backup convertido importado · ${number(result.stats?.users || 0)} conta(s) · ${rollbackLabel}`,
+      `Backup importado · ${number(result.stats?.users || 0)} conta(s) · ${rollbackLabel}`,
       'success'
     );
   } catch (error) {

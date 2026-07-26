@@ -457,6 +457,24 @@ const extractDeleteTargetMessageId = (frame: RelayTransportFrame): string | null
   return asString(payload?.targetMessageId);
 };
 
+const canonicalizeFramePayload = (
+  type: string,
+  payloadInput: unknown,
+  serverCreatedAt: number
+): unknown => {
+  const payload = asRecord(payloadInput);
+  if (!payload) return payloadInput;
+  if (type === 'chat:edit') {
+    return {
+      ...payload,
+      // O horário da edição faz parte da linha do tempo canônica e não pode
+      // depender do relógio do dispositivo que realizou a alteração.
+      editedAt: serverCreatedAt
+    };
+  }
+  return payloadInput;
+};
+
 const extractAnnouncementEditPayload = (frame: RelayTransportFrame): RelayAnnouncementEditPayload | null => {
   if (frame.type !== 'chat:edit' || frame.to !== null) return null;
   const payload = asRecord(frame.payload);
@@ -2073,7 +2091,7 @@ export class LanternRelay {
       { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
       { name: 'stickers', source: RELAY_STICKERS_DIR },
       { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
-    ], 'relay-ui');
+    ], 'relay-ui', RELAY_VERSION);
   }
 
   getManagementSnapshot() {
@@ -2577,10 +2595,21 @@ export class LanternRelay {
     if (event.location) lines.push(`📍 ${event.location}`);
     if (event.description) lines.push('', event.description.slice(0, 1200));
     const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: 'relay-calendar', to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
-    const saved = this.centralStore.saveFrame({ messageId: frame.messageId, type: frame.type, senderUserId: frame.from, targetUserId: null, conversationId: 'announcements', createdAt: frame.createdAt, payload: frame.payload });
+    const saved = this.centralStore.saveFrame({ messageId: frame.messageId, type: frame.type, senderUserId: frame.from, targetUserId: null, conversationId: 'announcements', clientCreatedAt: frame.createdAt, createdAt: Date.now(), payload: frame.payload });
     if (saved !== 'inserted') return false;
-    this.trackAnnouncement(frame);
-    await this.routeFrame(frame, null);
+    const canonical = this.centralStore.getFrame(frame.messageId);
+    if (!canonical) throw new Error('O anúncio automatizado não pôde ser confirmado no armazenamento canônico.');
+    const outbound: RelayTransportFrame = {
+      type: canonical.type,
+      messageId: canonical.messageId,
+      from: canonical.senderUserId,
+      to: canonical.targetUserId,
+      serverSeq: canonical.serverSeq,
+      createdAt: canonical.createdAt,
+      payload: canonical.payload
+    };
+    this.trackAnnouncement(outbound);
+    await this.routeFrame(outbound, null);
     return true;
   }
 
@@ -3031,8 +3060,7 @@ export class LanternRelay {
         const body = await this.readJsonBody(req);
         this.centralStore.setUserMessagePreference(account.userId, {
           messageId: asString(body.messageId) || '',
-          favorite: typeof body.favorite === 'boolean' ? body.favorite : undefined,
-          hidden: typeof body.hidden === 'boolean' ? body.hidden : undefined
+          favorite: typeof body.favorite === 'boolean' ? body.favorite : undefined
         });
         this.writeJson(res, method, { ok: true });
       } catch (error) {
@@ -3050,8 +3078,6 @@ export class LanternRelay {
       }
       try {
         const conversationId = requestUrl.searchParams.get('conversationId') || '';
-        const preferences = this.centralStore.getUserPreferences(account.userId);
-        const hiddenIds = new Set(preferences.messages.filter((item) => item.hidden).map((item) => item.messageId));
         let title = 'Conversa';
         let records: Array<{ messageId: string; senderUserId: string; type: 'text' | 'file'; text: string; fileName: string; fileSize: number; createdAt: number; editedAt: number }>;
         if (conversationId.startsWith('dm:')) {
@@ -3075,7 +3101,7 @@ export class LanternRelay {
         this.writeJson(res, method, {
           ok: true,
           title,
-          records: records.filter((record) => !hiddenIds.has(record.messageId)),
+          records,
           users
         });
       } catch (error) {
@@ -3309,7 +3335,7 @@ export class LanternRelay {
             { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
             { name: 'stickers', source: RELAY_STICKERS_DIR },
             { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
-          ], adminSession.userId);
+          ], adminSession.userId, RELAY_VERSION);
           this.writeJson(res, method, { ok: true, backup }, 201);
         } catch (error) {
           this.writeJson(res, method, {
@@ -4198,9 +4224,9 @@ export class LanternRelay {
     const before = asFiniteNumber(record?.before) || Number.MAX_SAFE_INTEGER;
     const beforeSeq = asFiniteNumber(record?.beforeSeq) || Number.MAX_SAFE_INTEGER;
     const limit = Math.max(1, Math.min(Math.trunc(asFiniteNumber(record?.limit) || 100), 500));
-    const frames = this.centralStore
-      .listConversationFramesForUser(session.peer.deviceId, peerUserId, before, limit, beforeSeq)
-      .map((frame) => ({
+    const page = this.centralStore
+      .getConversationFramePageForUser(session.peer.deviceId, peerUserId, before, limit, beforeSeq);
+    const frames = page.frames.map((frame) => ({
         serverSeq: frame.serverSeq,
         type: frame.type,
         messageId: frame.messageId,
@@ -4211,7 +4237,14 @@ export class LanternRelay {
       }));
     this.sendEnvelope(session.socket, {
       type: 'relay:history:page',
-      payload: { requestId, frames, hasMore: frames.length === limit }
+      payload: {
+        requestId,
+        frames,
+        // O Relay consulta uma mensagem-base extra; eventos relacionados não
+        // contam no limite e uma página exatamente cheia não vira falso positivo.
+        hasMore: page.hasMore,
+        nextBeforeSeq: page.nextBeforeSeq
+      }
     });
   }
 
@@ -4801,7 +4834,8 @@ export class LanternRelay {
             asString(data.groupId) || '',
             session.peer.deviceId,
             asFiniteNumber(data.before) || Number.MAX_SAFE_INTEGER,
-            Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500))
+            Math.max(1, Math.min(Math.trunc(asFiniteNumber(data.limit) || 100), 500)),
+            asFiniteNumber(data.beforeSeq) || Number.MAX_SAFE_INTEGER
           );
           response = history;
           break;
@@ -4831,11 +4865,6 @@ export class LanternRelay {
           const kind = data.kind === 'media' ? 'media' : data.kind === 'document' ? 'document' : null;
           if (!kind) throw new Error('Tipo de mídia inválido.');
           const rawCursor = asRecord(data.cursor);
-          const hiddenMessageIds = new Set(
-            this.centralStore.getUserPreferences(session.peer.deviceId).messages
-              .filter((item) => item.hidden)
-              .map((item) => item.messageId)
-          );
           response = {
             ...this.groupStore.listMediaForDevice(
               groupId,
@@ -4844,8 +4873,7 @@ export class LanternRelay {
               rawCursor && typeof rawCursor.createdAt === 'number' && typeof rawCursor.messageId === 'string'
                 ? { createdAt: rawCursor.createdAt, messageId: rawCursor.messageId }
                 : null,
-              asFiniteNumber(data.limit) || 40,
-              hiddenMessageIds
+              asFiniteNumber(data.limit) || 40
             )
           };
           break;
@@ -4943,7 +4971,8 @@ export class LanternRelay {
         case 'sendText': {
           const groupId = asString(data.groupId) || '';
           const messageId = asString(data.messageId) || randomUUID();
-          const createdAt = asFiniteNumber(data.createdAt) || Date.now();
+          const clientCreatedAt = asFiniteNumber(data.createdAt) || Date.now();
+          const createdAt = Date.now();
           const text = asString(data.text) || '';
           if (!text) throw new Error('Mensagem vazia.');
           const event = this.groupStore.appendGroupMessage({
@@ -4960,11 +4989,13 @@ export class LanternRelay {
                 bodyText: text,
                 replyTo: data.replyTo || null,
                 forwardedFromMessageId: asString(data.forwardedFromMessageId),
+                clientCreatedAt,
                 createdAt
               }
             }
           });
           events = [event];
+          response = { event };
           break;
         }
         case 'editMessage': {
@@ -5027,7 +5058,7 @@ export class LanternRelay {
           const offerRecord = asRecord(data.offer);
           const upload = this.groupStore.initGroupFile({
             actorDeviceId: session.peer.deviceId,
-            createdAt: asFiniteNumber(data.createdAt) || Date.now(),
+            createdAt: Date.now(),
             offer: {
               groupId: asString(offerRecord?.groupId) || '',
               messageId: asString(offerRecord?.messageId) || '',
@@ -5162,7 +5193,7 @@ export class LanternRelay {
         metadata.fileId
       );
       this.transferMetrics.uploadsCompleted += 1;
-      const response = { metadata };
+      const response = { metadata, event: messageEvent };
       const events = [messageEvent, attachmentEvent];
       this.centralStore.saveCanonicalRequestResult(
         requestId,
@@ -5306,42 +5337,145 @@ export class LanternRelay {
     }
 
     let persistence: 'inserted' | 'duplicate' | 'ephemeral' = 'ephemeral';
-    let persistedServerSeq: number | null = null;
-    if (frame.type !== 'typing' && frame.type !== 'file:chunk' && frame.type !== 'file:complete') {
+    let outboundFrame = frame;
+    if (
+      frame.type !== 'typing' &&
+      frame.type !== 'chat:ack' &&
+      frame.type !== 'file:chunk' &&
+      frame.type !== 'file:complete'
+    ) {
       const conversationId =
         frame.to === null
           ? 'announcements'
           : `dm:${[frame.from, frame.to].sort((left, right) => left.localeCompare(right)).join(':')}`;
+      if (
+        frame.type === 'chat:edit' ||
+        frame.type === 'chat:react' ||
+        frame.type === 'chat:delete'
+      ) {
+        const mutationPayload = asRecord(frame.payload);
+        const targetMessageId = asString(mutationPayload?.targetMessageId);
+        const targetFrame = targetMessageId
+          ? this.centralStore.getFrame(targetMessageId)
+          : null;
+        if (
+          !targetMessageId ||
+          !targetFrame ||
+          targetFrame.conversationId !== conversationId ||
+          (targetFrame.type !== 'chat:text' &&
+            targetFrame.type !== 'announce' &&
+            targetFrame.type !== 'file:offer')
+        ) {
+          this.sendError(
+            session,
+            'CANONICAL_TARGET_NOT_FOUND',
+            'A mensagem canônica de destino não existe nesta conversa.',
+            frame.messageId
+          );
+          return;
+        }
+        if (
+          (frame.type === 'chat:edit' || frame.type === 'chat:delete') &&
+          targetFrame.senderUserId !== frame.from
+        ) {
+          this.sendError(
+            session,
+            'FORBIDDEN_MESSAGE_MUTATION',
+            'Somente o autor pode editar ou excluir esta mensagem.',
+            frame.messageId
+          );
+          return;
+        }
+        if (
+          frame.type === 'chat:edit' &&
+          targetFrame.type !== 'chat:text' &&
+          targetFrame.type !== 'announce'
+        ) {
+          this.sendError(
+            session,
+            'MESSAGE_NOT_EDITABLE',
+            'Este tipo de mensagem não pode ser editado.',
+            frame.messageId
+          );
+          return;
+        }
+        if (frame.to === null) {
+          const announcement = this.announcementsById.get(targetMessageId);
+          if (
+            !announcement ||
+            announcement.deletedAt ||
+            announcement.expiredAt ||
+            announcement.expiresAt <= Date.now()
+          ) {
+            this.sendError(
+              session,
+              'ANNOUNCEMENT_NOT_FOUND',
+              'Este anúncio não está mais disponível.',
+              frame.messageId
+            );
+            return;
+          }
+          if (
+            frame.type === 'chat:edit' &&
+            Date.now() - announcement.createdAt > ANNOUNCEMENT_EDIT_WINDOW_MS
+          ) {
+            this.sendError(
+              session,
+              'ANNOUNCEMENT_EDIT_WINDOW_EXPIRED',
+              'O prazo para editar este anúncio terminou.',
+              frame.messageId
+            );
+            return;
+          }
+        }
+      }
+      const serverCreatedAt = Date.now();
+      const canonicalPayload = canonicalizeFramePayload(
+        frame.type,
+        frame.payload,
+        serverCreatedAt
+      );
       persistence = this.centralStore.saveFrame({
         messageId: frame.messageId,
         type: frame.type,
         senderUserId: frame.from,
         targetUserId: frame.to,
         conversationId,
-        createdAt: frame.createdAt,
-        payload: frame.payload
+        clientCreatedAt: frame.createdAt,
+        createdAt: serverCreatedAt,
+        payload: canonicalPayload
       });
-      persistedServerSeq = this.centralStore.getFrameServerSeq(frame.messageId);
+      const canonical = this.centralStore.getFrame(frame.messageId);
+      if (!canonical) {
+        this.sendError(session, 'CANONICAL_WRITE_FAILED', 'O Relay não confirmou a gravação canônica.', frame.messageId);
+        return;
+      }
+      outboundFrame = {
+        type: canonical.type,
+        messageId: canonical.messageId,
+        from: canonical.senderUserId,
+        to: canonical.targetUserId,
+        serverSeq: canonical.serverSeq,
+        createdAt: canonical.createdAt,
+        payload: canonical.payload
+      };
     }
 
-    let outboundFrame = persistedServerSeq
-      ? { ...frame, serverSeq: persistedServerSeq }
-      : frame;
     if (frame.type === 'announce' || (frame.type === 'file:offer' && frame.to === null)) {
-      this.trackAnnouncement(frame);
+      this.trackAnnouncement(outboundFrame);
     } else if (frame.type === 'chat:edit' && frame.to === null) {
-      const result = this.applyAnnouncementEdit(frame);
+      const result = this.applyAnnouncementEdit(outboundFrame);
       if (!result.ok) {
         this.sendError(session, result.code, result.message, frame.messageId);
         return;
       }
       outboundFrame = result.frame;
     } else if (frame.type === 'chat:react' && frame.to === null) {
-      this.applyAnnouncementReaction(frame);
+      this.applyAnnouncementReaction(outboundFrame);
     } else if (frame.type === 'chat:delete') {
-      const targetMessageId = extractDeleteTargetMessageId(frame);
+      const targetMessageId = extractDeleteTargetMessageId(outboundFrame);
       if (targetMessageId) {
-        this.markAnnouncementDeleted(targetMessageId, frame.createdAt);
+        this.markAnnouncementDeleted(targetMessageId, outboundFrame.createdAt);
       }
     }
 
@@ -5353,12 +5487,18 @@ export class LanternRelay {
         frameMessageId: frame.messageId,
         deliveredTo: [],
         persisted: persistence !== 'ephemeral',
-        duplicate: persistence === 'duplicate'
+        duplicate: persistence === 'duplicate',
+        serverSeq: outboundFrame.serverSeq ?? null,
+        createdAt: outboundFrame.createdAt
       }
     });
 
     this.reliabilityMetrics.acceptedFrames += 1;
     if (persistence === 'duplicate') this.reliabilityMetrics.duplicateFrames += 1;
+    // O ACK idempotente encerra o retry. Roteá-lo novamente poderia entregar
+    // uma base ou mutação antiga depois de operações mais novas e regredir a
+    // projeção do destinatário. Clientes ausentes recuperam o frame do histórico.
+    if (persistence === 'duplicate') return;
     void this.routeQueue.enqueue(async () => {
       this.reliabilityMetrics.activeRoutes += 1;
       this.reliabilityMetrics.peakActiveRoutes = Math.max(
@@ -5504,8 +5644,7 @@ export class LanternRelay {
       };
     }
 
-    const now = Date.now();
-    if (now - state.createdAt > ANNOUNCEMENT_EDIT_WINDOW_MS) {
+    if (Date.now() - state.createdAt > ANNOUNCEMENT_EDIT_WINDOW_MS) {
       return {
         ok: false,
         code: 'ANNOUNCEMENT_EDIT_WINDOW_EXPIRED',
@@ -5516,7 +5655,7 @@ export class LanternRelay {
     const persistedPayload = {
       ...(asRecord(state.frame.payload) || {}),
       text: payload.text,
-      editedAt: now
+      editedAt: frame.createdAt
     };
     state.frame = {
       ...state.frame,
@@ -5531,11 +5670,10 @@ export class LanternRelay {
       ok: true,
       frame: {
         ...frame,
-        createdAt: now,
         payload: {
           targetMessageId: payload.targetMessageId,
           text: payload.text,
-          editedAt: now
+          editedAt: frame.createdAt
         }
       }
     };
@@ -5677,6 +5815,21 @@ export class LanternRelay {
         }
       }))
       .sort((a, b) => {
+        const leftSeq =
+          Number.isFinite(a.serverSeq) && Number(a.serverSeq) > 0
+            ? Math.trunc(Number(a.serverSeq))
+            : null;
+        const rightSeq =
+          Number.isFinite(b.serverSeq) && Number(b.serverSeq) > 0
+            ? Math.trunc(Number(b.serverSeq))
+            : null;
+        if (leftSeq !== null && rightSeq !== null) {
+          if (leftSeq !== rightSeq) return leftSeq - rightSeq;
+        } else if (leftSeq !== null) {
+          return -1;
+        } else if (rightSeq !== null) {
+          return 1;
+        }
         if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
         return a.messageId.localeCompare(b.messageId);
       });

@@ -1,4 +1,5 @@
 import type { MessageRow } from '../api/ipcClient';
+import { sortCanonicalMessages } from '../utils/messageOrder';
 
 const statusRank: Record<string, number> = {
   failed: -1,
@@ -51,9 +52,7 @@ export const mergeFetchedMessagesWithLiveUpdates = (
     }
   }
 
-  return result.sort(
-    (left, right) => left.createdAt - right.createdAt || left.messageId.localeCompare(right.messageId)
-  );
+  return sortCanonicalMessages(result);
 };
 
 export const mergeRepairedConversationPage = (
@@ -66,7 +65,5 @@ export const mergeRepairedConversationPage = (
   for (const message of refreshedPage) {
     byId.set(message.messageId, message);
   }
-  return Array.from(byId.values()).sort(
-    (left, right) => left.createdAt - right.createdAt || left.messageId.localeCompare(right.messageId)
-  );
+  return sortCanonicalMessages(Array.from(byId.values()));
 };

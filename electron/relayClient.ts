@@ -52,6 +52,8 @@ interface RelayPresenceDeltaPayload {
 interface RelaySendAckPayload {
   frameMessageId: string;
   deliveredTo: string[];
+  serverSeq?: number | null;
+  createdAt?: number | null;
 }
 
 interface RelayErrorPayload {
@@ -114,6 +116,8 @@ interface PendingCentralDownload {
 
 interface RelaySendResult {
   deliveredTo: string[];
+  serverSeq: number | null;
+  createdAt: number | null;
 }
 
 interface RelayGroupAckPayload {
@@ -2017,7 +2021,13 @@ export class RelayClient {
           ? payload!.deliveredTo.filter((value): value is string => typeof value === 'string' && value.length > 0)
           : [];
 
-        pending.resolve({ deliveredTo });
+        const serverSeq = Number(payload?.serverSeq);
+        const createdAt = Number(payload?.createdAt);
+        pending.resolve({
+          deliveredTo,
+          serverSeq: Number.isFinite(serverSeq) && serverSeq > 0 ? Math.trunc(serverSeq) : null,
+          createdAt: Number.isFinite(createdAt) && createdAt > 0 ? Math.trunc(createdAt) : null
+        });
         return;
       }
       case 'relay:error': {

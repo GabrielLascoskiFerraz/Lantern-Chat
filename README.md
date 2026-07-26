@@ -415,7 +415,7 @@ Diretórios principais:
 
 Contas, sessões, mensagens, anúncios, grupos, eventos e metadados ficam em tabelas relacionais cifradas. A pesquisa usa índices cegos HMAC. Arquivos legados `groups.json` e `announcements.json` são importados automaticamente uma vez e deixam de ser fontes ativas.
 
-Backups criados pelo Relay UI ou pela dashboard incluem SQLite, chave mestra, anexos, stickers, instaladores e manifesto SHA-256. O cache dos clientes não substitui esse backup.
+Backups criados pelo Relay UI ou pela dashboard incluem SQLite, chave mestra, anexos, stickers, instaladores e manifesto SHA-256. O formato unificado `lantern-relay-backup` v2 é validado antes da restauração e pode ser importado pelo botão **Importar backup** do Relay UI. O importador mantém compatibilidade de leitura com os dois formatos v1 anteriores. O cache dos clientes não substitui esse backup.
 
 ## Migração de dados locais
 
@@ -425,7 +425,7 @@ O aplicativo **Lantern Migration** consolida backups da antiga edição peer-to-
 npm run migration-ui:dev
 ```
 
-Na interface, **Gerar backup convertido** cria uma pasta `Lantern-Backup-Convertido-*`, que pode ser importada pelo Relay UI.
+Na interface, **Gerar backup convertido** cria uma pasta `Lantern-Backup-Convertido-*` no mesmo formato v2 dos backups normais, que pode ser importada pelo botão **Importar backup** do Relay UI.
 
 Automação por linha de comando:
 

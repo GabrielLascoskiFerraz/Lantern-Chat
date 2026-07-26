@@ -109,7 +109,6 @@ interface ChatViewProps {
   onOpenGroupDetails?: () => void;
   onGetFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   onDeleteMessage: (messageId: string) => Promise<void>;
-  onDeleteMessageForMe: (messageId: string) => Promise<void>;
   onExportConversation: (format: 'txt' | 'html') => Promise<void>;
   onResyncConversation: () => Promise<void>;
   onClearConversation: () => Promise<void>;
@@ -329,7 +328,6 @@ export const ChatView = ({
   onOpenGroupDetails,
   onGetFavoriteMessages,
   onDeleteMessage,
-  onDeleteMessageForMe,
   onExportConversation,
   onResyncConversation,
   onClearConversation,
@@ -381,7 +379,6 @@ export const ChatView = ({
   const [searchLoading, setSearchLoading] = useState(false);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
-  const [pendingDeleteForMeMessageId, setPendingDeleteForMeMessageId] = useState<string | null>(null);
   const [pendingForwardMessageId, setPendingForwardMessageId] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyDraftUi | null>(null);
   const [editingMessage, setEditingMessage] = useState<MessageRow | null>(null);
@@ -389,7 +386,6 @@ export const ChatView = ({
     x: number;
     y: number;
     messageId: string;
-    canDelete: boolean;
     canDeleteForEveryone: boolean;
     canEdit: boolean;
     canForward: boolean;
@@ -484,9 +480,10 @@ export const ChatView = ({
       const isFavorite = canFavorite ? Boolean(favoriteByMessageId[message.messageId]) : false;
       const canPin = isGroup && !isDeleted && !isLocalOnly && Boolean(onSetGroupMessagePinned) && relayConnected;
       const isPinned = canPin ? groupPinnedMessageIds.includes(message.messageId) : false;
-      const canDelete = !isDeleted && !isLocalOnly && relayConnected;
       const canDeleteForEveryone =
-        canDelete &&
+        !isDeleted &&
+        !isLocalOnly &&
+        relayConnected &&
         message.direction === 'out' &&
         message.senderDeviceId === localProfile.deviceId;
       const itemCount =
@@ -496,7 +493,6 @@ export const ChatView = ({
         (canFavorite ? 1 : 0) +
         (canPin ? 1 : 0) +
         (selectedText ? 1 : 0) +
-        (canDelete ? 1 : 0) +
         (canDeleteForEveryone ? 1 : 0);
       if (itemCount <= 0) {
         setMessageContextMenu(null);
@@ -517,7 +513,6 @@ export const ChatView = ({
         x,
         y,
         messageId: message.messageId,
-        canDelete,
         canDeleteForEveryone,
         canEdit,
         canForward,
@@ -2129,20 +2124,6 @@ export const ChatView = ({
         }}
       />
 
-      <ConfirmDialog
-        open={Boolean(pendingDeleteForMeMessageId)}
-        title="Apagar para mim"
-        description="Esta mensagem será ocultada para a sua conta em todos os dispositivos. Os demais participantes continuarão vendo a mensagem."
-        confirmLabel="Apagar para mim"
-        onCancel={() => setPendingDeleteForMeMessageId(null)}
-        onConfirm={() => {
-          if (pendingDeleteForMeMessageId) {
-            void onDeleteMessageForMe(pendingDeleteForMeMessageId);
-          }
-          setPendingDeleteForMeMessageId(null);
-        }}
-      />
-
       <ForwardMessageDialog
         open={Boolean(pendingForwardMessageId)}
         sourceMessage={pendingForwardMessage}
@@ -2290,21 +2271,6 @@ export const ChatView = ({
                 <Copy20Regular />
               </span>
               <span>Copiar texto</span>
-            </button>
-          )}
-          {messageContextMenu.canDelete && (
-            <button
-              type="button"
-              className="chat-context-item"
-              onClick={() => {
-                setPendingDeleteForMeMessageId(messageContextMenu.messageId);
-                closeMessageContextMenu();
-              }}
-            >
-              <span className="menu-item-icon">
-                <Delete20Regular />
-              </span>
-              <span>Apagar para mim</span>
             </button>
           )}
           {messageContextMenu.canDeleteForEveryone && (

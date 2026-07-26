@@ -90,7 +90,9 @@ export class MessageService {
       peerId,
       peer?.displayName || `Contato ${peerId.slice(0, 6)}`
     );
-    const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
+    // Horário provisório apenas para o placeholder. O ACK do Relay substitui
+    // este valor pelo horário e pela sequência canônicos.
+    const createdAt = Date.now();
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
     const frame: ProtocolFrame<ChatTextPayload> = {
       type: 'chat:text',
@@ -148,10 +150,7 @@ export class MessageService {
     text: string,
     replyTo?: MessageReplyPayload | null
   ): Promise<DbMessage> {
-    const createdAt = this.db.reserveConversationTimestamp(
-      ANNOUNCEMENTS_CONVERSATION_ID,
-      Date.now()
-    );
+    const createdAt = Date.now();
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
     const frame: ProtocolFrame<AnnouncementPayload> = {
       type: 'announce',
@@ -332,7 +331,7 @@ export class MessageService {
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
 
     const messageId = randomUUID();
-    const createdAt = this.db.reserveConversationTimestamp(conversationId, Date.now());
+    const createdAt = Date.now();
     const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
     const { offer } = await this.fileTransfer.createOffer(
       targetUserId || ANNOUNCEMENTS_CONVERSATION_ID,

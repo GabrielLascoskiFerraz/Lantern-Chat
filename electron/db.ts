@@ -885,7 +885,7 @@ export class DbService {
            AND COALESCE(status, 'sent') IN ('sent', 'failed')
            AND filePath IS NOT NULL
            AND fileId IS NOT NULL
-         ORDER BY createdAt ASC, messageId ASC
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) ASC, createdAt ASC, messageId ASC
          LIMIT ?`
       )
       .all(safeLimit) as DbMessage[];
@@ -983,10 +983,8 @@ export class DbService {
            FROM messages m2
            WHERE m2.conversationId = c.id
              AND m2.deletedAt IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM hidden_messages h WHERE h.messageId = m2.messageId
-             )
-           ORDER BY m2.createdAt DESC, m2.messageId DESC
+           ORDER BY COALESCE(m2.serverSeq, 9223372036854775807) DESC,
+             m2.createdAt DESC, m2.messageId DESC
            LIMIT 1
          )
          WHERE c.id IN (${placeholders})`
@@ -1084,7 +1082,7 @@ export class DbService {
 
   saveMessage(message: DbMessage): boolean {
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO messages
+      `INSERT INTO messages
        (
          messageId,
          conversationId,
@@ -1139,8 +1137,49 @@ export class DbService {
          @announcementExpiresAt,
          @serverSeq,
          @createdAt
-       )`
+       )
+       ON CONFLICT(messageId) DO UPDATE SET
+         conversationId = excluded.conversationId,
+         direction = excluded.direction,
+         senderDeviceId = excluded.senderDeviceId,
+         receiverDeviceId = excluded.receiverDeviceId,
+         type = excluded.type,
+         bodyText = CASE
+           WHEN COALESCE(messages.editedAt, 0) > COALESCE(excluded.editedAt, 0)
+             THEN messages.bodyText
+           ELSE excluded.bodyText
+         END,
+         fileId = excluded.fileId,
+         fileName = excluded.fileName,
+         fileSize = excluded.fileSize,
+         fileSha256 = excluded.fileSha256,
+         filePath = COALESCE(messages.filePath, excluded.filePath),
+         status = CASE
+           WHEN messages.status = 'read' OR excluded.status = 'read' THEN 'read'
+           WHEN messages.status = 'delivered' OR excluded.status = 'delivered' THEN 'delivered'
+           ELSE COALESCE(excluded.status, messages.status)
+         END,
+         reaction = COALESCE(excluded.reaction, messages.reaction),
+         deletedAt = COALESCE(excluded.deletedAt, messages.deletedAt),
+         replyToMessageId = excluded.replyToMessageId,
+         replyToSenderDeviceId = excluded.replyToSenderDeviceId,
+         replyToType = excluded.replyToType,
+         replyToPreviewText = excluded.replyToPreviewText,
+         replyToFileName = excluded.replyToFileName,
+         forwardedFromMessageId = excluded.forwardedFromMessageId,
+         editedAt = CASE
+           WHEN COALESCE(excluded.editedAt, 0) >= COALESCE(messages.editedAt, 0)
+             THEN excluded.editedAt
+           ELSE messages.editedAt
+         END,
+         announcementExpiresAt = COALESCE(excluded.announcementExpiresAt, messages.announcementExpiresAt),
+         serverSeq = COALESCE(excluded.serverSeq, messages.serverSeq),
+         createdAt = CASE
+           WHEN excluded.serverSeq IS NOT NULL THEN excluded.createdAt
+           ELSE messages.createdAt
+         END`
     );
+    const exists = this.db.prepare('SELECT 1 FROM messages WHERE messageId = ?');
 
     const touchConversation = this.db.prepare(
       'UPDATE conversations SET updatedAt = ? WHERE id = ?'
@@ -1171,11 +1210,10 @@ export class DbService {
         serverSeq: row.serverSeq ?? null
       };
 
-      const result = insert.run(normalizedRow);
-      if (result.changes > 0) {
-        touchConversation.run(Date.now(), normalizedRow.conversationId);
-      }
-      return result.changes > 0;
+      const alreadyExists = Boolean(exists.get(normalizedRow.messageId));
+      insert.run(normalizedRow);
+      touchConversation.run(Date.now(), normalizedRow.conversationId);
+      return !alreadyExists;
     });
 
     return tx(message);
@@ -1219,7 +1257,7 @@ export class DbService {
            AND type IN ('text', 'file')
            AND deletedAt IS NULL
            AND status = 'delivered'
-         ORDER BY createdAt ASC, messageId ASC
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) ASC, createdAt ASC, messageId ASC
          ${hasLimit ? 'LIMIT ?' : ''}`
       )
       .all(...(hasLimit ? [conversationId, normalizedLimit] : [conversationId])) as Array<{ messageId: string }>;
@@ -1304,10 +1342,7 @@ export class DbService {
            AND type = 'file'
            AND deletedAt IS NULL
            AND fileId IS NOT NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )
-         ORDER BY createdAt ASC, messageId ASC
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) ASC, createdAt ASC, messageId ASC
          LIMIT ?`
       )
       .all(conversationId, normalizedLimit) as DbMessage[];
@@ -1369,10 +1404,8 @@ export class DbService {
          INNER JOIN message_favorites f ON f.messageId = m.messageId
          WHERE m.conversationId = ?
            AND m.deletedAt IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = m.messageId
-           )
-         ORDER BY m.createdAt ASC, m.messageId ASC
+         ORDER BY COALESCE(m.serverSeq, 9223372036854775807) ASC,
+           m.createdAt ASC, m.messageId ASC
          LIMIT ?`
       )
       .all(conversationId, normalizedLimit) as DbMessage[];
@@ -1633,7 +1666,10 @@ export class DbService {
     this.db
       .prepare(
         `UPDATE messages
-         SET bodyText = ?,
+         SET bodyText = CASE
+               WHEN editedAt IS NULL OR ? >= editedAt THEN ?
+               ELSE bodyText
+             END,
              editedAt = CASE
                WHEN editedAt IS NULL OR ? >= editedAt THEN ?
                ELSE editedAt
@@ -1642,7 +1678,13 @@ export class DbService {
            AND deletedAt IS NULL
            AND type IN ('text', 'announcement')`
       )
-      .run(cleanText, normalizedEditedAt, normalizedEditedAt, messageId);
+      .run(
+        normalizedEditedAt,
+        cleanText,
+        normalizedEditedAt,
+        normalizedEditedAt,
+        messageId
+      );
     this.db
       .prepare(
         `UPDATE conversations
@@ -1651,27 +1693,6 @@ export class DbService {
       )
       .run(normalizedEditedAt, messageId);
     return this.getMessageById(messageId);
-  }
-
-  hideMessageForMe(messageId: string, hiddenAt = Date.now()): DbMessage | undefined {
-    const existing = this.getMessageById(messageId);
-    if (!existing) return undefined;
-    this.db
-      .prepare(
-        `INSERT INTO hidden_messages(messageId, hiddenAt)
-         VALUES (?, ?)
-         ON CONFLICT(messageId) DO UPDATE SET hiddenAt = excluded.hiddenAt`
-      )
-      .run(messageId, hiddenAt);
-    this.db.prepare('DELETE FROM message_favorites WHERE messageId = ?').run(messageId);
-    this.db
-      .prepare(
-        `UPDATE conversations
-         SET updatedAt = ?
-         WHERE id = ?`
-      )
-      .run(Date.now(), existing.conversationId);
-    return existing;
   }
 
   getMessageReactionDetails(messageId: string): MessageReactionDetail[] {
@@ -1878,10 +1899,8 @@ export class DbService {
         `SELECT * FROM messages
          WHERE conversationId = ?
            AND deletedAt IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )
-         ORDER BY createdAt ASC, messageId ASC`
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) ASC,
+           createdAt ASC, messageId ASC`
       )
       .all(conversationId) as DbMessage[];
   }
@@ -2064,7 +2083,13 @@ export class DbService {
   }
 
   getMaxServerSeq(): number {
-    const row = this.db.prepare('SELECT MAX(serverSeq) AS serverSeq FROM messages').get() as {
+    // O cursor incremental do Relay é global apenas para frames diretos.
+    // Grupos usam uma sequência própria por grupo e não podem avançar este cursor.
+    const row = this.db.prepare(`
+      SELECT MAX(serverSeq) AS serverSeq
+      FROM messages
+      WHERE conversationId LIKE 'dm:%'
+    `).get() as {
       serverSeq: number | null;
     };
     return typeof row.serverSeq === 'number' ? row.serverSeq : 0;
@@ -2153,25 +2178,66 @@ export class DbService {
   updateMessageServerSeq(messageId: string, serverSeq?: number): void {
     if (!Number.isFinite(serverSeq) || Number(serverSeq) <= 0) return;
     this.db
-      .prepare('UPDATE messages SET serverSeq = COALESCE(serverSeq, ?) WHERE messageId = ?')
+      .prepare('UPDATE messages SET serverSeq = ? WHERE messageId = ?')
       .run(Math.trunc(Number(serverSeq)), messageId);
   }
 
-  getMessages(conversationId: string, limit: number, before?: number): DbMessage[] {
+  applyCanonicalMessageMetadata(
+    messageId: string,
+    serverSeq: number | null | undefined,
+    createdAt: number | null | undefined
+  ): DbMessage | undefined {
+    const normalizedSeq =
+      Number.isFinite(serverSeq) && Number(serverSeq) > 0
+        ? Math.trunc(Number(serverSeq))
+        : null;
+    const normalizedCreatedAt =
+      Number.isFinite(createdAt) && Number(createdAt) > 0
+        ? Math.trunc(Number(createdAt))
+        : null;
+    if (normalizedSeq === null && normalizedCreatedAt === null) return this.getMessageById(messageId);
+    this.db.prepare(`
+      UPDATE messages
+      SET serverSeq = COALESCE(?, serverSeq),
+          createdAt = COALESCE(?, createdAt)
+      WHERE messageId = ?
+    `).run(normalizedSeq, normalizedCreatedAt, messageId);
+    return this.getMessageById(messageId);
+  }
+
+  getMessages(
+    conversationId: string,
+    limit: number,
+    before?: number,
+    beforeSeq?: number
+  ): DbMessage[] {
     if (before) {
+      const canonicalBeforeSeq =
+        Number.isFinite(beforeSeq) && Number(beforeSeq) > 0
+          ? Math.trunc(Number(beforeSeq))
+          : this.getConversationServerCursor(conversationId, before);
       const rows = this.db
         .prepare(
           `SELECT * FROM messages
           WHERE conversationId = ?
             AND deletedAt IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
+            AND (
+              (? IS NOT NULL AND serverSeq IS NOT NULL AND serverSeq < ?)
+              OR (serverSeq IS NULL AND createdAt < ?)
+              OR (? IS NULL AND createdAt < ?)
             )
-            AND createdAt < ?
-          ORDER BY createdAt DESC, messageId DESC
+          ORDER BY COALESCE(serverSeq, 9223372036854775807) DESC, createdAt DESC, messageId DESC
           LIMIT ?`
         )
-        .all(conversationId, before, limit)
+        .all(
+          conversationId,
+          canonicalBeforeSeq,
+          canonicalBeforeSeq,
+          before,
+          canonicalBeforeSeq,
+          before,
+          limit
+        )
         .reverse() as DbMessage[];
       return this.hydrateGroupAttachmentPaths(rows);
     }
@@ -2181,10 +2247,7 @@ export class DbService {
         `SELECT * FROM messages
          WHERE conversationId = ?
            AND deletedAt IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )
-         ORDER BY createdAt DESC, messageId DESC
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) DESC, createdAt DESC, messageId DESC
          LIMIT ?`
       )
       .all(conversationId, limit)
@@ -2200,16 +2263,29 @@ export class DbService {
     const placeholders = uniqueIds.map(() => '?').join(', ');
     const rows = this.db
       .prepare(
-        `SELECT * FROM messages
+         `SELECT * FROM messages
          WHERE deletedAt IS NULL
            AND messageId IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )`
+         `
       )
       .all(...uniqueIds) as DbMessage[];
 
     rows.sort((a, b) => {
+      const leftSeq =
+        Number.isFinite(a.serverSeq) && Number(a.serverSeq) > 0
+          ? Math.trunc(Number(a.serverSeq))
+          : null;
+      const rightSeq =
+        Number.isFinite(b.serverSeq) && Number(b.serverSeq) > 0
+          ? Math.trunc(Number(b.serverSeq))
+          : null;
+      if (leftSeq !== null && rightSeq !== null) {
+        if (leftSeq !== rightSeq) return leftSeq - rightSeq;
+      } else if (leftSeq !== null) {
+        return -1;
+      } else if (rightSeq !== null) {
+        return 1;
+      }
       if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
       return a.messageId.localeCompare(b.messageId);
     });
@@ -2236,14 +2312,12 @@ export class DbService {
          FROM messages
          WHERE conversationId = ?
            AND deletedAt IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )
            AND (
              COALESCE(bodyText, '') LIKE ? ESCAPE '\\'
              OR COALESCE(fileName, '') LIKE ? ESCAPE '\\'
            )
-         ORDER BY createdAt ASC, messageId ASC
+         ORDER BY COALESCE(serverSeq, 9223372036854775807) ASC,
+           createdAt ASC, messageId ASC
          LIMIT ?
          OFFSET ?`
       )
@@ -2264,17 +2338,6 @@ export class DbService {
       )
       .get(conversationId) as { createdAt: number } | undefined;
     return row?.createdAt || 0;
-  }
-
-  reserveConversationTimestamp(conversationId: string, proposedAt: number): number {
-    const now = Date.now();
-    const base =
-      Number.isFinite(proposedAt) && proposedAt > 0 ? Math.trunc(proposedAt) : now;
-    const latest = this.getLatestConversationTimestamp(conversationId);
-    if (base <= latest) {
-      return latest + 1;
-    }
-    return base;
   }
 
   clearConversation(conversationId: string): string[] {
@@ -2495,10 +2558,7 @@ export class DbService {
       .prepare(
         `SELECT messageId
          FROM messages
-         WHERE conversationId = 'announcements' AND deletedAt IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM hidden_messages h WHERE h.messageId = messages.messageId
-           )`
+         WHERE conversationId = 'announcements' AND deletedAt IS NULL`
       )
       .all() as Array<{ messageId: string }>;
     return rows.map((row) => row.messageId);

@@ -57,7 +57,7 @@ export interface AccountSession {
 }
 export interface UserPreferencesSnapshot {
   conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
-  messages: Array<{ messageId: string; favorite: boolean; hidden: boolean; updatedAt: number }>;
+  messages: Array<{ messageId: string; favorite: boolean; updatedAt: number }>;
 }
 export interface ClientAuthState {
   authenticated: boolean;
@@ -110,6 +110,7 @@ export interface GroupMember {
 }
 
 export interface MessageRow {
+  serverSeq?: number | null;
   messageId: string;
   conversationId: string;
   direction: 'in' | 'out';
@@ -396,7 +397,6 @@ export interface LanternApi {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<MessageRow | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
-  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<MessageRow | null>;
   toggleMessageFavorite: (
     conversationId: string,
     messageId: string,
@@ -405,7 +405,12 @@ export interface LanternApi {
   getMessageFavorites: (messageIds: string[]) => Promise<Record<string, boolean>>;
   getFavoriteMessages: (conversationId: string) => Promise<MessageRow[]>;
   resyncConversation: (conversationId: string) => Promise<void>;
-  getMessages: (conversationId: string, limit: number, before?: number) => Promise<MessageRow[]>;
+  getMessages: (
+    conversationId: string,
+    limit: number,
+    before?: number,
+    beforeSeq?: number
+  ) => Promise<MessageRow[]>;
   getMessagesByIds: (messageIds: string[]) => Promise<MessageRow[]>;
   retryMessage: (messageId: string) => Promise<MessageRow>;
   retryAttachment: (messageId: string) => Promise<MessageRow>;
@@ -560,8 +565,6 @@ export const ipcClient = {
   ) => window.lantern.reactToMessage(conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     window.lantern.deleteMessageForEveryone(conversationId, messageId),
-  deleteMessageForMe: (conversationId: string, messageId: string) =>
-    window.lantern.deleteMessageForMe(conversationId, messageId),
   toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
     window.lantern.toggleMessageFavorite(conversationId, messageId, favorite),
   getMessageFavorites: (messageIds: string[]) => window.lantern.getMessageFavorites(messageIds),
@@ -569,8 +572,8 @@ export const ipcClient = {
     window.lantern.getFavoriteMessages(conversationId),
   resyncConversation: (conversationId: string) =>
     window.lantern.resyncConversation(conversationId),
-  getMessages: (conversationId: string, limit: number, before?: number) =>
-    window.lantern.getMessages(conversationId, limit, before),
+  getMessages: (conversationId: string, limit: number, before?: number, beforeSeq?: number) =>
+    window.lantern.getMessages(conversationId, limit, before, beforeSeq),
   getMessagesByIds: (messageIds: string[]) => window.lantern.getMessagesByIds(messageIds),
   retryMessage: (messageId: string) => window.lantern.retryMessage(messageId),
   retryAttachment: (messageId: string) => window.lantern.retryAttachment(messageId),

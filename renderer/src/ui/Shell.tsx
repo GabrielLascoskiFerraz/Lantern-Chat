@@ -105,7 +105,6 @@ export const Shell = () => {
     toggleMessageFavorite,
     getFavoriteMessages,
     deleteMessageForEveryone,
-    deleteMessageForMe,
     exportConversation,
     resyncConversation,
     markConversationUnread,
@@ -350,9 +349,6 @@ export const Shell = () => {
         onGetFavoriteMessages={getFavoriteMessages}
         onDeleteMessage={(messageId) =>
           deleteMessageForEveryone(conversationId, messageId)
-        }
-        onDeleteMessageForMe={(messageId) =>
-          deleteMessageForMe(conversationId, messageId)
         }
         onExportConversation={(format) => exportConversation(conversationId, format)}
         onResyncConversation={() => resyncConversation(conversationId)}

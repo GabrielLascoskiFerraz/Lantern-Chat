@@ -24,8 +24,9 @@ interface LegacyMessage {
 }
 interface LegacyBackup {
   root: string; manifest: Json; profile: LegacyProfile; peers: Json[]; conversations: Json[];
-  messages: LegacyMessage[]; reactions: Json[]; announcementReads: Json[]; favorites: Json[]; hidden: Json[];
+  messages: LegacyMessage[]; reactions: Json[]; announcementReads: Json[]; favorites: Json[];
   groups: Json[]; groupMembers: Json[]; pinned: Json[]; attachmentFiles: string[];
+  ignoredHiddenMessageCount: number;
 }
 interface MappingUser { username?: string; password?: string; department?: string; role?: 'admin' | 'user' }
 interface MigrationMapping { users?: Record<string, MappingUser> }
@@ -104,9 +105,10 @@ const readBackup = (root: string): LegacyBackup => {
     return {
       root, manifest, profile, peers: all(db, 'peers_cache'), conversations: all(db, 'conversations'), messages,
       reactions: all(db, 'message_reactions'), announcementReads: all(db, 'announcement_reads'),
-      favorites: all(db, 'message_favorites'), hidden: all(db, 'hidden_messages'),
+      favorites: all(db, 'message_favorites'),
       groups: all(db, 'groups'), groupMembers: all(db, 'group_members'), pinned: all(db, 'group_pinned_messages'),
-      attachmentFiles: walkFiles(path.join(root, 'attachments'))
+      attachmentFiles: walkFiles(path.join(root, 'attachments')),
+      ignoredHiddenMessageCount: all(db, 'hidden_messages').length
     };
   } finally { db.close(); }
 };
@@ -118,7 +120,7 @@ const slug = (text: string): string => {
 const messageSignature = (row: LegacyMessage): string => JSON.stringify({
   sender: row.senderDeviceId, receiver: row.receiverDeviceId, type: row.type, text: row.bodyText, fileId: row.fileId,
   fileName: row.fileName, fileSize: row.fileSize, sha: row.fileSha256, reply: row.replyToMessageId, forwarded: row.forwardedFromMessageId,
-  editedAt: row.editedAt, deletedAt: row.deletedAt, createdAt: row.createdAt
+  editedAt: row.editedAt, deletedAt: row.deletedAt
 });
 
 const resolveAttachment = (message: LegacyMessage, backups: LegacyBackup[]): ResolvedAttachment | null => {
@@ -144,6 +146,17 @@ const buildPlan = (options: CliOptions): MigrationPlan => {
   const mapping: MigrationMapping = options.mappingFile ? JSON.parse(fs.readFileSync(options.mappingFile, 'utf8')) as MigrationMapping : {};
   const warnings: string[] = [];
   const errors: string[] = [];
+  const backupByRoot = new Map(backups.map((backup) => [backup.root, backup]));
+  const timestampConflictIds = new Set<string>();
+  const ignoredHiddenMessageCount = backups.reduce(
+    (total, backup) => total + backup.ignoredHiddenMessageCount,
+    0
+  );
+  if (ignoredHiddenMessageCount > 0) {
+    warnings.push(
+      `${ignoredHiddenMessageCount} registro(s) legado(s) de “ocultar para mim” foram descartados.`
+    );
+  }
   const profileByDevice = new Map<string, LegacyProfile>();
   for (const backup of backups) {
     const current = profileByDevice.get(backup.profile.deviceId);
@@ -164,9 +177,39 @@ const buildPlan = (options: CliOptions): MigrationPlan => {
     const existing = messageById.get(message.messageId);
     if (!existing) messageById.set(message.messageId, message);
     else if (messageSignature(existing) !== messageSignature(message)) errors.push(`Conflito no messageId ${message.messageId} entre ${existing.sourceRoot} e ${message.sourceRoot}.`);
-    else if (!existing.filePath && message.filePath) messageById.set(message.messageId, message);
+    else {
+      if (existing.createdAt !== message.createdAt && !timestampConflictIds.has(message.messageId)) {
+        timestampConflictIds.add(message.messageId);
+        warnings.push(
+          `Horários divergentes para ${message.messageId}; foi priorizada a cópia do remetente e usado desempate determinístico.`
+        );
+      }
+      const existingIsSenderCopy =
+        backupByRoot.get(existing.sourceRoot)?.profile.deviceId === existing.senderDeviceId;
+      const incomingIsSenderCopy = backup.profile.deviceId === message.senderDeviceId;
+      let preferred =
+        incomingIsSenderCopy !== existingIsSenderCopy
+          ? incomingIsSenderCopy ? message : existing
+          : message.createdAt < existing.createdAt
+            ? message
+            : existing;
+      const alternate = preferred === existing ? message : existing;
+      if (!preferred.filePath && alternate.filePath) {
+        preferred = {
+          ...preferred,
+          filePath: alternate.filePath,
+          sourceRoot: alternate.sourceRoot
+        };
+      }
+      messageById.set(message.messageId, preferred);
+    }
   }
   let messages = Array.from(messageById.values()).filter((message) => !message.deletedAt).sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+  if (messages.length > 0) {
+    warnings.push(
+      'A ordem do histórico legado foi inferida pelos melhores horários disponíveis; a sequência gravada no Relay é determinística e passa a ser a autoridade após a conversão.'
+    );
+  }
   const requiredDevices = new Set<string>();
   for (const message of messages) {
     requiredDevices.add(message.senderDeviceId);
@@ -295,7 +338,15 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
       const created = store.createUser({ username: planned.username, displayName: planned.profile.displayName, department: planned.department, password: planned.password || undefined, passwordSetupRequired, role: planned.role }, 'migration');
       store.updateUser(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg, statusMessage: planned.profile.statusMessage }, 'migration');
       store.completeProfileSetup(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg });
-      deviceToUser.set(planned.deviceId, created.userId); credentials.push({ legacyDeviceId: planned.deviceId, userId: created.userId, username: planned.username, passwordSetupRequired, temporaryPassword: planned.password || null });
+      deviceToUser.set(planned.deviceId, created.userId);
+      credentials.push({
+        legacyDeviceId: planned.deviceId,
+        userId: created.userId,
+        username: planned.username,
+        passwordSetupRequired,
+        // Senhas fornecidas no mapeamento nunca são reexportadas em texto puro.
+        temporaryPassword: null
+      });
     }
     let directMessages = 0; let reactions = 0; let announcements = 0; let directAttachments = 0; const announcementState: Json[] = [];
     const messageById = new Map(plan.messages.map((message) => [message.messageId, message]));
@@ -311,7 +362,8 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
         if (!target) continue;
         const conversationId = `dm:${[reactor, target].sort((a, b) => a.localeCompare(b)).join(':')}`;
         const reactionMessageId = `migration-reaction-${createHash('sha256').update(`${message.messageId}\0${reactor}`).digest('hex').slice(0, 32)}`;
-        directReactionFrames.push({ messageId: reactionMessageId, type: 'chat:react', senderUserId: reactor, targetUserId: target, conversationId, payload: { targetMessageId: message.messageId, reaction }, createdAt: numberValue(row, 'updatedAt') });
+        const createdAt = numberValue(row, 'updatedAt');
+        directReactionFrames.push({ messageId: reactionMessageId, type: 'chat:react', senderUserId: reactor, targetUserId: target, conversationId, payload: { targetMessageId: message.messageId, reaction }, clientCreatedAt: createdAt, createdAt });
       }
     }
     const announcementReads = new Map<string, Record<string, number>>();
@@ -326,7 +378,7 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
       const resolved = plan.attachments.get(message.messageId);
       const payload = message.type === 'file' ? { fileId: message.fileId, messageId: message.messageId, filename: message.fileName || 'Arquivo', size: resolved?.size || message.fileSize || 0, sha256: resolved?.sha256 || message.fileSha256 || '', replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId } : { text: message.bodyText || '', replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId, editedAt: message.editedAt };
       const frameType = message.type === 'announcement' ? 'announce' : message.type === 'file' ? 'file:offer' : 'chat:text';
-      directFrames.push({ messageId: message.messageId, type: frameType, senderUserId: sender, targetUserId: target, conversationId, payload, createdAt: message.createdAt });
+      directFrames.push({ messageId: message.messageId, type: frameType, senderUserId: sender, targetUserId: target, conversationId, payload, clientCreatedAt: message.createdAt, createdAt: message.createdAt });
       if (message.type === 'announcement') { announcements += 1; announcementState.push({ messageId: message.messageId, frame: { type: frameType, messageId: message.messageId, from: sender, to: null, createdAt: message.createdAt, payload }, createdAt: message.createdAt, expiresAt: Number.MAX_SAFE_INTEGER, expiredAt: null, deletedAt: null, reactionsByDeviceId: announcementReactions.get(message.messageId) || {}, readByDeviceId: announcementReads.get(message.messageId) || {} }); }
       else directMessages += 1;
       if (message.type === 'file' && resolved && message.fileId) {
@@ -346,7 +398,6 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
         store.setUserConversationPreference(owner, { conversationId: `dm:${[owner, peer].sort((a, b) => a.localeCompare(b)).join(':')}`, archived: numberValue(row, 'archivedAt') > 0, readAt: numberValue(row, 'lastReadAt'), manualUnread: numberValue(row, 'unreadCount') > 0 });
       }
       for (const favorite of backup.favorites) store.setUserMessagePreference(owner, { messageId: value(favorite, 'messageId'), favorite: true });
-      for (const hidden of backup.hidden) store.setUserMessagePreference(owner, { messageId: value(hidden, 'messageId'), hidden: true });
     }
     const groupChunks = new EncryptedChunkStore(path.join(staging, 'group-attachments'), store.getEncryption()); const groupState = buildGroups(plan, deviceToUser, groupChunks); if (groupState.groups.length) store.writeCanonicalState('groups', { version: 1, ...groupState }, 1);
     store.close();
@@ -397,7 +448,9 @@ const convertPlan = (plan: MigrationPlan, options: CliOptions): Json => {
     return {
       converted: true,
       backupFile: converted.file,
-      credentialsFile: path.join(converted.file, converted.manifest.credentialsFile),
+      credentialsFile: converted.manifest.credentialsFile
+        ? path.join(converted.file, converted.manifest.credentialsFile)
+        : null,
       createdAt: converted.createdAt,
       size: converted.size,
       files: converted.files,

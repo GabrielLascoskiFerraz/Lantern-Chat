@@ -8,6 +8,13 @@ const test = require('node:test');
 const Database = require('better-sqlite3');
 const { CentralStore } = require('../dist-relay/centralStore.js');
 const { importConvertedBackup, validateConvertedBackup } = require('../dist-relay/convertedBackup.js');
+const { GroupStore } = require('../dist-relay/groupStore.js');
+
+const createCanonicalPersistence = (store) => ({
+  location: store.getDatabaseFile(),
+  read: (key, version) => store.readCanonicalState(key, version),
+  write: (key, value, version) => store.writeCanonicalState(key, value, version)
+});
 
 const createBackup = (root, profile, messages, configure) => {
   const backup = path.join(root, `LanternBackup-${profile.deviceId}`);
@@ -35,7 +42,7 @@ const createBackup = (root, profile, messages, configure) => {
   return backup;
 };
 
-test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', () => {
+test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-local-migration-'));
   const backups = path.join(root, 'backups');
   const relayData = path.join(root, 'relay-data');
@@ -43,18 +50,23 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
   fs.mkdirSync(backups, { recursive: true });
   const bytes = Buffer.from('anexo legado preservado');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
-  const text = { messageId: 'message-text', conversationId: 'dm:device-b', senderDeviceId: 'device-a', receiverDeviceId: 'device-b', type: 'text', bodyText: 'Olá do histórico antigo', fileId: null, fileName: null, fileSize: null, fileSha256: null, filePath: null, createdAt: 3000 };
+  const groupBytes = Buffer.from('anexo legado de grupo preservado');
+  const groupSha256 = createHash('sha256').update(groupBytes).digest('hex');
+  const text = { messageId: 'z-message-text', conversationId: 'dm:device-b', senderDeviceId: 'device-a', receiverDeviceId: 'device-b', type: 'text', bodyText: 'Olá do histórico antigo', fileId: null, fileName: null, fileSize: null, fileSha256: null, filePath: null, createdAt: 3000 };
   const file = { messageId: 'message-file', conversationId: 'dm:device-a', senderDeviceId: 'device-b', receiverDeviceId: 'device-a', type: 'file', bodyText: null, fileId: 'file-legacy', fileName: 'foto.bin', fileSize: bytes.length, fileSha256: sha256, filePath: '/antigo/message-file_foto.bin', createdAt: 4000 };
   const groupMessage = { messageId: 'group-message', conversationId: 'group:group-one', senderDeviceId: 'device-a', receiverDeviceId: null, type: 'text', bodyText: 'Mensagem do grupo', fileId: null, fileName: null, fileSize: null, fileSha256: null, filePath: null, createdAt: 5000 };
+  const groupFile = { messageId: 'group-file-message', conversationId: 'group:group-one', senderDeviceId: 'device-a', receiverDeviceId: null, type: 'file', bodyText: null, fileId: 'group-file-legacy', fileName: 'grupo.bin', fileSize: groupBytes.length, fileSha256: groupSha256, filePath: '/antigo/group-file-message_grupo.bin', createdAt: 5100 };
 
-  createBackup(backups, { deviceId: 'device-a', displayName: 'Alice', avatarEmoji: '🦊', avatarBg: '#147ad6' }, [text, groupMessage], (db) => {
+  createBackup(backups, { deviceId: 'device-a', displayName: 'Alice', avatarEmoji: '🦊', avatarBg: '#147ad6' }, [text, groupMessage, groupFile], (db, backup) => {
     db.prepare('INSERT INTO groups VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('group-one', 'Equipe', '👥', '#5b5fc7', 'Grupo antigo', 'device-a', 2000, 5000, null, 1, 0);
     db.prepare('INSERT INTO group_members VALUES (?,?,?,?,?,?,?,?,?)').run('group-one', 'device-a', 'owner', 'active', 'Alice', '🦊', '#147ad6', 2000, 5000);
     db.prepare('INSERT INTO group_members VALUES (?,?,?,?,?,?,?,?,?)').run('group-one', 'device-b', 'member', 'active', 'Bob', '🐻', '#5b5fc7', 2000, 5000);
+    fs.writeFileSync(path.join(backup, 'attachments', 'group-file-message_grupo.bin'), groupBytes);
   });
-  createBackup(backups, { deviceId: 'device-b', displayName: 'Bob', avatarEmoji: '🐻', avatarBg: '#5b5fc7' }, [{ ...text, conversationId: 'dm:device-a' }, file], (db, backup) => {
-    db.prepare('INSERT INTO message_reactions VALUES (?,?,?,?)').run('message-text', 'device-b', '❤️', 3500);
+  createBackup(backups, { deviceId: 'device-b', displayName: 'Bob', avatarEmoji: '🐻', avatarBg: '#5b5fc7' }, [{ ...text, conversationId: 'dm:device-a', createdAt: 900_000 }, file], (db, backup) => {
+    db.prepare('INSERT INTO message_reactions VALUES (?,?,?,?)').run('z-message-text', 'device-b', '❤️', 3000);
     db.prepare('INSERT INTO message_reactions VALUES (?,?,?,?)').run('group-message', 'device-b', '👍', 5500);
+    db.prepare('INSERT INTO hidden_messages VALUES (?,?)').run('z-message-text', 6000);
     fs.writeFileSync(path.join(backup, 'attachments', 'message-file_foto.bin'), bytes);
   });
 
@@ -71,6 +83,9 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     assert.equal(migration.counts.directMessages, 2);
     assert.equal(migration.counts.reactions, 1);
     assert.equal(migration.counts.groups, 1);
+    assert.equal(migration.counts.groupAttachments, 1);
+    assert.equal(migration.warnings.some((warning) => warning.includes('ocultar para mim')), true);
+    assert.equal(migration.warnings.some((warning) => warning.includes('Horários divergentes')), true);
 
     const store = new CentralStore(path.join(relayData, 'central'), () => undefined);
     const alice = store.listUsers().find((user) => user.username === 'alice');
@@ -80,12 +95,28 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     assert.equal(bob.passwordSetupRequired, true);
     const frames = store.listConversationFramesForUser(alice.userId, bob.userId, Number.MAX_SAFE_INTEGER, 100);
     assert.deepEqual(frames.map((frame) => frame.type), ['chat:text', 'chat:react', 'file:offer']);
-    assert.equal(frames[1].payload.targetMessageId, 'message-text');
+    assert.equal(frames[0].createdAt, 3000);
+    assert.equal(frames[1].payload.targetMessageId, 'z-message-text');
+    assert.equal(frames[0].serverSeq < frames[1].serverSeq, true);
     assert.deepEqual(store.readAttachmentChunk('file-legacy', alice.userId, 0), bytes);
+    assert.deepEqual(store.getUserPreferences(bob.userId).messages, []);
     const groups = store.readCanonicalState('groups');
     assert.equal(groups.groups.length, 1);
     assert.equal(groups.eventsByGroupId['group-one'].some((event) => event.payload?.message?.messageId === 'group-message'), true);
     assert.equal(groups.eventsByGroupId['group-one'].some((event) => event.type === 'group.message.reactionChanged' && event.payload?.targetMessageId === 'group-message'), true);
+    const groupStore = new GroupStore(
+      path.join(relayData, 'groups.json'),
+      path.join(relayData, 'group-attachments'),
+      () => undefined,
+      store.getEncryption(),
+      createCanonicalPersistence(store)
+    );
+    const migratedChunks = [];
+    for await (const chunk of groupStore.createAttachmentChunkStream('group-file-legacy', bob.userId)) {
+      migratedChunks.push(Buffer.from(chunk.dataBase64, 'base64'));
+    }
+    assert.deepEqual(Buffer.concat(migratedChunks), groupBytes);
+    groupStore.close();
     store.close();
 
     const convertedOutput = path.join(root, 'converted');
@@ -105,8 +136,13 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     assert.equal(converted.counts.users, 2);
     assert.ok(fs.statSync(converted.backupFile).isDirectory());
     const manifest = validateConvertedBackup(converted.backupFile);
-    assert.equal(manifest.kind, 'lantern-relay-converted-backup');
+    assert.equal(manifest.kind, 'lantern-relay-backup');
+    assert.equal(manifest.version, 2);
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.source, 'lantern-local-backups');
+    assert.equal(manifest.appVersion, require('../package.json').version);
     assert.equal(manifest.counts.groups, 1);
+    assert.equal(manifest.counts.groupAttachments, 1);
     const convertedAccounts = JSON.parse(fs.readFileSync(path.join(converted.backupFile, manifest.credentialsFile), 'utf8'));
     assert.equal(convertedAccounts.users.every((user) => user.passwordSetupRequired === true && user.temporaryPassword === null), true);
 
@@ -140,6 +176,24 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
     assert.equal(relayUiImport.stats.users, 2);
     assert.ok(fs.existsSync(path.join(relayUiImportedData, 'central', 'lantern-relay.db')));
 
+    const legacyConverted = path.join(root, 'legacy-converted-v1');
+    fs.cpSync(converted.backupFile, legacyConverted, { recursive: true });
+    const legacyManifestFile = path.join(legacyConverted, 'manifest.json');
+    const legacyManifestRaw = JSON.parse(fs.readFileSync(legacyManifestFile, 'utf8'));
+    legacyManifestRaw.kind = 'lantern-relay-converted-backup';
+    legacyManifestRaw.version = 1;
+    delete legacyManifestRaw.schemaVersion;
+    delete legacyManifestRaw.appVersion;
+    fs.writeFileSync(legacyManifestFile, JSON.stringify(legacyManifestRaw));
+    const legacyValidated = validateConvertedBackup(legacyConverted);
+    assert.equal(legacyValidated.kind, 'lantern-relay-converted-backup');
+    assert.equal(legacyValidated.schemaVersion, 1);
+    const legacyImported = importConvertedBackup({
+      bundlePath: legacyConverted,
+      relayDataDir: path.join(root, 'legacy-imported-relay-data')
+    });
+    assert.equal(legacyImported.stats.users, 2);
+
     fs.appendFileSync(path.join(converted.backupFile, manifest.credentialsFile), '\ncorrompido');
     assert.throws(
       () => validateConvertedBackup(converted.backupFile),
@@ -148,6 +202,66 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', (
   } finally {
     if (previousPassword === undefined) delete process.env.LANTERN_RELAY_ADMIN_PASSWORD;
     else process.env.LANTERN_RELAY_ADMIN_PASSWORD = previousPassword;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('recusa escolher arbitrariamente entre anexos diferentes com o mesmo tamanho', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-local-migration-ambiguous-'));
+  const backups = path.join(root, 'backups');
+  const report = path.join(root, 'report.json');
+  fs.mkdirSync(backups, { recursive: true });
+
+  const ambiguousMessage = {
+    messageId: 'ambiguous-message',
+    conversationId: 'dm:ambiguous-b',
+    senderDeviceId: 'ambiguous-a',
+    receiverDeviceId: 'ambiguous-b',
+    type: 'file',
+    bodyText: null,
+    fileId: 'ambiguous-file',
+    fileName: 'ambiguous.bin',
+    fileSize: 4,
+    fileSha256: null,
+    filePath: '/legacy/no-longer-present.bin',
+    createdAt: 1000
+  };
+  createBackup(
+    backups,
+    { deviceId: 'ambiguous-a', displayName: 'Ambiguous A', avatarEmoji: '🅰️', avatarBg: '#147ad6' },
+    [ambiguousMessage],
+    (_db, backup) => {
+      fs.writeFileSync(path.join(backup, 'attachments', 'candidate-one.bin'), 'AAAA');
+    }
+  );
+  createBackup(
+    backups,
+    { deviceId: 'ambiguous-b', displayName: 'Ambiguous B', avatarEmoji: '🅱️', avatarBg: '#5b5fc7' },
+    [],
+    (_db, backup) => {
+      fs.writeFileSync(path.join(backup, 'attachments', 'candidate-two.bin'), 'BBBB');
+    }
+  );
+
+  try {
+    const result = spawnSync(process.execPath, [
+      'dist-relay/migrateLocalBackups.js',
+      '--backups', backups,
+      '--report', report
+    ], {
+      cwd: path.resolve(__dirname, '..'),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8'
+    });
+    assert.equal(result.status, 2, result.stderr || result.stdout);
+    const migration = JSON.parse(fs.readFileSync(report, 'utf8'));
+    assert.equal(migration.applied, false);
+    assert.equal(migration.counts.attachments, 0);
+    assert.equal(
+      migration.errors.some((error) => error.includes('ambiguous.bin')),
+      true
+    );
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

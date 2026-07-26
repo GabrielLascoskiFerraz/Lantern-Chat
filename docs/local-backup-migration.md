@@ -10,7 +10,7 @@ Durante o desenvolvimento, abra com `npm run migration-ui:dev`. Os instaladores 
 2. Opcionalmente, selecione o JSON de mapeamento e as opções de contingência.
 3. Execute **Analisar backups**. A interface mostra totais, conflitos, avisos e o relatório sem alterar o Relay.
 4. Escolha onde salvar e use **Gerar backup convertido**. A ferramenta cria `Lantern-Backup-Convertido-<data>` com banco, anexos, manifesto SHA-256 e a relação das contas convertidas.
-5. No **Lantern Relay UI**, use **Importar backup convertido** e selecione essa pasta. O Relay valida a integridade, interrompe o servidor, preserva os dados atuais para rollback, importa e volta a iniciar automaticamente caso estivesse em execução.
+5. No **Lantern Relay UI**, use **Importar backup** e selecione essa pasta. O Relay valida a integridade, interrompe o servidor, preserva os dados atuais para rollback, importa e volta a iniciar automaticamente caso estivesse em execução.
 
 ## Antes de começar
 
@@ -61,7 +61,9 @@ npm run migrate:local-backups -- \
   --convert
 ```
 
-A conversão acontece em staging e não acessa a instalação do Relay. Na importação, o Relay UI confere todos os tamanhos e hashes antes da troca. O estado anterior é preservado como `<relay-data>.pre-import-<data>`; se houver falha, o destino original permanece intocado. GIFs já administradas pelo Relay UI são preservadas.
+A conversão acontece em staging e não acessa a instalação do Relay. O resultado usa o mesmo formato `lantern-relay-backup` v2 dos backups normais do Relay. Na importação, o Relay UI confere inventário, tamanhos, hashes, versão do schema e integridade do SQLite antes da troca. O estado anterior é preservado como `<relay-data>.pre-import-<data>`; se houver falha, o destino original permanece intocado. GIFs já administradas pelo Relay UI são preservadas quando o pacote não contém sua própria coleção.
+
+O importador também lê os dois formatos v1 anteriores: backups normais do Relay sem `kind` e backups de migração com `kind: lantern-relay-converted-backup`.
 
 ## Opções de contingência
 
@@ -75,10 +77,11 @@ Estas opções descartam dados e exigem revisão prévia do relatório:
 - Perfis são identificados pelo `deviceId` antigo e convertidos em contas canônicas.
 - Cópias da mesma mensagem são deduplicadas por `messageId`.
 - Conteúdo divergente com o mesmo `messageId` é um conflito fatal.
+- Quando apenas os horários divergem, a cópia exportada pelo remetente é priorizada; sem ela, a ferramenta usa um desempate determinístico e registra a decisão no relatório. Depois da conversão, `serverSeq` passa a ser a ordem oficial.
 - IDs de conversas diretas são reconstruídos com os novos `userId`.
 - Grupos mantêm `groupId`, membros, funções, mensagens, reações e fixações.
 - Reações de conversas e anúncios, além das leituras de anúncios, são vinculadas às novas contas.
 - Anexos são verificados, divididos em chunks e cifrados com a chave do Relay.
-- Arquivamento, leitura, favoritos e mensagens ocultas são associados à conta correta.
+- Arquivamento, leitura e favoritos são associados à conta correta. Ocultações locais antigas são ignoradas, pois não fazem parte do histórico canônico.
 
 Depois da importação, valide usuários, grupos, mensagens antigas e alguns anexos antes de remover o rollback ou o arquivo com a relação das contas convertidas.

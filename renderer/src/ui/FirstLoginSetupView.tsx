@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Field, Spinner, Switch, Text } from '@fluentui/react-components';
 import { ArrowLeft20Regular, ArrowRight20Regular } from '@fluentui/react-icons';
 import { useLanternStore } from '../state/store';
@@ -71,14 +71,6 @@ export const FirstLoginSetupView = () => {
     ...(!user?.profileSetupCompleted ? PROFILE_STEPS : [])
   ], [user?.passwordSetupRequired, user?.profileSetupCompleted]);
   const currentStep = steps[Math.min(step, Math.max(0, steps.length - 1))];
-
-  useEffect(() => {
-    if (!user || user.profileSetupCompleted) return;
-    setThemeMode('system');
-    setFontSizeMode('medium');
-    setDensityMode('standard');
-    setOpenAtLogin(true);
-  }, [setDensityMode, setFontSizeMode, setThemeMode, user?.profileSetupCompleted, user?.username]);
 
   const submit = async () => {
     setBusy(true);

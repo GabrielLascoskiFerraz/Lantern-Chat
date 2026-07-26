@@ -111,8 +111,6 @@ const api = {
   ) => ipcRenderer.invoke('lantern:reactToMessage', conversationId, messageId, reaction),
   deleteMessageForEveryone: (conversationId: string, messageId: string) =>
     ipcRenderer.invoke('lantern:deleteMessageForEveryone', conversationId, messageId),
-  deleteMessageForMe: (conversationId: string, messageId: string) =>
-    ipcRenderer.invoke('lantern:deleteMessageForMe', conversationId, messageId),
   toggleMessageFavorite: (conversationId: string, messageId: string, favorite: boolean) =>
     ipcRenderer.invoke('lantern:toggleMessageFavorite', conversationId, messageId, favorite),
   getMessageFavorites: (messageIds: string[]) =>
@@ -121,8 +119,8 @@ const api = {
     ipcRenderer.invoke('lantern:getFavoriteMessages', conversationId),
   resyncConversation: (conversationId: string) =>
     ipcRenderer.invoke('lantern:resyncConversation', conversationId),
-  getMessages: (conversationId: string, limit: number, before?: number) =>
-    ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before),
+  getMessages: (conversationId: string, limit: number, before?: number, beforeSeq?: number) =>
+    ipcRenderer.invoke('lantern:getMessages', conversationId, limit, before, beforeSeq),
   getMessagesByIds: (messageIds: string[]) =>
     ipcRenderer.invoke('lantern:getMessagesByIds', messageIds),
   retryMessage: (messageId: string) =>

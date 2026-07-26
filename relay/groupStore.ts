@@ -476,12 +476,9 @@ export class GroupStore {
       includedIds.add(group.groupId);
     }
     return groups.map((group) => {
+      const allEvents = this.eventsByGroupId.get(group.groupId) || [];
       const knownSeq = Math.max(0, Math.trunc(knownSeqByGroup?.[group.groupId] || 0));
-      const pendingEvents = (this.eventsByGroupId.get(group.groupId) || [])
-        .filter((event) => event.seq > knownSeq);
-      const latestMessage = [...pendingEvents]
-        .reverse()
-        .find((event) => event.type === 'group.message.created');
+      const pendingEvents = allEvents.filter((event) => event.seq > knownSeq);
       const stateEvents = pendingEvents
         .filter(
           (event) =>
@@ -491,7 +488,75 @@ export class GroupStore {
             event.type.startsWith('group.member.')
         )
         .slice(-20);
-      const events = [...stateEvents, ...(latestMessage ? [latestMessage] : [])]
+      // O snapshot de grupo é sempre um índice leve. O histórico completo,
+      // inclusive após longa ausência, continua sob demanda ao abrir/rolar.
+      const deletedMessageIds = new Set(
+        allEvents
+          .filter((event) => event.type === 'group.message.deletedForEveryone')
+          .map((event) => {
+            const payload =
+              event.payload && typeof event.payload === 'object'
+                ? event.payload as Record<string, unknown>
+                : {};
+            return typeof payload.targetMessageId === 'string'
+              ? payload.targetMessageId
+              : '';
+          })
+          .filter(Boolean)
+      );
+      const latestMessage = [...allEvents]
+        .reverse()
+        .find((event) => {
+          if (event.type !== 'group.message.created') return false;
+          const payload =
+            event.payload && typeof event.payload === 'object'
+              ? event.payload as Record<string, unknown>
+              : {};
+          const message =
+            payload.message && typeof payload.message === 'object'
+              ? payload.message as Record<string, unknown>
+              : {};
+          const messageId =
+            typeof message.messageId === 'string' ? message.messageId : '';
+          return Boolean(messageId && !deletedMessageIds.has(messageId));
+        });
+      const latestPayload =
+        latestMessage?.payload && typeof latestMessage.payload === 'object'
+          ? latestMessage.payload as Record<string, unknown>
+          : {};
+      const latestValue =
+        latestPayload.message && typeof latestPayload.message === 'object'
+          ? latestPayload.message as Record<string, unknown>
+          : {};
+      const latestMessageId =
+        typeof latestValue.messageId === 'string' ? latestValue.messageId : '';
+      const relatedEvents = latestMessageId
+        ? allEvents.filter((event) => {
+            if (event.eventId === latestMessage?.eventId) return false;
+            const payload =
+              event.payload && typeof event.payload === 'object'
+                ? event.payload as Record<string, unknown>
+                : {};
+            const directTarget =
+              typeof payload.targetMessageId === 'string'
+                ? payload.targetMessageId
+                : typeof payload.messageId === 'string'
+                  ? payload.messageId
+                  : '';
+            if (directTarget === latestMessageId) return true;
+            const metadata =
+              payload.metadata && typeof payload.metadata === 'object'
+                ? payload.metadata as Record<string, unknown>
+                : {};
+            return metadata.messageId === latestMessageId;
+          })
+        : [];
+      const messageEvents = [...(latestMessage ? [latestMessage] : []), ...relatedEvents];
+      const events = Array.from(
+        new Map(
+          [...stateEvents, ...messageEvents].map((event) => [event.eventId, event])
+        ).values()
+      )
         .sort((left, right) => left.seq - right.seq || left.eventId.localeCompare(right.eventId));
       return {
         group,
@@ -506,15 +571,24 @@ export class GroupStore {
     groupId: string,
     deviceId: string,
     before = Number.MAX_SAFE_INTEGER,
-    limit = 100
+    limit = 100,
+    beforeSeq = Number.MAX_SAFE_INTEGER
   ): { events: RelayGroupEvent[]; hasMore: boolean } {
     const group = this.getRequiredGroup(groupId);
     this.assertActiveMember(group, deviceId);
     const safeBefore = Number.isFinite(before) ? Math.max(1, Math.trunc(before)) : Number.MAX_SAFE_INTEGER;
+    const safeBeforeSeq = Number.isFinite(beforeSeq)
+      ? Math.max(1, Math.trunc(beforeSeq))
+      : Number.MAX_SAFE_INTEGER;
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
     const allEvents = this.eventsByGroupId.get(group.groupId) || [];
     const createdCandidates = allEvents
-      .filter((event) => event.type === 'group.message.created' && event.createdAt < safeBefore)
+      .filter((event) =>
+        event.type === 'group.message.created' &&
+        (safeBeforeSeq < Number.MAX_SAFE_INTEGER
+          ? event.seq < safeBeforeSeq
+          : event.createdAt < safeBefore)
+      )
       .slice(-(safeLimit + 1));
     const hasMore = createdCandidates.length > safeLimit;
     const createdPage = createdCandidates.slice(-safeLimit);
@@ -557,8 +631,7 @@ export class GroupStore {
     deviceId: string,
     kind: ConversationMediaKind,
     cursor: ConversationMediaCursor | null = null,
-    limit = 40,
-    hiddenMessageIds: ReadonlySet<string> = new Set()
+    limit = 40
   ): ConversationMediaPage {
     const group = this.getRequiredGroup(groupId);
     this.assertActiveMember(group, deviceId);
@@ -578,7 +651,7 @@ export class GroupStore {
     const matching = Array.from(this.attachmentsByFileId.values())
       .filter((metadata) => metadata.groupId === group.groupId)
       .filter((metadata) => metadata.uploadedAt !== null && metadata.deletedAt === null)
-      .filter((metadata) => !deletedMessageIds.has(metadata.messageId) && !hiddenMessageIds.has(metadata.messageId))
+      .filter((metadata) => !deletedMessageIds.has(metadata.messageId))
       .filter((metadata) => metadata.createdAt < beforeCreatedAt ||
         (metadata.createdAt === beforeCreatedAt && metadata.messageId < beforeMessageId))
       .map((metadata) => {
@@ -914,7 +987,23 @@ export class GroupStore {
       });
       if (existing) return existing;
     }
-    return this.appendEvent(group, 'group.message.created', input.actorDeviceId, input.payload, input.createdAt);
+    const createdAt = this.safeTime(input.createdAt);
+    const payload = (() => {
+      if (!input.payload || typeof input.payload !== 'object') return input.payload;
+      const source = input.payload as Record<string, unknown>;
+      const rawMessage = source.message && typeof source.message === 'object'
+        ? source.message as Record<string, unknown>
+        : null;
+      if (!rawMessage) return input.payload;
+      return {
+        ...source,
+        message: {
+          ...rawMessage,
+          createdAt
+        }
+      };
+    })();
+    return this.appendEvent(group, 'group.message.created', input.actorDeviceId, payload, createdAt);
   }
 
   editGroupMessage(groupId: string, actorDeviceId: string, targetMessageId: string, text: string, editedAt: number): RelayGroupEvent {

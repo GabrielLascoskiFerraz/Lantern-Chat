@@ -146,7 +146,6 @@ export interface IpcBindings {
     reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null
   ) => Promise<DbMessage | null>;
   deleteMessageForEveryone: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
-  deleteMessageForMe: (conversationId: string, messageId: string) => Promise<DbMessage | null>;
   toggleMessageFavorite: (
     conversationId: string,
     messageId: string,
@@ -158,7 +157,8 @@ export interface IpcBindings {
   getMessages: (
     conversationId: string,
     limit: number,
-    before?: number
+    before?: number,
+    beforeSeq?: number
   ) => Promise<DbMessage[]> | DbMessage[];
   getMessagesByIds: (messageIds: string[]) => Promise<DbMessage[]> | DbMessage[];
   retryMessage: (messageId: string) => Promise<DbMessage>;
@@ -575,11 +575,6 @@ export const registerIpc = (
       bindings.deleteMessageForEveryone(conversationId, messageId)
   );
   ipcMain.handle(
-    'lantern:deleteMessageForMe',
-    (_event, conversationId: string, messageId: string) =>
-      bindings.deleteMessageForMe(conversationId, messageId)
-  );
-  ipcMain.handle(
     'lantern:toggleMessageFavorite',
     (_event, conversationId: string, messageId: string, favorite: boolean) =>
       bindings.toggleMessageFavorite(conversationId, messageId, favorite)
@@ -595,8 +590,8 @@ export const registerIpc = (
   );
   ipcMain.handle(
     'lantern:getMessages',
-    (_event, conversationId: string, limit: number, before?: number) =>
-      bindings.getMessages(conversationId, limit, before)
+    (_event, conversationId: string, limit: number, before?: number, beforeSeq?: number) =>
+      bindings.getMessages(conversationId, limit, before, beforeSeq)
   );
   ipcMain.handle('lantern:getMessagesByIds', (_event, messageIds: string[]) =>
     bindings.getMessagesByIds(messageIds)

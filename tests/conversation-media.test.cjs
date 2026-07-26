@@ -36,7 +36,7 @@ const addAttachment = (store, owner, peer, input) => {
   });
 };
 
-test('galeria canônica filtra, pagina e respeita preferências do usuário', () => {
+test('galeria canônica filtra e pagina a mesma base para os dois participantes', () => {
   const root = createTempDir();
   try {
     const store = new CentralStore(path.join(root, 'central'), silentLog);
@@ -60,10 +60,10 @@ test('galeria canônica filtra, pagina e respeita preferências do usuário', ()
       store.listConversationMedia(alice.userId, bob.userId, 'document').items.map((item) => item.fileName),
       ['contrato.pdf']
     );
-    store.setUserMessagePreference(alice.userId, { messageId: 'media-2', hidden: true });
+    store.setUserMessagePreference(alice.userId, { messageId: 'media-2', favorite: true });
     assert.deepEqual(
       store.listConversationMedia(alice.userId, bob.userId, 'media').items.map((item) => item.messageId),
-      ['media-1']
+      ['media-2', 'media-1']
     );
     assert.deepEqual(
       store.listConversationMedia(bob.userId, alice.userId, 'media').items.map((item) => item.messageId),

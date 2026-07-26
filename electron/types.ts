@@ -68,7 +68,6 @@ export interface UserPreferencesSnapshot {
   messages: Array<{
     messageId: string;
     favorite: boolean;
-    hidden: boolean;
     updatedAt: number;
   }>;
 }

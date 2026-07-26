@@ -30,7 +30,6 @@ export interface UserConversationPreference {
 export interface UserMessagePreference {
   messageId: string;
   favorite: boolean;
-  hidden: boolean;
   updatedAt: number;
 }
 
@@ -75,6 +74,9 @@ export interface CanonicalFrame {
   senderUserId: string;
   targetUserId: string | null;
   conversationId: string;
+  /** Horário informado pelo cliente, mantido apenas para diagnóstico/migração. */
+  clientCreatedAt?: number | null;
+  /** Horário aceito pelo Relay. É o único horário exibido e sincronizado. */
   createdAt: number;
   payload: unknown;
 }

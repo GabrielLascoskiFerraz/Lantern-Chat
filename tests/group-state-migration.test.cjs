@@ -103,6 +103,24 @@ test('groups.json cifrado é importado uma vez e o SQLite vira a fonte ativa', (
     assert.equal(page.hasMore, true);
     assert.equal(page.events.filter((event) => event.type === 'group.message.created').length, 2);
     assert.equal(page.events.some((event) => event.type === 'group.message.edited'), true);
+    const firstCreatedSeq = Math.min(
+      ...page.events
+        .filter((event) => event.type === 'group.message.created')
+        .map((event) => event.seq)
+    );
+    const olderPage = firstGroups.historyPageForDevice(
+      'group-one',
+      'owner-one',
+      page.events[0].createdAt,
+      2,
+      firstCreatedSeq
+    );
+    assert.deepEqual(
+      olderPage.events
+        .filter((event) => event.type === 'group.message.created')
+        .map((event) => event.payload.message.messageId),
+      ['message-1']
+    );
     assert.deepEqual(
       firstGroups.searchMessageIdsForDevice('group-one', 'owner-one', 'editada'),
       ['message-3']

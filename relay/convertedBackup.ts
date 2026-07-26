@@ -2,26 +2,26 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CentralStore } from './centralStore';
+import { EncryptedChunkStore } from './encryptedChunkStore';
+import { RelayGroupAttachmentMetadata } from './groupTypes';
+import {
+  LEGACY_CONVERTED_BACKUP_KIND,
+  RELAY_BACKUP_KIND,
+  RELAY_BACKUP_VERSION,
+  RelayBackupFile,
+  RelayBackupManifest,
+  readRelayBackupManifest,
+  resolveBackupAppVersion,
+  validateRelayBackup,
+  writeRelayBackupManifest
+} from './backupFormat';
 
-export const CONVERTED_BACKUP_KIND = 'lantern-relay-converted-backup';
-export const CONVERTED_BACKUP_VERSION = 1;
-
-export interface ConvertedBackupFile {
-  path: string;
-  size: number;
-  sha256: string;
-}
-
-export interface ConvertedBackupManifest {
-  kind: typeof CONVERTED_BACKUP_KIND;
-  version: typeof CONVERTED_BACKUP_VERSION;
-  createdAt: number;
-  source: 'lantern-local-backups';
-  counts: Record<string, number>;
-  warnings: string[];
-  credentialsFile: string;
-  files: ConvertedBackupFile[];
-}
+// Nomes públicos mantidos para não quebrar integrações e scripts existentes.
+export const CONVERTED_BACKUP_KIND = RELAY_BACKUP_KIND;
+export const CONVERTED_BACKUP_VERSION = RELAY_BACKUP_VERSION;
+export { LEGACY_CONVERTED_BACKUP_KIND };
+export type ConvertedBackupFile = RelayBackupFile;
+export type ConvertedBackupManifest = RelayBackupManifest;
 
 export interface ConvertedBackupResult {
   file: string;
@@ -31,53 +31,13 @@ export interface ConvertedBackupResult {
   manifest: ConvertedBackupManifest;
 }
 
-const hashFile = (file: string): string => {
-  const hash = createHash('sha256');
-  const descriptor = fs.openSync(file, 'r');
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-  try {
-    let read = 0;
-    do {
-      read = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-      if (read > 0) hash.update(buffer.subarray(0, read));
-    } while (read > 0);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  return hash.digest('hex');
-};
-
-const walkRegularFiles = (root: string, current = root): string[] => {
-  const result: string[] = [];
-  for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-    const target = path.join(current, entry.name);
-    const relative = path.relative(root, target);
-    if (entry.isSymbolicLink()) throw new Error(`O backup contém um link simbólico não permitido: ${relative}.`);
-    if (entry.isDirectory()) result.push(...walkRegularFiles(root, target));
-    else if (entry.isFile()) result.push(target);
-  }
-  return result;
-};
-
-const safeManifestPath = (root: string, relativePath: string): string => {
-  if (!relativePath || path.isAbsolute(relativePath)) throw new Error('O manifesto contém um caminho inválido.');
-  const normalized = relativePath.replace(/\\/g, '/');
-  if (normalized.split('/').some((segment) => segment === '..' || segment === '')) {
-    throw new Error(`O manifesto contém um caminho inseguro: ${relativePath}.`);
-  }
-  const resolved = path.resolve(root, ...normalized.split('/'));
-  if (!resolved.startsWith(`${path.resolve(root)}${path.sep}`)) {
-    throw new Error(`O manifesto tenta acessar dados fora do backup: ${relativePath}.`);
-  }
-  return resolved;
-};
-
 export const createConvertedBackup = (input: {
   sourceRelayDataDir: string;
   outputDir: string;
   counts: Record<string, number>;
   warnings: string[];
   credentials: unknown[];
+  appVersion?: string | null;
 }): ConvertedBackupResult => {
   const source = path.resolve(input.sourceRelayDataDir);
   const output = path.resolve(input.outputDir);
@@ -99,7 +59,10 @@ export const createConvertedBackup = (input: {
 
   try {
     fs.mkdirSync(stagingPath, { recursive: true });
-    fs.cpSync(centralSource, path.join(stagingPath, 'central'), { recursive: true, dereference: false });
+    fs.cpSync(centralSource, path.join(stagingPath, 'central'), {
+      recursive: true,
+      dereference: false
+    });
     const groupAttachments = path.join(source, 'group-attachments');
     if (fs.existsSync(groupAttachments)) {
       fs.cpSync(groupAttachments, path.join(stagingPath, 'group-attachments'), {
@@ -113,34 +76,21 @@ export const createConvertedBackup = (input: {
       `${JSON.stringify({ createdAt, users: input.credentials }, null, 2)}\n`,
       { mode: 0o600 }
     );
-    const files = walkRegularFiles(stagingPath)
-      .map((file): ConvertedBackupFile => ({
-        path: path.relative(stagingPath, file).split(path.sep).join('/'),
-        size: fs.statSync(file).size,
-        sha256: hashFile(file)
-      }))
-      .sort((left, right) => left.path.localeCompare(right.path));
-    const manifest: ConvertedBackupManifest = {
-      kind: CONVERTED_BACKUP_KIND,
-      version: CONVERTED_BACKUP_VERSION,
+    const manifest = writeRelayBackupManifest(stagingPath, {
       createdAt,
       source: 'lantern-local-backups',
       counts: input.counts,
       warnings: input.warnings,
       credentialsFile,
-      files
-    };
-    fs.writeFileSync(
-      path.join(stagingPath, 'manifest.json'),
-      `${JSON.stringify(manifest, null, 2)}\n`,
-      { mode: 0o600 }
-    );
+      appVersion: input.appVersion ?? resolveBackupAppVersion()
+    });
+    validateRelayBackup(stagingPath);
     fs.renameSync(stagingPath, finalPath);
     return {
       file: finalPath,
       createdAt,
-      size: files.reduce((total, file) => total + file.size, 0),
-      files: files.length,
+      size: manifest.files.reduce((total, file) => total + file.size, 0),
+      files: manifest.files.length,
       manifest
     };
   } catch (error) {
@@ -149,62 +99,50 @@ export const createConvertedBackup = (input: {
   }
 };
 
-export const readConvertedBackupManifest = (bundlePath: string): ConvertedBackupManifest => {
-  const root = path.resolve(bundlePath);
-  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
-    throw new Error('Selecione uma pasta de backup convertido válida.');
-  }
-  const manifestFile = path.join(root, 'manifest.json');
-  if (!fs.statSync(manifestFile, { throwIfNoEntry: false })?.isFile()) {
-    throw new Error('O manifesto do backup convertido não foi encontrado.');
-  }
-  let manifest: ConvertedBackupManifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')) as ConvertedBackupManifest;
-  } catch {
-    throw new Error('O manifesto do backup convertido está corrompido.');
-  }
-  if (manifest.kind !== CONVERTED_BACKUP_KIND || manifest.version !== CONVERTED_BACKUP_VERSION) {
-    throw new Error('Este backup não é compatível com esta versão do Lantern Relay.');
-  }
-  if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
-    throw new Error('O backup convertido não possui inventário de arquivos.');
-  }
-  return manifest;
-};
+export const readConvertedBackupManifest = (bundlePath: string): ConvertedBackupManifest =>
+  readRelayBackupManifest(bundlePath);
 
-export const validateConvertedBackup = (bundlePath: string): ConvertedBackupManifest => {
-  const root = path.resolve(bundlePath);
-  const manifest = readConvertedBackupManifest(root);
-  const declared = new Map<string, ConvertedBackupFile>();
-  for (const entry of manifest.files) {
-    if (
-      !entry ||
-      typeof entry.path !== 'string' ||
-      !Number.isFinite(entry.size) ||
-      !/^[a-f0-9]{64}$/i.test(entry.sha256)
-    ) throw new Error('O inventário do backup convertido é inválido.');
-    if (declared.has(entry.path)) throw new Error(`Arquivo duplicado no manifesto: ${entry.path}.`);
-    declared.set(entry.path, entry);
-    const file = safeManifestPath(root, entry.path);
-    const stat = fs.statSync(file, { throwIfNoEntry: false });
-    if (!stat?.isFile() || stat.size !== entry.size) {
-      throw new Error(`O arquivo ${entry.path} está ausente ou possui tamanho incorreto.`);
+export const validateConvertedBackup = (bundlePath: string): ConvertedBackupManifest =>
+  validateRelayBackup(bundlePath);
+
+const validateGroupAttachments = (
+  relayDataDir: string,
+  store: CentralStore,
+  attachments: RelayGroupAttachmentMetadata[]
+): void => {
+  const chunks = new EncryptedChunkStore(
+    path.join(relayDataDir, 'group-attachments'),
+    store.getEncryption()
+  );
+  for (const metadata of attachments) {
+    if (!metadata || metadata.deletedAt || !metadata.uploadedAt) continue;
+    const expectedChunks = Math.max(1, Math.ceil(metadata.fileSize / (64 * 1024)));
+    const target = chunks.directory(metadata.groupId, metadata.fileId, 'chunks');
+    const legacy = chunks.directory(metadata.fileId);
+    if (!chunks.has(0, metadata.groupId, metadata.fileId, 'chunks') && fs.existsSync(legacy)) {
+      fs.mkdirSync(target, { recursive: true });
+      for (const entry of fs.readdirSync(legacy, { withFileTypes: true })) {
+        if (entry.isFile() && /^\d+\.bin$/.test(entry.name)) {
+          fs.copyFileSync(path.join(legacy, entry.name), path.join(target, entry.name));
+        }
+      }
     }
-    if (hashFile(file) !== entry.sha256.toLowerCase()) {
-      throw new Error(`A verificação de integridade falhou em ${entry.path}.`);
+    const hash = createHash('sha256');
+    let size = 0;
+    for (let index = 0; index < expectedChunks; index += 1) {
+      let chunk: Buffer;
+      try {
+        chunk = chunks.read(index, metadata.groupId, metadata.fileId, 'chunks');
+      } catch {
+        throw new Error(`Chunk ${index} ausente ou inválido no anexo de grupo ${metadata.fileId}.`);
+      }
+      hash.update(chunk);
+      size += chunk.length;
+    }
+    if (size !== metadata.fileSize || hash.digest('hex') !== metadata.sha256) {
+      throw new Error(`Integridade inválida no anexo de grupo ${metadata.fileId}.`);
     }
   }
-  const actual = walkRegularFiles(root)
-    .map((file) => path.relative(root, file).split(path.sep).join('/'))
-    .filter((file) => file !== 'manifest.json');
-  for (const file of actual) {
-    if (!declared.has(file)) throw new Error(`O backup contém um arquivo não declarado: ${file}.`);
-  }
-  for (const required of ['central/lantern-relay.db', 'central/master.key', manifest.credentialsFile]) {
-    if (!declared.has(required)) throw new Error(`O backup convertido não contém ${required}.`);
-  }
-  return manifest;
 };
 
 export const importConvertedBackup = (input: {
@@ -219,7 +157,7 @@ export const importConvertedBackup = (input: {
 } => {
   const source = path.resolve(input.bundlePath);
   const destination = path.resolve(input.relayDataDir);
-  const manifest = validateConvertedBackup(source);
+  const manifest = validateRelayBackup(source);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const staging = `${destination}.import-staging-${stamp}`;
   const rollback = `${destination}.pre-import-${stamp}`;
@@ -232,24 +170,34 @@ export const importConvertedBackup = (input: {
       recursive: true,
       dereference: false
     });
-    const groupAttachments = path.join(source, 'group-attachments');
-    if (fs.existsSync(groupAttachments)) {
-      fs.cpSync(groupAttachments, path.join(staging, 'group-attachments'), {
-        recursive: true,
-        dereference: false
-      });
-    }
-    const existingStickers = path.join(destination, 'stickers');
-    if (fs.existsSync(existingStickers)) {
-      fs.cpSync(existingStickers, path.join(staging, 'stickers'), {
-        recursive: true,
-        dereference: false
-      });
+
+    // Pacotes completos restauram seus próprios recursos. Pacotes convertidos
+    // antigos não os possuíam, então preservamos o recurso já instalado.
+    for (const resource of ['group-attachments', 'stickers', 'updates']) {
+      const packaged = path.join(source, resource);
+      const existing = path.join(destination, resource);
+      const selected = fs.existsSync(packaged) ? packaged : fs.existsSync(existing) ? existing : null;
+      if (selected) {
+        fs.cpSync(selected, path.join(staging, resource), {
+          recursive: true,
+          dereference: false
+        });
+      }
     }
 
-    const probe = new CentralStore(path.join(staging, 'central'), () => undefined);
-    const stats = probe.getStats();
-    probe.close();
+    let probe: CentralStore | null = null;
+    let stats: ReturnType<CentralStore['getStats']>;
+    try {
+      probe = new CentralStore(path.join(staging, 'central'), () => undefined);
+      const groupState = probe.readCanonicalState<{
+        attachments?: RelayGroupAttachmentMetadata[];
+      }>('groups', 1);
+      validateGroupAttachments(staging, probe, groupState?.attachments || []);
+      probe.verifyBackupIntegrity();
+      stats = probe.getStats();
+    } finally {
+      probe?.close();
+    }
 
     let originalMoved = false;
     try {

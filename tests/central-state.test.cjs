@@ -1,10 +1,15 @@
 const assert = require('node:assert/strict');
+const { createHash, randomBytes } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const Database = require('better-sqlite3');
 const { CentralStore } = require('../dist-relay/centralStore.js');
+const {
+  importConvertedBackup,
+  validateConvertedBackup
+} = require('../dist-relay/convertedBackup.js');
 
 const createTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-central-state-'));
 const silentLog = () => undefined;
@@ -154,24 +159,113 @@ test('pesquisa, anexos, auditoria e backup permanecem canônicos e cifrados', as
     const rawChunk = fs.readFileSync(path.join(dataDir, 'attachments', 'attachment-search', '0.bin'));
     assert.equal(rawChunk.includes(bytes), false);
 
-    const backup = await store.createBackup();
+    const updateSource = path.join(root, 'updates-source');
+    fs.mkdirSync(updateSource, { recursive: true });
+    fs.writeFileSync(path.join(updateSource, 'manifest.json'), JSON.stringify({ version: '2.0.0' }));
+    const backup = await store.createBackup(
+      [{ name: 'updates', source: updateSource }],
+      'backup-test',
+      '9.8.7-test'
+    );
     assert.equal(fs.existsSync(backup.file), true);
     assert.equal(fs.existsSync(path.join(backup.file, 'central', 'master.key')), true);
     assert.equal(fs.existsSync(path.join(backup.file, 'central', 'attachments', 'attachment-search', '0.bin')), true);
     assert.equal(fs.existsSync(path.join(backup.file, 'manifest.json')), true);
     assert.equal(backup.size > 0, true);
+    const manifest = validateConvertedBackup(backup.file);
+    assert.equal(manifest.kind, 'lantern-relay-backup');
+    assert.equal(manifest.version, 2);
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.source, 'lantern-relay');
+    assert.equal(manifest.appVersion, '9.8.7-test');
+    assert.equal(manifest.counts.users, 2);
+    assert.equal(manifest.counts.directMessages, 1);
+    assert.equal(manifest.counts.directAttachments, 1);
+    assert.equal(manifest.counts.attachments, 1);
+    assert.equal(manifest.counts.frames, 1);
+    assert.equal(manifest.counts.announcements, 0);
+    assert.equal(manifest.counts.groups, 0);
+    assert.equal(manifest.counts.groupAttachments, 0);
+    assert.equal(manifest.files.some((entry) => entry.path === 'updates/manifest.json'), true);
     assert.equal(store.listAudit().some((entry) => entry.action === 'backup.created'), true);
     store.close();
 
-    const restoredDir = path.join(root, 'restored-central');
-    fs.cpSync(path.join(backup.file, 'central'), restoredDir, { recursive: true });
-    const restored = new CentralStore(restoredDir, silentLog);
+    const restoredRelayData = path.join(root, 'restored-relay-data');
+    const imported = importConvertedBackup({
+      bundlePath: backup.file,
+      relayDataDir: restoredRelayData
+    });
+    assert.equal(imported.stats.users, 2);
+    const restored = new CentralStore(path.join(restoredRelayData, 'central'), silentLog);
     assert.deepEqual(
       restored.searchConversationMessageIds(admin.userId, peer.userId, 'canônica'),
       ['search-message']
     );
     assert.deepEqual(restored.readAttachmentChunk('attachment-search', peer.userId, 0), bytes);
     restored.close();
+
+    const legacyBundle = path.join(root, 'legacy-relay-backup-v1');
+    fs.cpSync(backup.file, legacyBundle, { recursive: true });
+    const legacyManifestFile = path.join(legacyBundle, 'manifest.json');
+    const legacyRaw = JSON.parse(fs.readFileSync(legacyManifestFile, 'utf8'));
+    fs.writeFileSync(legacyManifestFile, JSON.stringify({
+      version: 1,
+      createdAt: legacyRaw.createdAt,
+      files: legacyRaw.files
+    }));
+    const legacyManifest = validateConvertedBackup(legacyBundle);
+    assert.equal(legacyManifest.kind, 'lantern-relay-backup-v1');
+    assert.equal(legacyManifest.version, 1);
+    const legacyRelayData = path.join(root, 'legacy-restored-relay-data');
+    assert.equal(importConvertedBackup({
+      bundlePath: legacyBundle,
+      relayDataDir: legacyRelayData
+    }).stats.frames, 1);
+
+    const mismatchedBundle = path.join(root, 'schema-mismatch-v2');
+    fs.cpSync(backup.file, mismatchedBundle, { recursive: true });
+    const mismatchedManifestFile = path.join(mismatchedBundle, 'manifest.json');
+    const mismatchedManifest = JSON.parse(fs.readFileSync(mismatchedManifestFile, 'utf8'));
+    mismatchedManifest.schemaVersion = 1;
+    fs.writeFileSync(mismatchedManifestFile, JSON.stringify(mismatchedManifest));
+    assert.throws(
+      () => validateConvertedBackup(mismatchedBundle),
+      /versão do schema no manifesto/
+    );
+
+    const wrongKeyBundle = path.join(root, 'wrong-master-key-v2');
+    fs.cpSync(backup.file, wrongKeyBundle, { recursive: true });
+    const wrongKey = randomBytes(32);
+    const wrongKeyFile = path.join(wrongKeyBundle, 'central', 'master.key');
+    fs.writeFileSync(wrongKeyFile, wrongKey);
+    const wrongKeyManifestFile = path.join(wrongKeyBundle, 'manifest.json');
+    const wrongKeyManifest = JSON.parse(fs.readFileSync(wrongKeyManifestFile, 'utf8'));
+    const masterKeyInventory = wrongKeyManifest.files.find(
+      (entry) => entry.path === 'central/master.key'
+    );
+    assert.ok(masterKeyInventory);
+    masterKeyInventory.size = wrongKey.length;
+    masterKeyInventory.sha256 = createHash('sha256').update(wrongKey).digest('hex');
+    fs.writeFileSync(wrongKeyManifestFile, JSON.stringify(wrongKeyManifest));
+    assert.doesNotThrow(() => validateConvertedBackup(wrongKeyBundle));
+
+    const atomicRelayData = path.join(root, 'atomic-relay-data');
+    fs.mkdirSync(atomicRelayData, { recursive: true });
+    const sentinel = path.join(atomicRelayData, 'sentinel.txt');
+    fs.writeFileSync(sentinel, 'estado-original');
+    assert.throws(() => importConvertedBackup({
+      bundlePath: wrongKeyBundle,
+      relayDataDir: atomicRelayData
+    }));
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), 'estado-original');
+    assert.equal(
+      fs.readdirSync(root).some((name) => name.startsWith('atomic-relay-data.import-staging-')),
+      false
+    );
+    assert.equal(
+      fs.readdirSync(root).some((name) => name.startsWith('atomic-relay-data.pre-import-')),
+      false
+    );
   } finally {
     if (previousPassword === undefined) delete process.env.LANTERN_RELAY_ADMIN_PASSWORD;
     else process.env.LANTERN_RELAY_ADMIN_PASSWORD = previousPassword;
@@ -309,7 +403,7 @@ test('onboarding e preferências do usuário persistem no Relay canônico', () =
       conversationId: 'dm:peer', pinned: true, archived: true, manualUnread: true
     });
     store.setUserMessagePreference(user.userId, {
-      messageId: 'favorite-message', favorite: true, hidden: true
+      messageId: 'favorite-message', favorite: true
     });
     store.close();
 
@@ -321,7 +415,7 @@ test('onboarding e preferências do usuário persistem no Relay canônico', () =
       readAt: 0, updatedAt: preferences.conversations[0].updatedAt
     });
     assert.deepEqual(preferences.messages[0], {
-      messageId: 'favorite-message', favorite: true, hidden: true,
+      messageId: 'favorite-message', favorite: true,
       updatedAt: preferences.messages[0].updatedAt
     });
     reopened.close();
@@ -374,7 +468,7 @@ test('conta administrativa cria a própria senha no primeiro acesso sem liberar 
   }
 });
 
-test('exportação canônica não depende do cache e respeita edições, exclusões e ocultações', () => {
+test('exportação canônica não depende do cache e respeita edições e exclusões globais', () => {
   const root = createTempDir();
   const dataDir = path.join(root, 'central');
   const previousPassword = process.env.LANTERN_RELAY_ADMIN_PASSWORD;
@@ -390,9 +484,9 @@ test('exportação canônica não depende do cache e respeita edições, exclus�
     store.saveFrame({ messageId: 'export-2', type: 'chat:text', senderUserId: peer.userId, targetUserId: admin.userId, conversationId, createdAt: base + 2, payload: { text: 'oculta' } });
     store.saveFrame({ messageId: 'export-3', type: 'chat:text', senderUserId: peer.userId, targetUserId: admin.userId, conversationId, createdAt: base + 3, payload: { text: 'apagada' } });
     store.saveFrame({ messageId: 'delete-3', type: 'chat:delete', senderUserId: peer.userId, targetUserId: admin.userId, conversationId, createdAt: base + 4, payload: { targetMessageId: 'export-3' } });
-    store.setUserMessagePreference(admin.userId, { messageId: 'export-2', hidden: true });
     assert.deepEqual(store.exportConversationMessages(admin.userId, peer.userId).map((message) => ({ id: message.messageId, text: message.text })), [
-      { id: 'export-1', text: 'editada' }
+      { id: 'export-1', text: 'editada' },
+      { id: 'export-2', text: 'oculta' }
     ]);
     store.close();
   } finally {

@@ -25,6 +25,7 @@ import {
   forEachFileChunk,
   mergeAttachmentCache
 } from './attachmentTransfer';
+import { sortCanonicalMessages } from '../utils/messageOrder';
 
 type Json = Record<string, any>;
 type PendingRequest = { resolve: (value: Json) => void; reject: (error: Error) => void; timer: number };
@@ -136,7 +137,7 @@ const sha256Bytes = (input: Uint8Array): string => {
 };
 const asRecord = (value: unknown): Json => value && typeof value === 'object' ? value as Json : {};
 
-class WebLanternBridge {
+export class WebLanternBridge {
   private token = window.localStorage.getItem(TOKEN_KEY) || window.sessionStorage.getItem(TOKEN_KEY) || '';
   private user: AuthenticatedUser | null = null;
   private socket: WebSocket | null = null;
@@ -150,7 +151,7 @@ class WebLanternBridge {
   private groupPins = new Map<string, string[]>();
   private messages = new Map<string, MessageRow[]>();
   private beforeSeq = new Map<string, number>();
-  private groupBefore = new Map<string, number>();
+  private groupBeforeSeq = new Map<string, number>();
   private favorites = new Set<string>();
   private reactions = new Map<string, AnnouncementReactionSummary>();
   private reactionActors = new Map<string, Map<string, ReactionState>>();
@@ -170,6 +171,7 @@ class WebLanternBridge {
   private attachmentHydrationFailures = new Map<string, number>();
   private attachmentDownloadQueue: Promise<void> = Promise.resolve();
   private pendingGroupSync: PendingGroupSync | null = null;
+  private accountGeneration = 0;
 
   private deviceId(): string {
     let value = window.localStorage.getItem(DEVICE_KEY);
@@ -238,6 +240,66 @@ class WebLanternBridge {
     (remember ? window.localStorage : window.sessionStorage).setItem(TOKEN_KEY, token);
   }
 
+  private resetAccountRuntimeState(): void {
+    this.accountGeneration += 1;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.intentionalClose = true;
+    const previousSocket = this.socket;
+    this.socket = null;
+    this.connecting = null;
+    previousSocket?.close();
+
+    const resetError = new Error('A sessão da conta foi encerrada.');
+    for (const pending of this.pending.values()) {
+      window.clearTimeout(pending.timer);
+      pending.reject(resetError);
+    }
+    this.pending.clear();
+    for (const pending of this.pendingFrames.values()) {
+      window.clearTimeout(pending.timer);
+      pending.reject(resetError);
+    }
+    this.pendingFrames.clear();
+    for (const pending of this.groupChunkPending.values()) {
+      window.clearTimeout(pending.timer);
+      pending.reject(resetError);
+    }
+    this.groupChunkPending.clear();
+    for (const download of this.attachmentDownloads.values()) {
+      window.clearTimeout(download.timer);
+      download.reject(resetError);
+    }
+    this.attachmentDownloads.clear();
+    this.finishGroupSync(resetError);
+
+    for (const item of this.files.values()) {
+      if (item.url) URL.revokeObjectURL(item.url);
+    }
+    this.directory.clear();
+    this.online.clear();
+    this.groups.clear();
+    this.groupMembers.clear();
+    this.groupPins.clear();
+    this.messages.clear();
+    this.beforeSeq.clear();
+    this.groupBeforeSeq.clear();
+    this.favorites.clear();
+    this.reactions.clear();
+    this.reactionActors.clear();
+    this.announcementReads.clear();
+    this.announcementReaders.clear();
+    this.unread = {};
+    this.activeConversation = 'announcements';
+    this.files.clear();
+    this.mediaMessages.clear();
+    this.attachmentDownloadByFileId.clear();
+    this.attachmentHydrationFailures.clear();
+    this.attachmentDownloadQueue = Promise.resolve();
+  }
+
   private async loadPreferences(): Promise<void> {
     const body = await this.http('/api/client/preferences');
     const preferences = asRecord(body.preferences);
@@ -284,6 +346,7 @@ class WebLanternBridge {
       // A conexão WebSocket ainda fornecerá o erro operacional apropriado.
     }
     this.intentionalClose = false;
+    const accountGeneration = this.accountGeneration;
     this.connecting = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(endpoint());
       this.socket = socket;
@@ -302,6 +365,7 @@ class WebLanternBridge {
         }
       }));
       socket.onmessage = (event) => {
+        if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
         const envelope = asRecord(JSON.parse(String(event.data)));
         if (envelope.type === 'relay:hello:ok') {
           window.clearTimeout(timeout);
@@ -316,11 +380,13 @@ class WebLanternBridge {
       };
       socket.onerror = () => {
         window.clearTimeout(timeout);
+        if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
         this.connecting = null;
         reject(new Error('Não foi possível conectar ao Relay.'));
       };
       socket.onclose = () => {
         window.clearTimeout(timeout);
+        if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
         this.finishGroupSync(new Error('Conexão encerrada durante a sincronização dos grupos.'));
         this.socket = null;
         this.connecting = null;
@@ -467,6 +533,7 @@ class WebLanternBridge {
       replyToFileName: payload.replyTo?.fileName || null, forwardedFromMessageId: payload.forwardedFromMessageId || null,
       editedAt: Number(payload.editedAt || 0) || null,
       announcementExpiresAt: Number(payload.announcementExpiresAt || 0) || null,
+      serverSeq: Number(frame.serverSeq || 0) || null,
       createdAt: Number(frame.createdAt || Date.now())
     };
   }
@@ -484,15 +551,29 @@ class WebLanternBridge {
       fileSha256: message.fileSha256 || null, filePath: null, status: 'delivered', reaction: null, deletedAt: null,
       replyToMessageId: reply.messageId || null, replyToSenderDeviceId: reply.senderDeviceId || null, replyToType: reply.type || null,
       replyToPreviewText: reply.previewText || null, replyToFileName: reply.fileName || null,
-      forwardedFromMessageId: message.forwardedFromMessageId || null, editedAt: null, createdAt: Number(message.createdAt || event.createdAt || Date.now())
+      forwardedFromMessageId: message.forwardedFromMessageId || null,
+      editedAt: null,
+      serverSeq: Number(event.seq || 0) || null,
+      createdAt: Number(event.createdAt || Date.now())
     };
   }
 
   private mergeMessage(row: MessageRow, emit = false): void {
     const rows = this.messages.get(row.conversationId) || [];
     const cached = rows.find((item) => item.messageId === row.messageId);
-    const merged = mergeAttachmentCache(row, cached);
-    const next = [...rows.filter((item) => item.messageId !== row.messageId), merged].sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+    const withAttachmentCache = mergeAttachmentCache(row, cached);
+    const merged =
+      cached && Number(cached.editedAt || 0) > Number(withAttachmentCache.editedAt || 0)
+        ? {
+            ...withAttachmentCache,
+            bodyText: cached.bodyText,
+            editedAt: cached.editedAt
+          }
+        : withAttachmentCache;
+    const next = sortCanonicalMessages([
+      ...rows.filter((item) => item.messageId !== row.messageId),
+      merged
+    ]);
     this.messages.set(row.conversationId, next);
     if (emit) {
       if (merged.conversationId !== this.activeConversation && merged.direction === 'in') this.unread[merged.conversationId] = (this.unread[merged.conversationId] || 0) + 1;
@@ -589,7 +670,9 @@ class WebLanternBridge {
     if (frame.type === 'chat:edit') {
       const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === payload.targetMessageId);
       if (existing) {
-        const updated = { ...existing, bodyText: String(payload.text || ''), editedAt: Number(payload.editedAt || frame.createdAt) };
+        const editedAt = Number(payload.editedAt || frame.createdAt);
+        if (Number(existing.editedAt || 0) > editedAt) return;
+        const updated = { ...existing, bodyText: String(payload.text || ''), editedAt };
         this.mergeMessage(updated);
         if (emit) this.emit({ type: 'message:updated', message: updated });
       }
@@ -634,7 +717,9 @@ class WebLanternBridge {
       const conversationId = `group:${event.groupId}`;
       const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === id);
       if (existing) {
-        const updated = { ...existing, bodyText: String(payload.text || ''), editedAt: Number(payload.editedAt || event.createdAt) };
+        const editedAt = Number(payload.editedAt || event.createdAt);
+        if (Number(existing.editedAt || 0) > editedAt) return;
+        const updated = { ...existing, bodyText: String(payload.text || ''), editedAt };
         this.mergeMessage(updated);
         this.emit({ type: 'message:updated', message: updated });
       }
@@ -690,6 +775,7 @@ class WebLanternBridge {
     for (const groupId of this.groups.keys()) {
       this.emit({ type: 'group:members', groupId, members: this.groupMembers.get(groupId) || [] });
       this.emit({ type: 'group:pins', groupId, messageIds: this.groupPins.get(groupId) || [] });
+      this.emit({ type: 'conversation:synchronized', conversationId: `group:${groupId}` });
     }
   }
 
@@ -717,11 +803,15 @@ class WebLanternBridge {
         this.emit({ type: 'peers:updated', peers: this.getOnlinePeersSync() });
         return;
       }
-      case 'relay:history:snapshot':
-        for (const frame of Array.isArray(payload.frames) ? payload.frames : []) {
-          this.applyCanonicalFrame(asRecord(frame));
+      case 'relay:history:snapshot': {
+        const frames = (Array.isArray(payload.frames) ? payload.frames : [])
+          .map(asRecord)
+          .filter((frame) => frame.messageId && frame.createdAt);
+        for (const frame of sortCanonicalMessages(frames)) {
+          this.applyCanonicalFrame(frame);
         }
         return;
+      }
       case 'relay:history:page':
       case 'relay:search:results':
       case 'relay:media:list:results':
@@ -748,7 +838,10 @@ class WebLanternBridge {
         return;
       }
       case 'relay:announcement:snapshot': {
-        for (const frame of Array.isArray(payload.frames) ? payload.frames : []) this.applyCanonicalFrame(asRecord(frame));
+        const frames = (Array.isArray(payload.frames) ? payload.frames : [])
+          .map(asRecord)
+          .filter((frame) => frame.messageId && frame.createdAt);
+        for (const frame of sortCanonicalMessages(frames)) this.applyCanonicalFrame(frame);
         const serverTime = Number(payload.serverTime || Date.now());
         const reactions = asRecord(payload.reactions);
         const reads = asRecord(payload.reads);
@@ -919,16 +1012,16 @@ class WebLanternBridge {
     return replyTo ? { ...replyTo } : null;
   }
 
-  private async sendFrame(frame: Json): Promise<void> {
+  private async sendFrame(frame: Json): Promise<Json> {
     await this.connect();
     const frameMessageId = String(frame.messageId || '');
     if (!frameMessageId) throw new Error('Mensagem sem identificador para confirmação.');
-    await new Promise<void>((resolve, reject) => {
+    return new Promise<Json>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pendingFrames.delete(frameMessageId);
         reject(new Error('O Relay não confirmou a operação.'));
       }, 15_000);
-      this.pendingFrames.set(frameMessageId, { resolve: () => resolve(), reject, timer });
+      this.pendingFrames.set(frameMessageId, { resolve, reject, timer });
       try {
         this.send('relay:send', { frame });
       } catch (error) {
@@ -939,9 +1032,22 @@ class WebLanternBridge {
     });
   }
 
+  private frameWithCanonicalReceipt(frame: Json, receipt: Json): Json {
+    const serverSeq = Number(receipt.serverSeq);
+    const createdAt = Number(receipt.createdAt);
+    return {
+      ...frame,
+      serverSeq: Number.isFinite(serverSeq) && serverSeq > 0 ? Math.trunc(serverSeq) : frame.serverSeq,
+      createdAt: Number.isFinite(createdAt) && createdAt > 0 ? Math.trunc(createdAt) : frame.createdAt
+    };
+  }
+
   private async dmText(peerId: string, text: string, replyTo?: MessageReplyReference | null): Promise<MessageRow> {
     const frame = { type: 'chat:text', messageId: uuid(), from: this.user!.userId, to: peerId, createdAt: Date.now(), payload: { text, replyTo: this.reply(replyTo), forwardedFromMessageId: null } };
-    await this.sendFrame(frame); const row = this.messageFromFrame(frame)!; this.mergeMessage(row); return row;
+    const receipt = await this.sendFrame(frame);
+    const row = this.messageFromFrame(this.frameWithCanonicalReceipt(frame, receipt))!;
+    this.mergeMessage(row);
+    return row;
   }
 
   private async groupAction(action: string, data: Json): Promise<Json> {
@@ -1064,8 +1170,11 @@ class WebLanternBridge {
       createdAt: Date.now(),
       payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), forwardedFromMessageId: forwardedFromMessageId || null }
     };
-    await this.sendFrame(frame);
-    const row = { ...this.messageFromFrame(frame)!, filePath };
+    const receipt = await this.sendFrame(frame);
+    const row = {
+      ...this.messageFromFrame(this.frameWithCanonicalReceipt(frame, receipt))!,
+      filePath
+    };
     this.mergeMessage(row);
     return row;
   }
@@ -1077,19 +1186,30 @@ class WebLanternBridge {
         if (!this.token) return this.authState();
         try {
           const body = await this.http('/api/client/session');
-          this.user = body.user as AuthenticatedUser;
+          const nextUser = body.user as AuthenticatedUser;
+          if (this.user && this.user.userId !== nextUser.userId) {
+            this.resetAccountRuntimeState();
+          }
+          this.user = nextUser;
           if (!this.user.passwordSetupRequired) {
             await this.loadPreferences();
             await this.connect();
             this.requestNotificationPermission();
           }
         }
-        catch { this.token = ''; window.localStorage.removeItem(TOKEN_KEY); window.sessionStorage.removeItem(TOKEN_KEY); this.user = null; }
+        catch {
+          this.token = '';
+          this.user = null;
+          window.localStorage.removeItem(TOKEN_KEY);
+          window.sessionStorage.removeItem(TOKEN_KEY);
+          this.resetAccountRuntimeState();
+        }
         return this.authState();
       },
       discoverRelays: async () => [{ host: window.location.hostname, port: RELAY_PORT, secure: window.location.protocol === 'https:' }],
       login: async ({ username, password, rememberMe = true }) => {
         const body = await this.http('/api/client/login', { method: 'POST', body: JSON.stringify({ username, password, deviceId: this.deviceId() }) }, false);
+        this.resetAccountRuntimeState();
         this.token = String(body.token); this.user = body.user as AuthenticatedUser; this.saveToken(this.token, rememberMe);
         if (!this.user.passwordSetupRequired) {
           await this.loadPreferences();
@@ -1205,9 +1325,29 @@ class WebLanternBridge {
         return this.api().getLocalStorageUsage();
       },
       sendText: (peerId, text, replyTo) => this.dmText(peerId, text, replyTo),
-      sendGroupText: async (groupId, text, replyTo) => { const messageId = uuid(); const createdAt = Date.now(); await this.groupAction('sendText', { groupId, messageId, createdAt, text, replyTo: this.reply(replyTo) }); const row = this.groupMessageFromEvent({ type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'text', senderDeviceId: this.user!.userId, bodyText: text, replyTo, createdAt } } })!; this.mergeMessage(row); return row; },
+      sendGroupText: async (groupId, text, replyTo) => {
+        const messageId = uuid();
+        const createdAt = Date.now();
+        const result = await this.groupAction('sendText', {
+          groupId, messageId, createdAt, text, replyTo: this.reply(replyTo)
+        });
+        const event = asRecord(result.event);
+        const row = this.groupMessageFromEvent(
+          event.eventId
+            ? event
+            : { type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'text', senderDeviceId: this.user!.userId, bodyText: text, replyTo, createdAt } } }
+        )!;
+        this.mergeMessage(row);
+        return row;
+      },
       sendTyping: async (peerId, isTyping) => { await this.sendFrame({ type: 'typing', messageId: uuid(), from: this.user!.userId, to: peerId, createdAt: Date.now(), payload: { isTyping } }); },
-      sendAnnouncement: async (text, replyTo) => { const frame = { type: 'announce', messageId: uuid(), from: this.user!.userId, to: null, createdAt: Date.now(), payload: { text, replyTo: this.reply(replyTo) } }; await this.sendFrame(frame); const row = this.messageFromFrame(frame)!; this.mergeMessage(row); return row; },
+      sendAnnouncement: async (text, replyTo) => {
+        const frame = { type: 'announce', messageId: uuid(), from: this.user!.userId, to: null, createdAt: Date.now(), payload: { text, replyTo: this.reply(replyTo) } };
+        const receipt = await this.sendFrame(frame);
+        const row = this.messageFromFrame(this.frameWithCanonicalReceipt(frame, receipt))!;
+        this.mergeMessage(row);
+        return row;
+      },
       sendAnnouncementFile: (filePath, replyTo) => this.sendCanonicalFile(null, filePath, replyTo),
       sendFile: (peerId, filePath, replyTo) => this.sendCanonicalFile(peerId, filePath, replyTo),
       sendGroupFile: async (groupId, filePath, replyTo) => {
@@ -1222,8 +1362,13 @@ class WebLanternBridge {
             this.send('relay:group:file:chunk', { fileId, index, total, dataBase64: this.bytesBase64(bytes) });
           });
         });
-        await this.request('relay:group:file:complete', { fileId }, 30_000);
-        const row = this.groupMessageFromEvent({ type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'file', senderDeviceId: this.user!.userId, fileId, fileName: file.name, fileSize: file.size, fileSha256: sha256, replyTo, createdAt } } })!;
+        const completed = await this.request('relay:group:file:complete', { fileId }, 30_000);
+        const canonicalEvent = asRecord(completed.event);
+        const row = this.groupMessageFromEvent(
+          canonicalEvent.eventId
+            ? canonicalEvent
+            : { type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'file', senderDeviceId: this.user!.userId, fileId, fileName: file.name, fileSize: file.size, fileSha256: sha256, replyTo, createdAt } } }
+        )!;
         const ready = { ...row, filePath }; this.mergeMessage(ready); return ready;
       },
       forwardMessageToPeer: async (targetPeerId, sourceMessageId) => {
@@ -1231,7 +1376,10 @@ class WebLanternBridge {
         if (!source) throw new Error('Mensagem não encontrada.');
         if (source.type !== 'file') {
           const frame = { type: 'chat:text', messageId: uuid(), from: this.user!.userId, to: targetPeerId, createdAt: Date.now(), payload: { text: source.bodyText || '', replyTo: null, forwardedFromMessageId: source.messageId } };
-          await this.sendFrame(frame); const row = this.messageFromFrame(frame)!; this.mergeMessage(row); return row;
+          const receipt = await this.sendFrame(frame);
+          const row = this.messageFromFrame(this.frameWithCanonicalReceipt(frame, receipt))!;
+          this.mergeMessage(row);
+          return row;
         }
         const available = source.filePath ? source : await this.downloadAttachment(source);
         if (!available.filePath) throw new Error('O anexo não pôde ser recuperado do Relay.');
@@ -1256,7 +1404,6 @@ class WebLanternBridge {
         return (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null;
       },
       deleteMessageForEveryone: async (conversationId, messageId) => { if (conversationId.startsWith('group:')) await this.groupAction('deleteMessage', { groupId: conversationId.slice(6), targetMessageId: messageId }); else { const to = conversationId === 'announcements' ? null : conversationId.slice(3); await this.sendFrame({ type: 'chat:delete', messageId: uuid(), from: this.user!.userId, to, createdAt: Date.now(), payload: { targetMessageId: messageId } }); } const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null; this.messages.set(conversationId, (this.messages.get(conversationId) || []).filter((item) => item.messageId !== messageId)); return existing; },
-      deleteMessageForMe: async (conversationId, messageId) => { await this.http('/api/client/preferences/message', { method: 'PUT', body: JSON.stringify({ messageId, hidden: true }) }); const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null; this.messages.set(conversationId, (this.messages.get(conversationId) || []).filter((item) => item.messageId !== messageId)); return existing; },
       toggleMessageFavorite: async (_conversationId, messageId, favorite) => { await this.http('/api/client/preferences/message', { method: 'PUT', body: JSON.stringify({ messageId, favorite }) }); favorite ? this.favorites.add(messageId) : this.favorites.delete(messageId); return favorite; },
       getMessageFavorites: async (ids) => Object.fromEntries(ids.map((id) => [id, this.favorites.has(id)])),
       getFavoriteMessages: async (conversationId) => {
@@ -1282,12 +1429,70 @@ class WebLanternBridge {
         // Uma falha de rede nunca pode transformar reparo em limpeza de conversa.
         await this.api().getMessages(conversationId, 80);
       },
-      getMessages: async (conversationId, limit, before) => {
+      getMessages: async (conversationId, limit, before, beforeSeq) => {
         await this.connect();
-        if (conversationId.startsWith('dm:')) { const result = await this.request('relay:history:request', { peerUserId: conversationId.slice(3), before: before || Number.MAX_SAFE_INTEGER, beforeSeq: this.beforeSeq.get(conversationId) || Number.MAX_SAFE_INTEGER, limit }); const frames = Array.isArray(result.frames) ? result.frames.map(asRecord) : []; const seqs = frames.map((frame) => Number(frame.serverSeq)).filter(Number.isFinite); if (seqs.length) this.beforeSeq.set(conversationId, Math.min(...seqs)); for (const frame of frames) this.applyCanonicalFrame(frame); }
-        if (conversationId.startsWith('group:')) { const groupId = conversationId.slice(6); const result = await this.groupAction('history', { groupId, before: before || this.groupBefore.get(conversationId) || Number.MAX_SAFE_INTEGER, limit }); const events = Array.isArray(result.events) ? result.events.map(asRecord) : []; for (const event of events) this.applyGroupEvent(event); const times = events.map((event) => Number(event.createdAt)).filter(Number.isFinite); if (times.length) this.groupBefore.set(conversationId, Math.min(...times)); }
-        const rows = (this.messages.get(conversationId) || []).filter((item) => !before || item.createdAt < before).slice(-limit);
-        return (this.messages.get(conversationId) || []).filter((item) => rows.some((row) => row.messageId === item.messageId));
+        const explicitBeforeSeq =
+          Number.isFinite(beforeSeq) && Number(beforeSeq) > 0
+            ? Math.trunc(Number(beforeSeq))
+            : null;
+        let resolvedBeforeSeq = explicitBeforeSeq;
+        if (conversationId.startsWith('dm:')) {
+          const requestedBeforeSeq = before
+            ? explicitBeforeSeq || this.beforeSeq.get(conversationId) || Number.MAX_SAFE_INTEGER
+            : Number.MAX_SAFE_INTEGER;
+          if (before && requestedBeforeSeq < Number.MAX_SAFE_INTEGER) {
+            resolvedBeforeSeq = requestedBeforeSeq;
+          }
+          const result = await this.request('relay:history:request', {
+            peerUserId: conversationId.slice(3),
+            before: before || Number.MAX_SAFE_INTEGER,
+            beforeSeq: requestedBeforeSeq,
+            limit
+          });
+          const frames = Array.isArray(result.frames) ? result.frames.map(asRecord) : [];
+          const baseSeqs = frames
+            .filter((frame) => frame.type === 'chat:text' || frame.type === 'file:offer')
+            .map((frame) => Number(frame.serverSeq))
+            .filter((value) => Number.isFinite(value) && value > 0);
+          if (baseSeqs.length) this.beforeSeq.set(conversationId, Math.min(...baseSeqs));
+          for (const frame of frames) this.applyCanonicalFrame(frame);
+        }
+        if (conversationId.startsWith('group:')) {
+          const groupId = conversationId.slice(6);
+          const requestedBeforeSeq = before
+            ? explicitBeforeSeq || this.groupBeforeSeq.get(conversationId) || Number.MAX_SAFE_INTEGER
+            : Number.MAX_SAFE_INTEGER;
+          if (before && requestedBeforeSeq < Number.MAX_SAFE_INTEGER) {
+            resolvedBeforeSeq = requestedBeforeSeq;
+          }
+          const result = await this.groupAction('history', {
+            groupId,
+            before: before || Number.MAX_SAFE_INTEGER,
+            beforeSeq: requestedBeforeSeq,
+            limit
+          });
+          const events = Array.isArray(result.events) ? result.events.map(asRecord) : [];
+          for (const event of events) this.applyGroupEvent(event);
+          const sequences = events
+            .filter((event) => event.type === 'group.message.created')
+            .map((event) => Number(event.seq))
+            .filter((value) => Number.isFinite(value) && value > 0);
+          if (sequences.length) this.groupBeforeSeq.set(conversationId, Math.min(...sequences));
+        }
+        const cachedRows = this.messages.get(conversationId) || [];
+        const rows = cachedRows
+          .filter((item) => {
+            if (!before) return true;
+            if (resolvedBeforeSeq !== null) {
+              const itemSeq = Number(item.serverSeq);
+              if (Number.isFinite(itemSeq) && itemSeq > 0) return itemSeq < resolvedBeforeSeq;
+              return item.createdAt < before;
+            }
+            return item.createdAt < before;
+          })
+          .slice(-limit);
+        const rowIds = new Set(rows.map((row) => row.messageId));
+        return cachedRows.filter((item) => rowIds.has(item.messageId));
       },
       getMessagesByIds: async (ids) => {
         const rowsById = new Map(Array.from(this.messages.values()).flat().map((item) => [item.messageId, item]));
@@ -1499,9 +1704,11 @@ class WebLanternBridge {
   }
 
   async logout(): Promise<void> {
-    const token = this.token; this.intentionalClose = true; this.token = ''; this.user = null;
+    const token = this.token;
+    this.token = '';
+    this.user = null;
     window.localStorage.removeItem(TOKEN_KEY); window.sessionStorage.removeItem(TOKEN_KEY);
-    if (this.socket) this.socket.close();
+    this.resetAccountRuntimeState();
     if (token) await fetch('/api/client/logout', { method: 'POST', headers: { authorization: `Bearer ${token}` } }).catch(() => undefined);
     this.emit({ type: 'auth:changed', state: this.authState() });
   }
