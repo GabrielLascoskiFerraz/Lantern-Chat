@@ -5176,7 +5176,8 @@ export class LanternRelay {
               size: asFiniteNumber(offerRecord?.size) || 0,
               sha256: asString(offerRecord?.sha256) || '',
               replyTo: offerRecord?.replyTo || null,
-              forwardedFromMessageId: asString(offerRecord?.forwardedFromMessageId)
+              forwardedFromMessageId: asString(offerRecord?.forwardedFromMessageId),
+              albumId: asString(offerRecord?.albumId)
             }
           });
           response = { metadata: upload.metadata, nextIndex: upload.nextIndex };
@@ -5290,6 +5291,7 @@ export class LanternRelay {
             fileSha256: metadata.sha256,
             replyTo: metadata.replyTo || null,
             forwardedFromMessageId: metadata.forwardedFromMessageId || null,
+            albumId: metadata.albumId || null,
             createdAt: metadata.createdAt
           },
           attachment: metadata

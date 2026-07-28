@@ -83,6 +83,7 @@ export interface RelayGroupAttachmentMetadata {
   receivedByDeviceId: Record<string, number>;
   replyTo?: unknown;
   forwardedFromMessageId?: string | null;
+  albumId?: string | null;
   uploadedAt: number | null;
   deletedAt: number | null;
 }
@@ -103,4 +104,5 @@ export interface RelayGroupFileOffer {
   sha256: string;
   replyTo?: unknown;
   forwardedFromMessageId?: string | null;
+  albumId?: string | null;
 }

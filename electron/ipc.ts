@@ -128,16 +128,19 @@ export interface IpcBindings {
     filePath: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
+  sendAnnouncementFiles: (filePaths: string[], replyTo?: MessageReplyPayload | null) => Promise<DbMessage[]>;
   sendFile: (
     peerId: string,
     filePath: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
+  sendFiles: (peerId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) => Promise<DbMessage[]>;
   sendGroupFile: (
     groupId: string,
     filePath: string,
     replyTo?: MessageReplyPayload | null
   ) => Promise<DbMessage>;
+  sendGroupFiles: (groupId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) => Promise<DbMessage[]>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<DbMessage>;
   editMessage: (conversationId: string, messageId: string, text: string) => Promise<DbMessage | null>;
   reactToMessage: (
@@ -196,6 +199,7 @@ export interface IpcBindings {
   getConversations: () => Record<string, number>;
   getArchivedConversationIds: () => string[];
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
+  saveAlbumToDirectory: (files: Array<{ filePath: string; fileName: string }>) => Promise<{ saved: number; canceled: boolean }>;
   getUpdateState: () => AppUpdateState;
   forceUpdate: () => Promise<AppUpdateState>;
   installUpdate: () => Promise<void>;
@@ -487,8 +491,18 @@ export const registerIpc = (
     (_event, groupId: string, deviceId: string, role: 'admin' | 'member') =>
       bindings.setGroupMemberRole(groupId, deviceId, role)
   );
+  ipcMain.handle(
+    'lantern:sendAnnouncementFiles',
+    (_event, filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+      bindings.sendAnnouncementFiles(filePaths, replyTo)
+  );
   ipcMain.handle('lantern:transferGroupOwnership', (_event, groupId: string, deviceId: string) =>
     bindings.transferGroupOwnership(groupId, deviceId)
+  );
+  ipcMain.handle(
+    'lantern:sendFiles',
+    (_event, peerId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+      bindings.sendFiles(peerId, filePaths, replyTo)
   );
   ipcMain.handle('lantern:deleteGroup', (_event, groupId: string) => bindings.deleteGroup(groupId));
   ipcMain.handle('lantern:leaveGroup', (_event, groupId: string) => bindings.leaveGroup(groupId));
@@ -496,6 +510,11 @@ export const registerIpc = (
     'lantern:setGroupMessagePinned',
     (_event, groupId: string, messageId: string, pinned: boolean) =>
       bindings.setGroupMessagePinned(groupId, messageId, pinned)
+  );
+  ipcMain.handle(
+    'lantern:sendGroupFiles',
+    (_event, groupId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+      bindings.sendGroupFiles(groupId, filePaths, replyTo)
   );
   ipcMain.handle('lantern:getRelaySettings', () => bindings.getRelaySettings());
   ipcMain.handle('lantern:getStartupSettings', () => bindings.getStartupSettings());
@@ -670,6 +689,9 @@ export const registerIpc = (
   );
   ipcMain.handle('lantern:saveFileAs', (_event, filePath: string, fileName?: string) =>
     bindings.saveFileAs(filePath, fileName)
+  );
+  ipcMain.handle('lantern:saveAlbumToDirectory', (_event, files: Array<{ filePath: string; fileName: string }>) =>
+    bindings.saveAlbumToDirectory(files)
   );
 
   ipcMain.handle('lantern:pickFile', async () => {

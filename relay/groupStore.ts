@@ -357,6 +357,10 @@ export class GroupStore {
         typeof value.forwardedFromMessageId === 'string' && value.forwardedFromMessageId.trim()
           ? value.forwardedFromMessageId.trim()
           : null,
+      albumId:
+        typeof value.albumId === 'string' && value.albumId.trim()
+          ? value.albumId.trim()
+          : null,
       uploadedAt: value.uploadedAt && value.uploadedAt > 0 ? Math.trunc(value.uploadedAt) : null,
       deletedAt: value.deletedAt && value.deletedAt > 0 ? Math.trunc(value.deletedAt) : null
     };
@@ -1206,6 +1210,7 @@ export class GroupStore {
       },
       replyTo: input.offer.replyTo,
       forwardedFromMessageId: input.offer.forwardedFromMessageId || null,
+      albumId: input.offer.albumId || null,
       uploadedAt: null,
       deletedAt: null
     };

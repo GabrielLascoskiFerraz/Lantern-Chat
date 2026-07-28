@@ -74,6 +74,28 @@ test('ACK do Relay promove mensagem pendente para entregue antes da leitura', ()
   }
 });
 
+test('mensagens de álbum preservam o identificador ao reabrir o cache local', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-album-message-'));
+  try {
+    const db = new DbService(root);
+    const conversationId = db.ensureDmConversation('recipient', 'Destinatário');
+    db.saveMessage({
+      messageId: 'album-photo-1', conversationId, direction: 'out', senderDeviceId: 'sender', receiverDeviceId: 'recipient',
+      type: 'file', bodyText: null, fileId: 'photo-1', fileName: 'foto.png', fileSize: 12, fileSha256: 'abc', filePath: null,
+      albumId: 'album-123', status: 'delivered', reaction: null, deletedAt: null, replyToMessageId: null,
+      replyToSenderDeviceId: null, replyToType: null, replyToPreviewText: null, replyToFileName: null,
+      forwardedFromMessageId: null, editedAt: null, createdAt: Date.now()
+    });
+    assert.equal(db.getMessageById('album-photo-1').albumId, 'album-123');
+    db.close();
+    const reopened = new DbService(root);
+    assert.equal(reopened.getMessageById('album-photo-1').albumId, 'album-123');
+    reopened.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('limpeza de anexos remove apenas caminhos locais recebidos e preserva as mensagens', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-attachment-cache-clear-'));
   try {

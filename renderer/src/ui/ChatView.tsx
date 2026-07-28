@@ -3,6 +3,7 @@ import {
   ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState
@@ -58,6 +59,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ConversationMediaDialog } from './ConversationMediaDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { MessageAlbum } from './MessageAlbum';
 import { PlatformEmoji, PlatformEmojiText } from './PlatformEmoji';
 import {
   isImageAttachmentName,
@@ -101,6 +103,7 @@ interface ChatViewProps {
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onTyping: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onSendFiles?: (filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   onForwardMessage: (targetPeerIds: string[], sourceMessageId: string) => Promise<void>;
   onReactToMessage: (messageId: string, reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null) => Promise<void>;
   onEditMessage: (messageId: string, text: string) => Promise<void>;
@@ -320,6 +323,7 @@ export const ChatView = ({
   onSend,
   onTyping,
   onSendFile,
+  onSendFiles,
   onForwardMessage,
   onReactToMessage,
   onEditMessage,
@@ -397,9 +401,11 @@ export const ChatView = ({
   } | null>(null);
   const [jumpHighlightMessageId, setJumpHighlightMessageId] = useState<string | null>(null);
   const [unreadSeparatorState, setUnreadSeparatorState] = useState<'hidden' | 'visible' | 'leaving'>('hidden');
+  const [viewportRestoreRevision, setViewportRestoreRevision] = useState(0);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const historyTopSentinelRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchCloseTimerRef = useRef<number | null>(null);
   const matchRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -537,7 +543,6 @@ export const ChatView = ({
   const lastMessageIdRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
   const forceScrollOnOpenRef = useRef(false);
-  const forceScrollTimeoutRef = useRef<number | null>(null);
   const forceFollowAfterPasteRef = useRef(false);
   const forceFollowAfterPasteTimeoutRef = useRef<number | null>(null);
   const hasMoreOlderRef = useRef(hasMoreOlder);
@@ -546,8 +551,13 @@ export const ChatView = ({
   const previousFavoritesOnlyRef = useRef(false);
   const userNavigatingHistoryRef = useRef(false);
   const viewportAnchorRef = useRef<{ messageId: string; offset: number } | null>(null);
-  const viewportAnchorTimeoutRef = useRef<number | null>(null);
+  const viewportFallbackRef = useRef<{
+    previousHeight: number;
+    previousTop: number;
+    interactionVersion: number;
+  } | null>(null);
   const restoringViewportAnchorRef = useRef(false);
+  const scrollInteractionVersionRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
 
   const displayedMessages = useMemo(
@@ -864,10 +874,6 @@ export const ChatView = ({
 
     stickToBottomRef.current = true;
     forceScrollOnOpenRef.current = true;
-    if (forceScrollTimeoutRef.current) {
-      window.clearTimeout(forceScrollTimeoutRef.current);
-      forceScrollTimeoutRef.current = null;
-    }
 
     const forceBottom = () => {
       const node = messagesScrollRef.current;
@@ -880,13 +886,9 @@ export const ChatView = ({
       forceBottom();
       window.requestAnimationFrame(() => {
         forceBottom();
+        forceScrollOnOpenRef.current = false;
       });
     });
-
-    forceScrollTimeoutRef.current = window.setTimeout(() => {
-      forceScrollOnOpenRef.current = false;
-      forceScrollTimeoutRef.current = null;
-    }, 1200);
   }, [favoritesOnly]);
 
   useEffect(() => {
@@ -985,30 +987,26 @@ export const ChatView = ({
     if (!node) return;
     node.scrollTo({ top: node.scrollHeight, behavior });
     stickToBottomRef.current = true;
+    userNavigatingHistoryRef.current = false;
   };
 
   const maybeFollowBottom = (force = false, behavior: ScrollBehavior = 'auto'): void => {
+    // Depois que o usuário começa a subir, "perto do fim" não significa que
+    // deseja voltar ao fim. A intenção manual só termina quando ele rola para
+    // baixo novamente ou quando uma ação explícita força a navegação.
+    if (userNavigatingHistoryRef.current && !force) return;
     if (force || stickToBottomRef.current || isNearBottom()) {
       scrollToBottom(behavior);
     }
-  };
-
-  const isComposerFocused = (): boolean => {
-    const root = paneRootRef.current;
-    if (!root) return false;
-    const active = document.activeElement;
-    if (!(active instanceof HTMLElement)) return false;
-    const textarea = root.querySelector('.composer textarea');
-    return textarea instanceof HTMLTextAreaElement && active === textarea;
   };
 
   const handleComposerPaste = useCallback(() => {
     const node = messagesScrollRef.current;
     if (!node) return;
     const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
-    if (gap <= 160) {
-      stickToBottomRef.current = true;
-    }
+    const shouldFollow = gap <= 160 && !userNavigatingHistoryRef.current;
+    if (!shouldFollow) return;
+    stickToBottomRef.current = true;
     forceFollowAfterPasteRef.current = true;
     if (forceFollowAfterPasteTimeoutRef.current) {
       window.clearTimeout(forceFollowAfterPasteTimeoutRef.current);
@@ -1027,61 +1025,54 @@ export const ChatView = ({
   }, []);
 
   const cancelForcedBottomFollow = useCallback(() => {
+    scrollInteractionVersionRef.current += 1;
     userNavigatingHistoryRef.current = true;
     forceScrollOnOpenRef.current = false;
+    forceFollowAfterPasteRef.current = false;
     stickToBottomRef.current = false;
-    if (forceScrollTimeoutRef.current) {
-      window.clearTimeout(forceScrollTimeoutRef.current);
-      forceScrollTimeoutRef.current = null;
+    if (forceFollowAfterPasteTimeoutRef.current) {
+      window.clearTimeout(forceFollowAfterPasteTimeoutRef.current);
+      forceFollowAfterPasteTimeoutRef.current = null;
     }
   }, []);
 
-  const captureViewportAnchor = useCallback(() => {
+  const captureViewportAnchor = useCallback((): { messageId: string; offset: number } | null => {
     const node = messagesScrollRef.current;
-    if (!node) return;
-    const containerTop = node.getBoundingClientRect().top;
+    if (!node) return null;
+    const containerRect = node.getBoundingClientRect();
+    const sampleXs = [
+      containerRect.left + Math.min(24, containerRect.width / 4),
+      containerRect.left + containerRect.width / 2,
+      containerRect.right - Math.min(24, containerRect.width / 4)
+    ];
+    const sampleYs = [
+      containerRect.top + 2,
+      containerRect.top + 14,
+      Math.min(containerRect.bottom - 2, containerRect.top + 44)
+    ];
     let selected: { messageId: string; offset: number; top: number } | null = null;
-    for (const [messageId, row] of Object.entries(messageRowRefs.current)) {
-      if (!row) continue;
-      const rect = row.getBoundingClientRect();
-      if (rect.bottom <= containerTop + 1) continue;
-      if (!selected || rect.top < selected.top) {
-        selected = {
-          messageId,
-          offset: rect.top - containerTop,
-          top: rect.top
-        };
+
+    for (const y of sampleYs) {
+      for (const x of sampleXs) {
+        const hit = document.elementFromPoint(x, y);
+        const row = hit?.closest<HTMLElement>('[data-message-id]');
+        if (!row || !node.contains(row)) continue;
+        const messageId = row.dataset.messageId;
+        if (!messageId) continue;
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom <= containerRect.top + 1) continue;
+        if (!selected || rect.top < selected.top) {
+          selected = {
+            messageId,
+            offset: rect.top - containerRect.top,
+            top: rect.top
+          };
+        }
       }
     }
-    viewportAnchorRef.current = selected
+    return selected
       ? { messageId: selected.messageId, offset: selected.offset }
       : null;
-  }, []);
-
-  const restoreViewportAnchor = useCallback(() => {
-    const node = messagesScrollRef.current;
-    const anchor = viewportAnchorRef.current;
-    if (!node || !anchor) return;
-    const row = messageRowRefs.current[anchor.messageId];
-    if (!row) return;
-    const containerTop = node.getBoundingClientRect().top;
-    const delta = row.getBoundingClientRect().top - containerTop - anchor.offset;
-    if (Math.abs(delta) <= 0.5) return;
-    restoringViewportAnchorRef.current = true;
-    node.scrollTop += delta;
-    window.requestAnimationFrame(() => {
-      restoringViewportAnchorRef.current = false;
-    });
-  }, []);
-
-  const keepViewportAnchorDuringHydration = useCallback(() => {
-    if (viewportAnchorTimeoutRef.current) {
-      window.clearTimeout(viewportAnchorTimeoutRef.current);
-    }
-    viewportAnchorTimeoutRef.current = window.setTimeout(() => {
-      viewportAnchorRef.current = null;
-      viewportAnchorTimeoutRef.current = null;
-    }, 2_000);
   }, []);
 
   const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
@@ -1091,35 +1082,68 @@ export const ChatView = ({
     if (loadingOlderRef.current) return 0;
     if (!hasMoreOlderRef.current) return 0;
 
-    captureViewportAnchor();
+    // O único momento em que corrigimos a posição é logo após inserir a página
+    // anterior. Manter uma âncora durante segundos entrava em disputa com a
+    // rolagem manual e fazia a conversa "tremer" enquanto prévias carregavam.
+    const interactionVersion = scrollInteractionVersionRef.current;
+    viewportAnchorRef.current = captureViewportAnchor();
     const previousHeight = node.scrollHeight;
     const previousTop = node.scrollTop;
+    loadingOlderRef.current = true;
     const loadedCount = await onLoadOlderMessages();
-    if (loadedCount <= 0) return 0;
-
-    await new Promise<void>((resolve) => {
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => resolve());
-      });
-    });
-
-    const nextNode = messagesScrollRef.current;
-    if (!nextNode) return loadedCount;
-    if (viewportAnchorRef.current) restoreViewportAnchor();
-    else {
-      const delta = nextNode.scrollHeight - previousHeight;
-      if (delta > 0) nextNode.scrollTop = previousTop + delta;
+    loadingOlderRef.current = false;
+    if (loadedCount <= 0) {
+      viewportAnchorRef.current = null;
+      viewportFallbackRef.current = null;
+      return 0;
     }
-    keepViewportAnchorDuringHydration();
+    if (interactionVersion !== scrollInteractionVersionRef.current) {
+      viewportAnchorRef.current = null;
+      viewportFallbackRef.current = null;
+      return loadedCount;
+    }
+    viewportFallbackRef.current = { previousHeight, previousTop, interactionVersion };
+    setViewportRestoreRevision((current) => current + 1);
     return loadedCount;
   }, [
     captureViewportAnchor,
     favoritesOnly,
-    keepViewportAnchorDuringHydration,
     onLoadOlderMessages,
-    pinnedOnly,
-    restoreViewportAnchor
+    pinnedOnly
   ]);
+
+  useLayoutEffect(() => {
+    void viewportRestoreRevision;
+    const node = messagesScrollRef.current;
+    const fallback = viewportFallbackRef.current;
+    if (!node || !fallback) return;
+    if (fallback.interactionVersion !== scrollInteractionVersionRef.current) {
+      viewportAnchorRef.current = null;
+      viewportFallbackRef.current = null;
+      return;
+    }
+
+    const anchor = viewportAnchorRef.current;
+    const row = anchor ? messageRowRefs.current[anchor.messageId] : null;
+    restoringViewportAnchorRef.current = true;
+    if (anchor && row) {
+      const containerTop = node.getBoundingClientRect().top;
+      const delta = row.getBoundingClientRect().top - containerTop - anchor.offset;
+      if (Math.abs(delta) > 0.5) node.scrollTop += delta;
+    } else {
+      const delta = node.scrollHeight - fallback.previousHeight;
+      if (delta > 0) node.scrollTop = fallback.previousTop + delta;
+    }
+    viewportAnchorRef.current = null;
+    viewportFallbackRef.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      restoringViewportAnchorRef.current = false;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      restoringViewportAnchorRef.current = false;
+    };
+  }, [viewportRestoreRevision]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -1133,7 +1157,9 @@ export const ChatView = ({
       };
     };
 
-    const onScroll = () => {
+    let scrollFrame: number | null = null;
+    const processScroll = () => {
+      scrollFrame = null;
       const previous = scrollMetricsRef.current;
       const current = {
         top: node.scrollTop,
@@ -1148,24 +1174,27 @@ export const ChatView = ({
       const userMovedUp =
         !restoringViewportAnchorRef.current &&
         current.top < previous.top - 1;
+      const userMovedDown =
+        !restoringViewportAnchorRef.current &&
+        current.top > previous.top + 1;
       if (userMovedUp) {
         cancelForcedBottomFollow();
-        captureViewportAnchor();
-        keepViewportAnchorDuringHydration();
       }
       stickToBottomRef.current = layoutShiftOnly
         ? true
         : userNavigatingHistoryRef.current
           ? false
           : isNearBottom();
-      if (isNearBottom()) {
+      if (isNearBottom() && !userMovedUp && userMovedDown) {
         userNavigatingHistoryRef.current = false;
         viewportAnchorRef.current = null;
-      }
-      if (node.scrollTop <= 56 && hasMoreOlderRef.current && !loadingOlderRef.current) {
-        void loadOlderWithViewportLock();
+        stickToBottomRef.current = true;
       }
       scrollMetricsRef.current = current;
+    };
+    const onScroll = () => {
+      if (scrollFrame !== null) return;
+      scrollFrame = window.requestAnimationFrame(processScroll);
     };
 
     stickToBottomRef.current = isNearBottom();
@@ -1192,6 +1221,7 @@ export const ChatView = ({
     node.addEventListener('touchstart', onTouchStart, { passive: true });
     node.addEventListener('touchmove', onTouchMove, { passive: true });
     return () => {
+      if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
       node.removeEventListener('scroll', onScroll);
       node.removeEventListener('wheel', onWheel);
       node.removeEventListener('touchstart', onTouchStart);
@@ -1199,10 +1229,47 @@ export const ChatView = ({
     };
   }, [
     cancelForcedBottomFollow,
-    captureViewportAnchor,
-    keepViewportAnchorDuringHydration,
-    loadOlderWithViewportLock,
     peer?.deviceId
+  ]);
+
+  useEffect(() => {
+    const node = messagesScrollRef.current;
+    const sentinel = historyTopSentinelRef.current;
+    if (
+      !node ||
+      !sentinel ||
+      favoritesOnly ||
+      pinnedOnly ||
+      normalizedQuery ||
+      typeof IntersectionObserver === 'undefined'
+    ) {
+      return;
+    }
+    let deferredFrame: number | null = null;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        if (deferredFrame !== null) window.cancelAnimationFrame(deferredFrame);
+        deferredFrame = window.requestAnimationFrame(() => {
+          deferredFrame = null;
+          if (hasMoreOlderRef.current && !loadingOlderRef.current) {
+            void loadOlderWithViewportLock();
+          }
+        });
+      },
+      { root: node, rootMargin: '120px 0px 0px' }
+    );
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      if (deferredFrame !== null) window.cancelAnimationFrame(deferredFrame);
+    };
+  }, [
+    conversationId,
+    favoritesOnly,
+    loadOlderWithViewportLock,
+    normalizedQuery,
+    pinnedOnly
   ]);
 
   useEffect(() => {
@@ -1211,20 +1278,15 @@ export const ChatView = ({
     if (!node || typeof ResizeObserver === 'undefined') return;
     let frame: number | null = null;
     const observer = new ResizeObserver(() => {
-      if (viewportAnchorRef.current && userNavigatingHistoryRef.current) {
-        if (frame !== null) window.cancelAnimationFrame(frame);
-        frame = window.requestAnimationFrame(() => {
-          restoreViewportAnchor();
-          frame = null;
-        });
-        return;
-      }
-      if (!(stickToBottomRef.current || isNearBottom())) return;
+      // Resize de imagens, fontes e anexos não pode tomar o controle da
+      // rolagem de quem está lendo o histórico. Só acompanhamos o fim quando
+      // o usuário já optou por permanecer nele.
+      if (!stickToBottomRef.current) return;
       if (frame !== null) {
         window.cancelAnimationFrame(frame);
       }
       frame = window.requestAnimationFrame(() => {
-        maybeFollowBottom(true, 'auto');
+        if (stickToBottomRef.current) scrollToBottom('auto');
         frame = null;
       });
     });
@@ -1235,57 +1297,18 @@ export const ChatView = ({
         window.cancelAnimationFrame(frame);
       }
     };
-  }, [normalizedQuery, restoreViewportAnchor]);
+  }, [normalizedQuery]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (normalizedQuery) return;
     userNavigatingHistoryRef.current = false;
     viewportAnchorRef.current = null;
+    viewportFallbackRef.current = null;
     stickToBottomRef.current = true;
     forceScrollOnOpenRef.current = true;
-    if (forceScrollTimeoutRef.current) {
-      window.clearTimeout(forceScrollTimeoutRef.current);
-      forceScrollTimeoutRef.current = null;
-    }
-    const frameA = window.requestAnimationFrame(() => {
-      maybeFollowBottom(true, 'auto');
-      const frameB = window.requestAnimationFrame(() => {
-        maybeFollowBottom(true, 'auto');
-      });
-      return () => window.cancelAnimationFrame(frameB);
-    });
-    forceScrollTimeoutRef.current = window.setTimeout(() => {
-      forceScrollOnOpenRef.current = false;
-      forceScrollTimeoutRef.current = null;
-    }, 1800);
-    return () => window.cancelAnimationFrame(frameA);
-  }, [peer?.deviceId, normalizedQuery]);
-
-  useEffect(
-    () => () => {
-      if (viewportAnchorTimeoutRef.current) {
-        window.clearTimeout(viewportAnchorTimeoutRef.current);
-        viewportAnchorTimeoutRef.current = null;
-      }
-    },
-    []
-  );
-
-  useEffect(() => {
-    if (normalizedQuery) return;
-    const lastMessage = displayedMessages[displayedMessages.length - 1];
-    const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
-    const isOutgoingFileTransfer =
-      Boolean(lastMessage) &&
-      lastMessage.type === 'file' &&
-      Boolean(lastMessage.fileId) &&
-      (lastMessage.direction === 'out' || lastMessage.senderDeviceId === localProfile.deviceId) &&
-      Boolean(lastMessage.fileId && transferByFileId[lastMessage.fileId]);
-    const frame = window.requestAnimationFrame(() => {
-      maybeFollowBottom(isOutgoingFileTransfer || forceForComposer, 'auto');
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [transferByFileId, normalizedQuery, displayedMessages, localProfile.deviceId]);
+    scrollToBottom('auto');
+    forceScrollOnOpenRef.current = false;
+  }, [conversationId, normalizedQuery]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -1426,9 +1449,9 @@ export const ChatView = ({
     }
 
     const frame = window.requestAnimationFrame(() => {
-      const shouldForce =
-        lastMessage.direction === 'out' || lastMessage.senderDeviceId === localProfile.deviceId;
-      maybeFollowBottom(shouldForce, 'auto');
+      // A prévia pronta pode redimensionar uma mensagem antiga. Não converta
+      // essa hidratação em um comando para voltar ao fim da conversa.
+      maybeFollowBottom(false, 'auto');
     });
     return () => window.cancelAnimationFrame(frame);
   }, [previewStateByMessageId, displayedMessages, normalizedQuery, recentMessageIds, localProfile.deviceId]);
@@ -1446,7 +1469,7 @@ export const ChatView = ({
     return () => window.cancelAnimationFrame(frame);
   }, [visiblePreviewByMessageId, normalizedQuery]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (normalizedQuery) return;
     const currentLastMessage =
       displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1] : null;
@@ -1456,23 +1479,22 @@ export const ChatView = ({
         : null;
     const previousLastId = lastMessageIdRef.current;
     const hasNewTailMessage = currentLastId !== null && currentLastId !== previousLastId;
-    const forceForComposer = isComposerFocused() || forceFollowAfterPasteRef.current;
+    const forceForComposer = forceFollowAfterPasteRef.current;
 
     if (forceScrollOnOpenRef.current || hasNewTailMessage || forceForComposer) {
       const shouldForceFollow =
         forceScrollOnOpenRef.current ||
         forceForComposer ||
         Boolean(
+          !userNavigatingHistoryRef.current &&
           hasNewTailMessage &&
             currentLastMessage &&
             (currentLastMessage.direction === 'out' ||
               currentLastMessage.senderDeviceId === localProfile.deviceId)
         );
-      const frame = window.requestAnimationFrame(() => {
-        maybeFollowBottom(shouldForceFollow, 'auto');
-      });
+      maybeFollowBottom(shouldForceFollow, 'auto');
       lastMessageIdRef.current = currentLastId;
-      return () => window.cancelAnimationFrame(frame);
+      return undefined;
     }
 
     lastMessageIdRef.current = currentLastId;
@@ -1481,10 +1503,6 @@ export const ChatView = ({
 
   useEffect(
     () => () => {
-      if (forceScrollTimeoutRef.current) {
-        window.clearTimeout(forceScrollTimeoutRef.current);
-        forceScrollTimeoutRef.current = null;
-      }
       if (forceFollowAfterPasteTimeoutRef.current) {
         window.clearTimeout(forceFollowAfterPasteTimeoutRef.current);
         forceFollowAfterPasteTimeoutRef.current = null;
@@ -1801,6 +1819,13 @@ export const ChatView = ({
       </header>
 
       <div className="messages-scroll" ref={messagesScrollRef}>
+        {!favoritesOnly && !pinnedOnly && !normalizedQuery && (
+          <div
+            ref={historyTopSentinelRef}
+            className="messages-history-sentinel"
+            aria-hidden
+          />
+        )}
         {loading && displayedMessages.length === 0 && !favoritesOnly && !pinnedOnly && (
           <div className="messages-skeleton-list" aria-hidden>
             <div className="message-skeleton-row in" />
@@ -1829,6 +1854,18 @@ export const ChatView = ({
         )}
         {displayedMessages.map((message, index) => {
           const previousMessage = index > 0 ? displayedMessages[index - 1] : null;
+          const albumId = message.type === 'file' ? message.albumId || null : null;
+          if (albumId && previousMessage?.type === 'file' && previousMessage.albumId === albumId) return null;
+          const albumMessages = (() => {
+            if (!albumId) return [message];
+            const items = [message];
+            for (let cursor = index + 1; cursor < displayedMessages.length; cursor += 1) {
+              const candidate = displayedMessages[cursor];
+              if (candidate.type !== 'file' || candidate.albumId !== albumId) break;
+              items.push(candidate);
+            }
+            return items;
+          })();
           const startsNewDay =
             !previousMessage || !isSameDay(previousMessage.createdAt, message.createdAt);
           const groupedWithPrevious =
@@ -1914,6 +1951,7 @@ export const ChatView = ({
                 )}
               <div
                 className={`bubble-row ${outgoing ? 'out' : 'in'} ${groupedWithPrevious ? 'grouped' : ''} ${hasCounters ? 'has-static-reaction' : ''} ${canShowActions ? 'has-actions' : ''} ${reactionPickerOpen ? 'actions-open' : ''} ${recentMessageIds[message.messageId] ? 'is-new' : ''} ${matchedMessageIdSet.has(message.messageId) ? 'search-match' : ''} ${matchedMessageIds[activeMatchIndex] === message.messageId ? 'search-match-active' : ''} ${jumpHighlightMessageId === message.messageId ? 'reply-jump-highlight' : ''} ${isFavorite ? 'is-favorite' : ''}`}
+                data-message-id={message.messageId}
                 ref={(node) => {
                   messageRowRefs.current[message.messageId] = node;
                   if (matchedMessageIdSet.has(message.messageId)) {
@@ -1967,6 +2005,16 @@ export const ChatView = ({
                   )}
                   {isDeleted ? (
                     <div className="message-deleted">Esta mensagem foi apagada.</div>
+                  ) : isFile && albumMessages.length > 1 ? (
+                    <MessageAlbum
+                      items={albumMessages.map((albumMessage) => ({
+                        message: albumMessage,
+                        previewDataUrl: previewStateByMessageId[albumMessage.messageId]?.dataUrl,
+                        previewVisible: Boolean(previewStateByMessageId[albumMessage.messageId]?.dataUrl && visiblePreviewByMessageId[albumMessage.messageId])
+                      }))}
+                      onOpenFile={onOpenFile}
+                      onSaveFileAs={onSaveFileAs}
+                    />
                   ) : isFile ? (
                     <MessageAttachment
                       message={message}
@@ -2227,6 +2275,7 @@ export const ChatView = ({
         }}
         onTypingChange={onTyping}
         onSendFile={onSendFile}
+        onSendFiles={onSendFiles}
         onPaste={handleComposerPaste}
         replyDraft={replyDraft}
         onCancelReply={() => setReplyDraft(null)}

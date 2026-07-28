@@ -96,10 +96,16 @@ const api = {
     ipcRenderer.invoke('lantern:sendAnnouncement', text, replyTo),
   sendAnnouncementFile: (filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendAnnouncementFile', filePath, replyTo),
+  sendAnnouncementFiles: (filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendAnnouncementFiles', filePaths, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendFile', peerId, filePath, replyTo),
+  sendFiles: (peerId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendFiles', peerId, filePaths, replyTo),
   sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyPayload | null) =>
     ipcRenderer.invoke('lantern:sendGroupFile', groupId, filePath, replyTo),
+  sendGroupFiles: (groupId: string, filePaths: string[], replyTo?: MessageReplyPayload | null) =>
+    ipcRenderer.invoke('lantern:sendGroupFiles', groupId, filePaths, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     ipcRenderer.invoke('lantern:forwardMessageToPeer', targetPeerId, sourceMessageId),
   editMessage: (conversationId: string, messageId: string, text: string) =>
@@ -179,6 +185,8 @@ const api = {
   openFile: (filePath: string): Promise<void> => ipcRenderer.invoke('lantern:openFile', filePath),
   saveFileAs: (filePath: string, fileName?: string): Promise<void> =>
     ipcRenderer.invoke('lantern:saveFileAs', filePath, fileName),
+  saveAlbumToDirectory: (files: Array<{ filePath: string; fileName: string }>) =>
+    ipcRenderer.invoke('lantern:saveAlbumToDirectory', files),
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('lantern:openExternalUrl', url),
   nativePaste: (): Promise<boolean> => ipcRenderer.invoke('lantern:nativePaste'),
   getFilePreview: (filePath: string): Promise<string | null> =>

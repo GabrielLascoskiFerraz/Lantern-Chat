@@ -586,6 +586,7 @@ export class WebLanternBridge {
       bodyText: typeof payload.text === 'string' ? payload.text : null,
       fileId: payload.fileId || null, fileName: payload.filename || null, fileSize: Number(payload.size || 0) || null,
       fileSha256: payload.sha256 || null, filePath: null, status: 'delivered', reaction: null, deletedAt: null,
+      albumId: typeof payload.albumId === 'string' && payload.albumId.trim() ? payload.albumId.trim() : null,
       replyToMessageId: payload.replyTo?.messageId || null, replyToSenderDeviceId: payload.replyTo?.senderDeviceId || null,
       replyToType: payload.replyTo?.type || null, replyToPreviewText: payload.replyTo?.previewText || null,
       replyToFileName: payload.replyTo?.fileName || null, forwardedFromMessageId: payload.forwardedFromMessageId || null,
@@ -607,6 +608,7 @@ export class WebLanternBridge {
       type: message.type === 'file' ? 'file' : 'text', bodyText: message.bodyText || null,
       fileId: message.fileId || null, fileName: message.fileName || null, fileSize: Number(message.fileSize || 0) || null,
       fileSha256: message.fileSha256 || null, filePath: null, status: 'delivered', reaction: null, deletedAt: null,
+      albumId: typeof message.albumId === 'string' && message.albumId.trim() ? message.albumId.trim() : null,
       replyToMessageId: reply.messageId || null, replyToSenderDeviceId: reply.senderDeviceId || null, replyToType: reply.type || null,
       replyToPreviewText: reply.previewText || null, replyToFileName: reply.fileName || null,
       forwardedFromMessageId: message.forwardedFromMessageId || null,
@@ -1247,7 +1249,8 @@ export class WebLanternBridge {
     targetUserId: string | null,
     filePath: string,
     replyTo?: MessageReplyReference | null,
-    forwardedFromMessageId?: string | null
+    forwardedFromMessageId?: string | null,
+    albumId?: string | null
   ): Promise<MessageRow> {
     const file = this.fileForKey(filePath);
     const fileId = uuid();
@@ -1258,7 +1261,7 @@ export class WebLanternBridge {
     const frame = {
       type: 'file:offer', messageId, from: this.user!.userId, to: targetUserId,
       createdAt: Date.now(),
-      payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), forwardedFromMessageId: forwardedFromMessageId || null }
+      payload: { fileId, messageId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), forwardedFromMessageId: forwardedFromMessageId || null, albumId: albumId || null }
     };
     const receipt = await this.sendFrame(frame);
     const row = {
@@ -1267,6 +1270,43 @@ export class WebLanternBridge {
     };
     this.mergeMessage(row);
     return row;
+  }
+
+  private partitionAttachmentPaths(filePaths: string[]): { imagePaths: string[]; otherPaths: string[] } {
+    const paths = Array.from(new Set(filePaths.map((value) => (value || '').trim()).filter(Boolean)));
+    if (paths.length === 0) throw new Error('Nenhum anexo foi selecionado.');
+    const isImage = (filePath: string) => {
+      const file = this.fileForKey(filePath);
+      return file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(file.name);
+    };
+    return { imagePaths: paths.filter(isImage), otherPaths: paths.filter((filePath) => !isImage(filePath)) };
+  }
+
+  private async sendWebGroupFile(
+    groupId: string,
+    filePath: string,
+    replyTo?: MessageReplyReference | null,
+    albumId?: string | null
+  ): Promise<MessageRow> {
+    const file = this.fileForKey(filePath); const fileId = uuid(); const messageId = uuid(); const createdAt = Date.now(); const sha256 = await this.sha256(file); const total = attachmentChunkCount(file.size);
+    const initialized = await this.groupAction('file:init', { groupId, createdAt, offer: { groupId, messageId, fileId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo), albumId: albumId || null } });
+    const startIndex = Math.max(0, Number(initialized.nextIndex || 0));
+    await forEachFileChunk(file, startIndex, async (bytes, index) => {
+      await new Promise<Json>((resolve, reject) => {
+        const key = `${fileId}:${index}`;
+        const timer = window.setTimeout(() => { this.groupChunkPending.delete(key); reject(new Error('O Relay não confirmou o bloco do anexo.')); }, 15_000);
+        this.groupChunkPending.set(key, { resolve, reject, timer });
+        this.send('relay:group:file:chunk', { fileId, index, total, dataBase64: this.bytesBase64(bytes) });
+      });
+    });
+    const completed = await this.request('relay:group:file:complete', { fileId }, 30_000);
+    const canonicalEvent = asRecord(completed.event);
+    const row = this.groupMessageFromEvent(
+      canonicalEvent.eventId
+        ? canonicalEvent
+        : { type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'file', senderDeviceId: this.user!.userId, fileId, fileName: file.name, fileSize: file.size, fileSha256: sha256, replyTo, albumId: albumId || null, createdAt } } }
+    )!;
+    const ready = { ...row, filePath }; this.mergeMessage(ready); return ready;
   }
 
   api(): LanternApi {
@@ -1446,27 +1486,28 @@ export class WebLanternBridge {
         return row;
       },
       sendAnnouncementFile: (filePath, replyTo) => this.sendCanonicalFile(null, filePath, replyTo),
+      sendAnnouncementFiles: async (filePaths, replyTo) => {
+        const { imagePaths, otherPaths } = this.partitionAttachmentPaths(filePaths); const albumId = imagePaths.length > 1 ? uuid() : null;
+        const messages: MessageRow[] = [];
+        for (const filePath of imagePaths) messages.push(await this.sendCanonicalFile(null, filePath, replyTo, null, albumId));
+        for (const filePath of otherPaths) messages.push(await this.sendCanonicalFile(null, filePath, replyTo));
+        return messages;
+      },
       sendFile: (peerId, filePath, replyTo) => this.sendCanonicalFile(peerId, filePath, replyTo),
-      sendGroupFile: async (groupId, filePath, replyTo) => {
-        const file = this.fileForKey(filePath); const fileId = uuid(); const messageId = uuid(); const createdAt = Date.now(); const sha256 = await this.sha256(file); const total = attachmentChunkCount(file.size);
-        const initialized = await this.groupAction('file:init', { groupId, createdAt, offer: { groupId, messageId, fileId, filename: file.name, size: file.size, sha256, replyTo: this.reply(replyTo) } });
-        const startIndex = Math.max(0, Number(initialized.nextIndex || 0));
-        await forEachFileChunk(file, startIndex, async (bytes, index) => {
-          await new Promise<Json>((resolve, reject) => {
-            const key = `${fileId}:${index}`;
-            const timer = window.setTimeout(() => { this.groupChunkPending.delete(key); reject(new Error('O Relay não confirmou o bloco do anexo.')); }, 15_000);
-            this.groupChunkPending.set(key, { resolve, reject, timer });
-            this.send('relay:group:file:chunk', { fileId, index, total, dataBase64: this.bytesBase64(bytes) });
-          });
-        });
-        const completed = await this.request('relay:group:file:complete', { fileId }, 30_000);
-        const canonicalEvent = asRecord(completed.event);
-        const row = this.groupMessageFromEvent(
-          canonicalEvent.eventId
-            ? canonicalEvent
-            : { type: 'group.message.created', groupId, createdAt, payload: { message: { messageId, groupId, type: 'file', senderDeviceId: this.user!.userId, fileId, fileName: file.name, fileSize: file.size, fileSha256: sha256, replyTo, createdAt } } }
-        )!;
-        const ready = { ...row, filePath }; this.mergeMessage(ready); return ready;
+      sendFiles: async (peerId, filePaths, replyTo) => {
+        const { imagePaths, otherPaths } = this.partitionAttachmentPaths(filePaths); const albumId = imagePaths.length > 1 ? uuid() : null;
+        const messages: MessageRow[] = [];
+        for (const filePath of imagePaths) messages.push(await this.sendCanonicalFile(peerId, filePath, replyTo, null, albumId));
+        for (const filePath of otherPaths) messages.push(await this.sendCanonicalFile(peerId, filePath, replyTo));
+        return messages;
+      },
+      sendGroupFile: (groupId, filePath, replyTo) => this.sendWebGroupFile(groupId, filePath, replyTo),
+      sendGroupFiles: async (groupId, filePaths, replyTo) => {
+        const { imagePaths, otherPaths } = this.partitionAttachmentPaths(filePaths); const albumId = imagePaths.length > 1 ? uuid() : null;
+        const messages: MessageRow[] = [];
+        for (const filePath of imagePaths) messages.push(await this.sendWebGroupFile(groupId, filePath, replyTo, albumId));
+        for (const filePath of otherPaths) messages.push(await this.sendWebGroupFile(groupId, filePath, replyTo));
+        return messages;
       },
       forwardMessageToPeer: async (targetPeerId, sourceMessageId) => {
         const source = Array.from(this.messages.values()).flat().find((item) => item.messageId === sourceMessageId);
@@ -1500,7 +1541,7 @@ export class WebLanternBridge {
         this.applyReaction(messageId, this.user!.userId, reaction, updatedAt, conversationId === 'announcements');
         return (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null;
       },
-      deleteMessageForEveryone: async (conversationId, messageId) => { if (conversationId.startsWith('group:')) await this.groupAction('deleteMessage', { groupId: conversationId.slice(6), targetMessageId: messageId }); else { const to = conversationId === 'announcements' ? null : conversationId.slice(3); await this.sendFrame({ type: 'chat:delete', messageId: uuid(), from: this.user!.userId, to, createdAt: Date.now(), payload: { targetMessageId: messageId } }); } const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null; this.messages.set(conversationId, (this.messages.get(conversationId) || []).filter((item) => item.messageId !== messageId)); return existing; },
+      deleteMessageForEveryone: async (conversationId, messageId) => { if (conversationId.startsWith('group:')) await this.groupAction('deleteMessage', { groupId: conversationId.slice(6), targetMessageId: messageId }); else { const to = conversationId === 'announcements' ? null : conversationId.slice(3); await this.sendFrame({ type: 'chat:delete', messageId: uuid(), from: this.user!.userId, to, createdAt: Date.now(), payload: { targetMessageId: messageId } }); } const existing = (this.messages.get(conversationId) || []).find((item) => item.messageId === messageId) || null; this.messages.set(conversationId, (this.messages.get(conversationId) || []).filter((item) => item.messageId !== messageId)); this.mediaMessages.delete(messageId); this.emit({ type: 'message:removed', conversationId, messageId }); return existing; },
       toggleMessageFavorite: async (_conversationId, messageId, favorite) => { await this.http('/api/client/preferences/message', { method: 'PUT', body: JSON.stringify({ messageId, favorite }) }); favorite ? this.favorites.add(messageId) : this.favorites.delete(messageId); return favorite; },
       getMessageFavorites: async (ids) => Object.fromEntries(ids.map((id) => [id, this.favorites.has(id)])),
       getFavoriteMessages: async (conversationId) => {
@@ -1776,6 +1817,14 @@ export class WebLanternBridge {
       pickDirectory: async () => null,
       openFile: async (key) => { const web = this.files.get(key); const url = web ? web.url || (web.url = URL.createObjectURL(web.file)) : key; window.open(url, '_blank', 'noopener,noreferrer'); },
       saveFileAs: async (key, name) => { const web = this.files.get(key); const url = web ? web.url || (web.url = URL.createObjectURL(web.file)) : key; const link = document.createElement('a'); link.href = url; link.download = name || web?.file.name || 'arquivo'; link.click(); },
+      saveAlbumToDirectory: async (files) => {
+        let saved = 0;
+        for (const item of files) {
+          const web = this.files.get(item.filePath); const url = web ? web.url || (web.url = URL.createObjectURL(web.file)) : item.filePath;
+          const link = document.createElement('a'); link.href = url; link.download = item.fileName || web?.file.name || 'imagem'; link.click(); saved += 1;
+        }
+        return { saved, canceled: false };
+      },
       openExternalUrl: async (url) => { window.open(url, '_blank', 'noopener,noreferrer'); },
       nativePaste: async () => false,
       getFilePreview: async (key) => { const web = this.files.get(key); if (web) return web.url || (web.url = URL.createObjectURL(web.file)); return key.startsWith('blob:') ? key : null; },

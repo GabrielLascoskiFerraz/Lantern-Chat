@@ -226,6 +226,8 @@ export interface FileOfferPayload {
   sha256: string;
   replyTo?: MessageReplyPayload | null;
   forwardedFromMessageId?: string | null;
+  /** Identifica arquivos enviados juntos para renderização em álbum. */
+  albumId?: string | null;
 }
 
 export interface FileChunkPayload {
@@ -249,6 +251,7 @@ export interface DbMessage {
   fileSize: number | null;
   fileSha256: string | null;
   filePath: string | null;
+  albumId?: string | null;
   status: 'sent' | 'delivered' | 'read' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
@@ -441,10 +444,23 @@ export type AppEvent =
   | { type: 'sync:status'; active: boolean }
   | { type: 'message:received'; message: DbMessage }
   | { type: 'message:updated'; message: DbMessage }
+  | {
+      type: 'messages:batch';
+      messages: DbMessage[];
+      removed: Array<{ conversationId: string; messageId: string }>;
+      unread: Array<{ conversationId: string; unreadCount: number }>;
+      statuses: Array<{
+        messageId: string;
+        conversationId: string | null;
+        status: 'delivered' | 'read' | 'failed';
+      }>;
+      reactions: Array<{ messageId: string; summary: AnnouncementReactionSummary }>;
+      announcementReads: Array<{ messageId: string; summary: AnnouncementReadSummary }>;
+    }
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
-  | { type: 'conversation:synchronized'; conversationId: string }
+  | { type: 'conversation:synchronized'; conversationId: string; refresh?: boolean }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | { type: 'attachments:cache-cleared'; filePaths: string[] }
   | {

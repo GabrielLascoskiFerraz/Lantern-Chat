@@ -22,7 +22,7 @@ import { DocumentEdit20Regular } from '@fluentui/react-icons';
 import { Emoji20Regular } from '@fluentui/react-icons';
 import { Megaphone20Regular } from '@fluentui/react-icons';
 import { PeopleEye20Regular } from '@fluentui/react-icons';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   AnnouncementReadDetail,
   AnnouncementReadSummary,
@@ -38,6 +38,7 @@ import { Avatar } from './Avatar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ForwardMessageDialog } from './ForwardMessageDialog';
 import { MessageComposer } from './MessageComposer';
+import { MessageAlbum } from './MessageAlbum';
 import { PlatformEmoji, PlatformEmojiText } from './PlatformEmoji';
 import {
   isImageAttachmentName,
@@ -58,6 +59,7 @@ interface AnnouncementsViewProps {
   relayConnected: boolean;
   onSend: (text: string, replyTo?: MessageReplyReference | null) => Promise<void>;
   onSendFile: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onSendFiles: (filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   transferByFileId: Record<string, {
     transferred: number;
     total: number;
@@ -169,6 +171,7 @@ export const AnnouncementsView = ({
   relayConnected,
   onSend,
   onSendFile,
+  onSendFiles,
   transferByFileId,
   onOpenFile,
   onSaveFileAs,
@@ -205,6 +208,9 @@ export const AnnouncementsView = ({
   const paneRootRef = useRef<HTMLDivElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const userNavigatingHistoryRef = useRef(false);
+  const previousScrollTopRef = useRef(0);
+  const touchStartYRef = useRef<number | null>(null);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const jumpHighlightTimeoutRef = useRef<number | null>(null);
 
@@ -393,17 +399,63 @@ export const AnnouncementsView = ({
     if (!node) return;
     node.scrollTo({ top: node.scrollHeight, behavior });
     stickToBottomRef.current = true;
+    userNavigatingHistoryRef.current = false;
   };
 
   useEffect(() => {
     const node = messagesScrollRef.current;
     if (!node) return;
+    let scrollFrame: number | null = null;
+    const processScroll = () => {
+      scrollFrame = null;
+      const currentTop = node.scrollTop;
+      const movedUp = currentTop < previousScrollTopRef.current - 1;
+      const movedDown = currentTop > previousScrollTopRef.current + 1;
+      if (movedUp) {
+        userNavigatingHistoryRef.current = true;
+        stickToBottomRef.current = false;
+      } else if (movedDown && isNearBottom()) {
+        userNavigatingHistoryRef.current = false;
+        stickToBottomRef.current = true;
+      } else if (!userNavigatingHistoryRef.current) {
+        stickToBottomRef.current = isNearBottom();
+      }
+      previousScrollTopRef.current = currentTop;
+    };
     const onScroll = () => {
-      stickToBottomRef.current = isNearBottom();
+      if (scrollFrame !== null) return;
+      scrollFrame = window.requestAnimationFrame(processScroll);
     };
     stickToBottomRef.current = isNearBottom();
+    previousScrollTopRef.current = node.scrollTop;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        userNavigatingHistoryRef.current = true;
+        stickToBottomRef.current = false;
+      }
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      touchStartYRef.current = event.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const currentY = event.touches[0]?.clientY;
+      if (touchStartYRef.current !== null && currentY !== undefined && currentY > touchStartYRef.current + 2) {
+        userNavigatingHistoryRef.current = true;
+        stickToBottomRef.current = false;
+      }
+      touchStartYRef.current = currentY ?? null;
+    };
     node.addEventListener('scroll', onScroll, { passive: true });
-    return () => node.removeEventListener('scroll', onScroll);
+    node.addEventListener('wheel', onWheel, { passive: true });
+    node.addEventListener('touchstart', onTouchStart, { passive: true });
+    node.addEventListener('touchmove', onTouchMove, { passive: true });
+    return () => {
+      if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
+      node.removeEventListener('scroll', onScroll);
+      node.removeEventListener('wheel', onWheel);
+      node.removeEventListener('touchstart', onTouchStart);
+      node.removeEventListener('touchmove', onTouchMove);
+    };
   }, []);
 
   useEffect(() => {
@@ -429,19 +481,34 @@ export const AnnouncementsView = ({
     []
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = messagesScrollRef.current;
     if (!node) return;
+    if (userNavigatingHistoryRef.current) return;
     if (!stickToBottomRef.current && !isNearBottom()) return;
-    const frameA = window.requestAnimationFrame(() => {
-      scrollToBottom('auto');
-      const frameB = window.requestAnimationFrame(() => {
-        scrollToBottom('auto');
-      });
-      return () => window.cancelAnimationFrame(frameB);
-    });
-    return () => window.cancelAnimationFrame(frameA);
+    scrollToBottom('auto');
   }, [messages]);
+
+  useEffect(() => {
+    const node = messagesScrollRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current || userNavigatingHistoryRef.current) return;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (stickToBottomRef.current && !userNavigatingHistoryRef.current) {
+          scrollToBottom('auto');
+        }
+        frame = null;
+      });
+    });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, []);
 
   useEffect(() => {
     const availablePreviewIds = new Set(
@@ -477,15 +544,8 @@ export const AnnouncementsView = ({
     };
   }, [filePreviewByMessageId, messages]);
 
-  useEffect(() => {
-    const frameA = window.requestAnimationFrame(() => {
-      scrollToBottom('auto');
-      const frameB = window.requestAnimationFrame(() => {
-        scrollToBottom('auto');
-      });
-      return () => window.cancelAnimationFrame(frameB);
-    });
-    return () => window.cancelAnimationFrame(frameA);
+  useLayoutEffect(() => {
+    scrollToBottom('auto');
   }, []);
 
   const openReactionDetails = async (messageId: string): Promise<void> => {
@@ -564,7 +624,19 @@ export const AnnouncementsView = ({
         )}
         {messages
           .filter((message) => !message.deletedAt)
-          .map((message) => {
+          .map((message, index, visibleMessages) => {
+            const albumId = message.type === 'file' ? message.albumId || null : null;
+            if (albumId && visibleMessages[index - 1]?.type === 'file' && visibleMessages[index - 1].albumId === albumId) return null;
+            const albumMessages = (() => {
+              if (!albumId) return [message];
+              const items = [message];
+              for (let cursor = index + 1; cursor < visibleMessages.length; cursor += 1) {
+                const candidate = visibleMessages[cursor];
+                if (candidate.type !== 'file' || candidate.albumId !== albumId) break;
+                items.push(candidate);
+              }
+              return items;
+            })();
             const outgoing = message.direction === 'out';
             const fromCalendar = message.senderDeviceId === 'relay-calendar';
             const sender = peers.find((peer) => peer.deviceId === message.senderDeviceId);
@@ -629,7 +701,17 @@ export const AnnouncementsView = ({
                           {formatAnnouncementExpiry(message.announcementExpiresAt, expiryClockNow)}
                         </span>
                       </div>
-                      {isFile ? (
+                      {isFile && albumMessages.length > 1 ? (
+                        <MessageAlbum
+                          items={albumMessages.map((albumMessage) => ({
+                            message: albumMessage,
+                            previewDataUrl: filePreviewByMessageId[albumMessage.messageId],
+                            previewVisible: Boolean(filePreviewByMessageId[albumMessage.messageId])
+                          }))}
+                          onOpenFile={onOpenFile}
+                          onSaveFileAs={onSaveFileAs}
+                        />
+                      ) : isFile ? (
                         <MessageAttachment
                           message={message}
                           outgoing={outgoing}
@@ -822,6 +904,7 @@ export const AnnouncementsView = ({
           setReplyDraft(null);
         }}
         onSendFile={onSendFile}
+        onSendFiles={onSendFiles}
         onSubmitEdit={async (text) => {
           if (!editingMessage) return;
           await onEditMessage(editingMessage.messageId, text);

@@ -122,16 +122,19 @@ interface LanternState {
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  sendAnnouncementFiles: (filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   sendFile: (
     peerId: string,
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  sendFiles: (peerId: string, filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   sendGroupFile: (
     groupId: string,
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<void>;
+  sendGroupFiles: (groupId: string, filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   createGroup: (input: {
     name: string;
     emoji: string;
@@ -347,6 +350,21 @@ const updateExistingMessageOnly = (rows: MessageRow[], incoming: MessageRow): Me
     return incoming;
   });
   return found ? next : rows;
+};
+
+const mergeMessageBatch = (existing: MessageRow[], incoming: MessageRow[]): MessageRow[] => {
+  if (incoming.length === 0) return existing;
+  const byId = new Map(existing.map((row) => [row.messageId, row]));
+  for (const row of incoming) {
+    const current = byId.get(row.messageId);
+    if (!current) {
+      byId.set(row.messageId, row);
+      continue;
+    }
+    const [merged] = mergeFetchedMessagesWithLiveUpdates([row], [current], [current]);
+    byId.set(row.messageId, merged || row);
+  }
+  return normalizeMessageOrder(Array.from(byId.values()));
 };
 
 const previewFromMessage = (message: MessageRow): string => {
@@ -877,9 +895,12 @@ export const useLanternStore = create<LanternState>((set, get) => ({
             void refreshPeersSnapshot();
           }, 120);
         } else {
-          set((state) =>
-            state.onlinePeerIds.length === 0 ? state : { onlinePeerIds: [] }
-          );
+          set((state) => ({
+            onlinePeerIds: state.onlinePeerIds.length === 0 ? state.onlinePeerIds : [],
+            // Um evento de fim de sincronização não chega quando o socket cai
+            // no meio da requisição. Não mantenha o indicador visual preso.
+            syncActive: false
+          }));
         }
         return;
       }
@@ -982,6 +1003,100 @@ export const useLanternStore = create<LanternState>((set, get) => ({
 
       if (event.type === 'sync:status') {
         set((state) => (state.syncActive === event.active ? state : { syncActive: event.active }));
+        return;
+      }
+
+      if (event.type === 'messages:batch') {
+        set((state) => {
+          const incomingByConversation = new Map<string, MessageRow[]>();
+          const removedByConversation = new Map<string, Set<string>>();
+          const touchedConversationIds = new Set<string>();
+
+          for (const message of event.messages) {
+            const rows = incomingByConversation.get(message.conversationId) || [];
+            rows.push(message);
+            incomingByConversation.set(message.conversationId, rows);
+            touchedConversationIds.add(message.conversationId);
+          }
+          for (const removed of event.removed) {
+            const ids = removedByConversation.get(removed.conversationId) || new Set<string>();
+            ids.add(removed.messageId);
+            removedByConversation.set(removed.conversationId, ids);
+            touchedConversationIds.add(removed.conversationId);
+          }
+
+          const messagesByConversation = { ...state.messagesByConversation };
+          const conversationPreviewById = { ...state.conversationPreviewById };
+          const favoriteByMessageId = { ...state.favoriteByMessageId };
+          const announcementReactionsByMessage = { ...state.announcementReactionsByMessage };
+          const announcementReadsByMessage = { ...state.announcementReadsByMessage };
+          const unreadByConversation = { ...state.unreadByConversation };
+
+          for (const conversationId of touchedConversationIds) {
+            const removedIds = removedByConversation.get(conversationId);
+            const currentRows = removedIds
+              ? (messagesByConversation[conversationId] || []).filter(
+                  (row) => !removedIds.has(row.messageId)
+                )
+              : messagesByConversation[conversationId] || [];
+            const incomingRows = (incomingByConversation.get(conversationId) || []).filter(
+              (row) => !removedIds?.has(row.messageId)
+            );
+            const nextRows = mergeMessageBatch(currentRows, incomingRows);
+            messagesByConversation[conversationId] = nextRows;
+            const last = nextRows[nextRows.length - 1];
+            conversationPreviewById[conversationId] = last ? previewFromMessage(last) : '';
+
+            for (const messageId of removedIds || []) {
+              delete favoriteByMessageId[messageId];
+              delete announcementReactionsByMessage[messageId];
+              delete announcementReadsByMessage[messageId];
+            }
+          }
+
+          for (const { messageId, conversationId, status } of event.statuses) {
+            const conversationIds = conversationId
+              ? [conversationId]
+              : Object.keys(messagesByConversation);
+            for (const targetConversationId of conversationIds) {
+              const rows = messagesByConversation[targetConversationId] || [];
+              let changed = false;
+              const nextRows = rows.map((row) => {
+                if (row.messageId !== messageId || row.status === status) return row;
+                changed = true;
+                return { ...row, status };
+              });
+              if (changed) messagesByConversation[targetConversationId] = nextRows;
+            }
+          }
+          for (const { conversationId, unreadCount } of event.unread) {
+            unreadByConversation[conversationId] = Math.max(0, Number(unreadCount) || 0);
+          }
+          for (const { messageId, summary } of event.reactions) {
+            announcementReactionsByMessage[messageId] = summary;
+          }
+          for (const { messageId, summary } of event.announcementReads) {
+            announcementReadsByMessage[messageId] = summary;
+          }
+
+          return {
+            messagesByConversation,
+            conversationPreviewById,
+            favoriteByMessageId,
+            announcementReactionsByMessage,
+            announcementReadsByMessage,
+            unreadByConversation
+          };
+        });
+        for (const status of event.statuses) {
+          if (status.status !== 'delivered' && status.status !== 'read' && status.status !== 'failed') {
+            continue;
+          }
+          const completedFileIds = Object.values(get().transfers)
+            .filter((transfer) => transfer.messageId === status.messageId)
+            .map((transfer) => transfer.fileId);
+          for (const fileId of completedFileIds) scheduleTransferCleanup(fileId);
+        }
         return;
       }
 
@@ -1293,7 +1408,7 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       }
 
       if (event.type === 'conversation:synchronized') {
-        if (get().selectedConversationId === event.conversationId) {
+        if (event.refresh !== false && get().selectedConversationId === event.conversationId) {
           void refreshSynchronizedConversation(event.conversationId);
         }
         return;
@@ -1942,6 +2057,19 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
+  sendAnnouncementFiles: async (filePaths, replyTo) => {
+    try {
+      const messages = await ipcClient.sendAnnouncementFiles(filePaths, replyTo);
+      set((state) => ({
+        messagesByConversation: { ...state.messagesByConversation, [ANNOUNCEMENTS_ID]: messages.reduce((rows, message) => appendUniqueMessage(rows, message), state.messagesByConversation[ANNOUNCEMENTS_ID] || []) },
+        conversationPreviewById: messages.length ? { ...state.conversationPreviewById, [ANNOUNCEMENTS_ID]: previewFromMessage(messages[messages.length - 1]) } : state.conversationPreviewById
+      }));
+    } catch (error) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({ toasts: [...state.toasts, { id, level: 'error', message: error instanceof Error ? error.message : 'Falha ao enviar álbum no anúncio.' }] }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
   sendFile: async (peerId, filePath, replyTo) => {
     try {
       const message = await ipcClient.sendFile(peerId, filePath, replyTo);
@@ -1970,6 +2098,21 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },
+  sendFiles: async (peerId, filePaths, replyTo) => {
+    try {
+      const messages = await ipcClient.sendFiles(peerId, filePaths, replyTo);
+      if (!messages.length) return;
+      const conversationId = messages[0].conversationId;
+      set((state) => ({
+        messagesByConversation: { ...state.messagesByConversation, [conversationId]: messages.reduce((rows, message) => appendUniqueMessage(rows, message), state.messagesByConversation[conversationId] || []) },
+        conversationPreviewById: { ...state.conversationPreviewById, [conversationId]: previewFromMessage(messages[messages.length - 1]) }
+      }));
+    } catch (error) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({ toasts: [...state.toasts, { id, level: 'error', message: error instanceof Error ? error.message : 'Falha ao enviar álbum.' }] }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
   sendGroupFile: async (groupId, filePath, replyTo) => {
     try {
       const message = await ipcClient.sendGroupFile(groupId, filePath, replyTo);
@@ -1993,6 +2136,21 @@ export const useLanternStore = create<LanternState>((set, get) => ({
       set((state) => ({
         toasts: [...state.toasts, { id, level: 'error', message: toastMessage }]
       }));
+      window.setTimeout(() => get().dismissToast(id), 4200);
+    }
+  },
+  sendGroupFiles: async (groupId, filePaths, replyTo) => {
+    try {
+      const messages = await ipcClient.sendGroupFiles(groupId, filePaths, replyTo);
+      if (!messages.length) return;
+      const conversationId = messages[0].conversationId;
+      set((state) => ({
+        messagesByConversation: { ...state.messagesByConversation, [conversationId]: messages.reduce((rows, message) => appendUniqueMessage(rows, message), state.messagesByConversation[conversationId] || []) },
+        conversationPreviewById: { ...state.conversationPreviewById, [conversationId]: previewFromMessage(messages[messages.length - 1]) }
+      }));
+    } catch (error) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({ toasts: [...state.toasts, { id, level: 'error', message: error instanceof Error ? error.message : 'Falha ao enviar álbum no grupo.' }] }));
       window.setTimeout(() => get().dismissToast(id), 4200);
     }
   },

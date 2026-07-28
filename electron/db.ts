@@ -1122,6 +1122,7 @@ export class DbService {
          fileSize,
          fileSha256,
          filePath,
+         albumId,
          status,
          reaction,
          deletedAt,
@@ -1150,6 +1151,7 @@ export class DbService {
          @fileSize,
          @fileSha256,
          @filePath,
+         @albumId,
          @status,
          @reaction,
          @deletedAt,
@@ -1180,6 +1182,7 @@ export class DbService {
          fileSize = excluded.fileSize,
          fileSha256 = excluded.fileSha256,
          filePath = COALESCE(messages.filePath, excluded.filePath),
+         albumId = COALESCE(excluded.albumId, messages.albumId),
          status = CASE
            WHEN messages.status = 'read' OR excluded.status = 'read' THEN 'read'
            WHEN messages.status = 'delivered' OR excluded.status = 'delivered' THEN 'delivered'
@@ -1222,6 +1225,7 @@ export class DbService {
         fileSize: row.fileSize ?? null,
         fileSha256: row.fileSha256 ?? null,
         filePath: row.filePath ?? null,
+        albumId: row.albumId ?? null,
         status: row.status ?? null,
         reaction: row.reaction ?? null,
         deletedAt: row.deletedAt ?? null,

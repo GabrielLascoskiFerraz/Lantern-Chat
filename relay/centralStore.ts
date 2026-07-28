@@ -2177,6 +2177,13 @@ export class CentralStore {
         WHERE attachment.complete = 1
           AND frame.deletedAt IS NULL
           AND frame.type = 'file:offer'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM canonical_frames deletion
+            WHERE deletion.deletedAt IS NULL
+              AND deletion.type = 'chat:delete'
+              AND deletion.targetMessageId = frame.messageId
+          )
           AND frame.createdAt > COALESCE(state.clearedAt, 0)
           AND ((frame.senderUserId = ? AND frame.targetUserId = ?)
             OR (frame.senderUserId = ? AND frame.targetUserId = ?))

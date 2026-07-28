@@ -132,6 +132,7 @@ export interface MessageRow {
   fileSize: number | null;
   fileSha256: string | null;
   filePath: string | null;
+  albumId?: string | null;
   status: 'sent' | 'delivered' | 'read' | 'failed' | null;
   reaction: '👍' | '👎' | '❤️' | '😢' | '😊' | '😂' | null;
   deletedAt: number | null;
@@ -269,10 +270,23 @@ export type AppEvent =
   | { type: 'sync:status'; active: boolean }
   | { type: 'message:received'; message: MessageRow }
   | { type: 'message:updated'; message: MessageRow }
+  | {
+      type: 'messages:batch';
+      messages: MessageRow[];
+      removed: Array<{ conversationId: string; messageId: string }>;
+      unread: Array<{ conversationId: string; unreadCount: number }>;
+      statuses: Array<{
+        messageId: string;
+        conversationId: string | null;
+        status: 'delivered' | 'read' | 'failed';
+      }>;
+      reactions: Array<{ messageId: string; summary: AnnouncementReactionSummary }>;
+      announcementReads: Array<{ messageId: string; summary: AnnouncementReadSummary }>;
+    }
   | { type: 'message:removed'; conversationId: string; messageId: string }
   | { type: 'message:favorite'; conversationId: string; messageId: string; favorite: boolean }
   | { type: 'conversation:cleared'; conversationId: string }
-  | { type: 'conversation:synchronized'; conversationId: string }
+  | { type: 'conversation:synchronized'; conversationId: string; refresh?: boolean }
   | { type: 'conversation:unread'; conversationId: string; unreadCount: number }
   | { type: 'attachments:cache-cleared'; filePaths: string[] }
   | {
@@ -388,16 +402,30 @@ export interface LanternApi {
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
+  sendAnnouncementFiles: (
+    filePaths: string[],
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow[]>;
   sendFile: (
     peerId: string,
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
+  sendFiles: (
+    peerId: string,
+    filePaths: string[],
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow[]>;
   sendGroupFile: (
     groupId: string,
     filePath: string,
     replyTo?: MessageReplyReference | null
   ) => Promise<MessageRow>;
+  sendGroupFiles: (
+    groupId: string,
+    filePaths: string[],
+    replyTo?: MessageReplyReference | null
+  ) => Promise<MessageRow[]>;
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) => Promise<MessageRow>;
   editMessage: (conversationId: string, messageId: string, text: string) => Promise<MessageRow | null>;
   reactToMessage: (
@@ -458,6 +486,7 @@ export interface LanternApi {
   pickDirectory: (defaultPath?: string) => Promise<string | null>;
   openFile: (filePath: string) => Promise<void>;
   saveFileAs: (filePath: string, fileName?: string) => Promise<void>;
+  saveAlbumToDirectory: (files: Array<{ filePath: string; fileName: string }>) => Promise<{ saved: number; canceled: boolean }>;
   openExternalUrl: (url: string) => Promise<void>;
   nativePaste: () => Promise<boolean>;
   getFilePreview: (filePath: string) => Promise<string | null>;
@@ -559,10 +588,16 @@ export const ipcClient = {
     window.lantern.sendAnnouncement(text, replyTo),
   sendAnnouncementFile: (filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendAnnouncementFile(filePath, replyTo),
+  sendAnnouncementFiles: (filePaths: string[], replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendAnnouncementFiles(filePaths, replyTo),
   sendFile: (peerId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendFile(peerId, filePath, replyTo),
+  sendFiles: (peerId: string, filePaths: string[], replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendFiles(peerId, filePaths, replyTo),
   sendGroupFile: (groupId: string, filePath: string, replyTo?: MessageReplyReference | null) =>
     window.lantern.sendGroupFile(groupId, filePath, replyTo),
+  sendGroupFiles: (groupId: string, filePaths: string[], replyTo?: MessageReplyReference | null) =>
+    window.lantern.sendGroupFiles(groupId, filePaths, replyTo),
   forwardMessageToPeer: (targetPeerId: string, sourceMessageId: string) =>
     window.lantern.forwardMessageToPeer(targetPeerId, sourceMessageId),
   editMessage: (conversationId: string, messageId: string, text: string) =>
@@ -631,6 +666,7 @@ export const ipcClient = {
   pickDirectory: (defaultPath?: string) => window.lantern.pickDirectory(defaultPath),
   openFile: (filePath: string) => window.lantern.openFile(filePath),
   saveFileAs: (filePath: string, fileName?: string) => window.lantern.saveFileAs(filePath, fileName),
+  saveAlbumToDirectory: (files: Array<{ filePath: string; fileName: string }>) => window.lantern.saveAlbumToDirectory(files),
   openExternalUrl: (url: string) => window.lantern.openExternalUrl(url),
   nativePaste: () => window.lantern.nativePaste(),
   getFilePreview: (filePath: string) => window.lantern.getFilePreview(filePath),

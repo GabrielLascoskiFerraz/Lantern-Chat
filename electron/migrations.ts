@@ -55,6 +55,7 @@ export const runMigrations = (db: Database.Database): void => {
       fileSize INTEGER,
       fileSha256 TEXT,
       filePath TEXT,
+      albumId TEXT,
       status TEXT,
       reaction TEXT,
       deletedAt INTEGER,
@@ -318,6 +319,10 @@ export const runMigrations = (db: Database.Database): void => {
   if (!messageColumns.some((column) => column.name === 'announcementExpiresAt')) {
     db.exec('ALTER TABLE messages ADD COLUMN announcementExpiresAt INTEGER;');
   }
+  if (!messageColumns.some((column) => column.name === 'albumId')) {
+    db.exec('ALTER TABLE messages ADD COLUMN albumId TEXT;');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_album ON messages(conversationId, albumId, createdAt);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_messages_server_seq ON messages(serverSeq);');
 
   db.exec(`

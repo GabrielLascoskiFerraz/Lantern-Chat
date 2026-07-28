@@ -97,8 +97,11 @@ export const Shell = () => {
     sendTyping,
     sendAnnouncement,
     sendAnnouncementFile,
+    sendAnnouncementFiles,
     sendFile,
+    sendFiles,
     sendGroupFile,
+    sendGroupFiles,
     forwardMessageToPeer,
     editMessage,
     reactToMessage,
@@ -212,6 +215,7 @@ export const Shell = () => {
           readsByMessageId={announcementReadsByMessage}
           onSend={(text, replyTo) => sendAnnouncement(text, replyTo)}
           onSendFile={(filePath, replyTo) => sendAnnouncementFile(filePath, replyTo)}
+          onSendFiles={(filePaths, replyTo) => sendAnnouncementFiles(filePaths, replyTo)}
           transferByFileId={transferMap}
           onOpenFile={openFile}
           onSaveFileAs={saveFileAs}
@@ -324,6 +328,13 @@ export const Shell = () => {
             ? sendGroupFile(group.groupId, filePath, replyTo)
             : peer
             ? sendFile(peer.deviceId, filePath, replyTo)
+            : Promise.resolve()
+        }
+        onSendFiles={(filePaths, replyTo) =>
+          group
+            ? sendGroupFiles(group.groupId, filePaths, replyTo)
+            : peer
+            ? sendFiles(peer.deviceId, filePaths, replyTo)
             : Promise.resolve()
         }
         onForwardMessage={async (targetPeerIds, sourceMessageId) => {

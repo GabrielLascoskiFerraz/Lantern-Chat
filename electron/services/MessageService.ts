@@ -46,6 +46,13 @@ export class MessageService {
   private readonly emitEvent: (event: AppEvent) => void;
   private readonly sendCanonicalFrame: (frame: ProtocolFrame) => Promise<void>;
   private readonly uploadCanonicalAttachment: MessageServiceDeps['uploadCanonicalAttachment'];
+  /**
+   * An album is persisted as independent canonical attachments so a failed file
+   * can be retried on its own. Publication, however, must preserve the order in
+   * which the user selected the images; otherwise different upload durations
+   * could make an album arrive interleaved with other messages.
+   */
+  private readonly albumPublicationQueues = new Map<string, Promise<void>>();
 
   constructor(deps: MessageServiceDeps) {
     this.db = deps.db;
@@ -206,7 +213,11 @@ export class MessageService {
     peerId: string,
     filePath: string,
     replyTo?: MessageReplyPayload | null,
-    options?: { forwardedFromMessageId?: string | null }
+    options?: {
+      forwardedFromMessageId?: string | null;
+      albumId?: string | null;
+      publicationQueueId?: string | null;
+    }
   ): Promise<DbMessage> {
     const peer = this.getPeer(peerId);
     return this.sendFileToConversation({
@@ -217,8 +228,28 @@ export class MessageService {
       ),
       filePath,
       replyTo,
-      forwardedFromMessageId: options?.forwardedFromMessageId || null
+      forwardedFromMessageId: options?.forwardedFromMessageId || null,
+      albumId: options?.albumId || null,
+      publicationQueueId: options?.publicationQueueId || null
     });
+  }
+
+  async sendFiles(
+    peerId: string,
+    filePaths: string[],
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage[]> {
+    const { imagePaths, otherPaths } = this.partitionAttachmentPaths(filePaths);
+    const albumId = imagePaths.length > 1 ? randomUUID() : null;
+    const publicationQueueId = imagePaths.length + otherPaths.length > 1 ? randomUUID() : null;
+    const messages: DbMessage[] = [];
+    for (const filePath of imagePaths) {
+      messages.push(await this.sendFile(peerId, filePath, replyTo, { albumId, publicationQueueId }));
+    }
+    for (const filePath of otherPaths) {
+      messages.push(await this.sendFile(peerId, filePath, replyTo, { publicationQueueId }));
+    }
+    return messages;
   }
 
   async sendAnnouncementFile(
@@ -230,8 +261,32 @@ export class MessageService {
       conversationId: ANNOUNCEMENTS_CONVERSATION_ID,
       filePath,
       replyTo,
-      forwardedFromMessageId: null
+      forwardedFromMessageId: null,
+      albumId: null
     });
+  }
+
+  async sendAnnouncementFiles(
+    filePaths: string[],
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage[]> {
+    const { imagePaths, otherPaths } = this.partitionAttachmentPaths(filePaths);
+    const albumId = imagePaths.length > 1 ? randomUUID() : null;
+    const publicationQueueId = imagePaths.length + otherPaths.length > 1 ? randomUUID() : null;
+    const messages: DbMessage[] = [];
+    for (const filePath of imagePaths) {
+      messages.push(await this.sendFileToConversation({
+        targetUserId: null, conversationId: ANNOUNCEMENTS_CONVERSATION_ID, filePath, replyTo,
+        forwardedFromMessageId: null, albumId, publicationQueueId
+      }));
+    }
+    for (const filePath of otherPaths) {
+      messages.push(await this.sendFileToConversation({
+        targetUserId: null, conversationId: ANNOUNCEMENTS_CONVERSATION_ID, filePath, replyTo,
+        forwardedFromMessageId: null, albumId: null, publicationQueueId
+      }));
+    }
+    return messages;
   }
 
   async retryFailedMessage(messageId: string): Promise<DbMessage> {
@@ -280,6 +335,7 @@ export class MessageService {
         const offerWithMeta = message.forwardedFromMessageId
           ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
           : offerWithReply;
+        if (message.albumId) offerWithMeta.albumId = message.albumId;
         await this.uploadAndPublishWithRetry({
           message: pending,
           offer,
@@ -326,6 +382,8 @@ export class MessageService {
     filePath: string;
     replyTo?: MessageReplyPayload | null;
     forwardedFromMessageId?: string | null;
+    albumId?: string | null;
+    publicationQueueId?: string | null;
   }): Promise<DbMessage> {
     const { targetUserId, conversationId, filePath, replyTo } = input;
     const sanitizedReply = this.sanitizeReplyPayload(replyTo);
@@ -357,6 +415,7 @@ export class MessageService {
       fileSize: offer.size,
       fileSha256: offer.sha256,
       filePath: managedFilePath,
+      albumId: input.albumId || null,
       status: 'sent',
       reaction: null,
       deletedAt: null,
@@ -381,24 +440,27 @@ export class MessageService {
       total: offer.size
     });
 
-    setImmediate(() => {
+    const publish = async (): Promise<void> => {
       const offerWithReply = sanitizedReply ? { ...offer, replyTo: sanitizedReply } : offer;
       const offerWithMeta = message.forwardedFromMessageId
         ? { ...offerWithReply, forwardedFromMessageId: message.forwardedFromMessageId }
         : offerWithReply;
-      void this.uploadAndPublishWithRetry({
+      if (message.albumId) offerWithMeta.albumId = message.albumId;
+      await this.uploadAndPublishWithRetry({
         message,
         offer,
         filePath: managedFilePath,
         targetUserId,
         offerWithMeta
-      }).then(() => {
-        // O anexo está entregue assim que conteúdo e metadados são confirmados
-        // pelo Relay; leitura do destinatário continua sendo um estado posterior.
-        this.db.updateMessageStatus(messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
-        const updated = this.db.getMessageById(messageId);
-        if (updated) this.emitEvent({ type: 'message:updated', message: updated });
-      }).catch((error) => {
+      });
+      // O anexo está entregue assim que conteúdo e metadados são confirmados
+      // pelo Relay; leitura do destinatário continua sendo um estado posterior.
+      this.db.updateMessageStatus(messageId, RELAY_ACCEPTED_MESSAGE_STATUS);
+      const updated = this.db.getMessageById(messageId);
+      if (updated) this.emitEvent({ type: 'message:updated', message: updated });
+    };
+
+    const handlePublishFailure = (error: unknown): void => {
         this.db.updateMessageStatus(messageId, 'failed');
         const updated = this.db.getMessageById(messageId);
         if (updated) this.emitEvent({ type: 'message:updated', message: updated });
@@ -406,8 +468,25 @@ export class MessageService {
           type: 'ui:toast', level: 'warning',
           message: error instanceof Error ? error.message : 'Não foi possível armazenar o anexo no Relay.'
         });
+    };
+
+    const publicationQueueId = input.publicationQueueId || message.albumId;
+    if (!publicationQueueId) {
+      setImmediate(() => void publish().catch(handlePublishFailure));
+    } else {
+      const previous = this.albumPublicationQueues.get(publicationQueueId) || Promise.resolve();
+      const queued = previous
+        // A falha de uma imagem não impede que as demais cheguem ao Relay e
+        // apareçam com sua ação individual de tentar novamente.
+        .catch(() => undefined)
+        .then(publish);
+      this.albumPublicationQueues.set(publicationQueueId, queued);
+      void queued.catch(handlePublishFailure).finally(() => {
+        if (this.albumPublicationQueues.get(publicationQueueId) === queued) {
+          this.albumPublicationQueues.delete(publicationQueueId);
+        }
       });
-    });
+    }
 
     return message;
   }
@@ -453,6 +532,16 @@ export class MessageService {
     throw lastError instanceof Error
       ? lastError
       : new Error('Não foi possível armazenar o anexo no Relay.');
+  }
+
+  private partitionAttachmentPaths(filePaths: string[]): { imagePaths: string[]; otherPaths: string[] } {
+    const unique = Array.from(new Set(filePaths.map((value) => (value || '').trim()).filter(Boolean)));
+    if (unique.length === 0) throw new Error('Nenhum anexo foi selecionado.');
+    const isImage = (filePath: string) => /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(filePath);
+    return {
+      imagePaths: unique.filter(isImage),
+      otherPaths: unique.filter((filePath) => !isImage(filePath))
+    };
   }
 
   private isEphemeralOutgoingFile(filePath: string): boolean {

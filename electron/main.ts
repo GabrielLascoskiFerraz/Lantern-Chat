@@ -69,7 +69,76 @@ class LanternApp {
   private presence!: PresenceService;
   private messageService!: MessageService;
   private readonly networkMode: 'relay' = 'relay';
-  private emitEvent: (event: AppEvent) => void = () => undefined;
+  private rawEmitEvent: (event: AppEvent) => void = () => undefined;
+  private historyEventBatchDepth = 0;
+  private readonly historyMessageBatch = new Map<string, DbMessage>();
+  private readonly historyRemovalBatch = new Map<
+    string,
+    { conversationId: string; messageId: string }
+  >();
+  private readonly historyUnreadBatch = new Map<string, number>();
+  private readonly historyStatusBatch = new Map<
+    string,
+    Extract<AppEvent, { type: 'message:status' }>
+  >();
+  private readonly historyReactionBatch = new Map<
+    string,
+    { messageId: string; summary: Extract<AppEvent, { type: 'message:reactions' }>['summary'] }
+  >();
+  private readonly historyAnnouncementReadBatch = new Map<
+    string,
+    Extract<AppEvent, { type: 'announcement:reads' }>
+  >();
+  private emitEvent = (event: AppEvent): void => {
+    if (this.historyEventBatchDepth > 0) {
+      if (event.type === 'message:received' || event.type === 'message:updated') {
+        const key = `${event.message.conversationId}\u0000${event.message.messageId}`;
+        if (event.message.deletedAt) {
+          this.historyMessageBatch.delete(key);
+          this.historyRemovalBatch.set(key, {
+            conversationId: event.message.conversationId,
+            messageId: event.message.messageId
+          });
+        } else {
+          this.historyRemovalBatch.delete(key);
+          this.historyMessageBatch.set(key, event.message);
+        }
+        return;
+      }
+      if (event.type === 'message:removed') {
+        const key = `${event.conversationId}\u0000${event.messageId}`;
+        this.historyMessageBatch.delete(key);
+        this.historyRemovalBatch.set(key, {
+          conversationId: event.conversationId,
+          messageId: event.messageId
+        });
+        return;
+      }
+      if (event.type === 'conversation:unread') {
+        this.historyUnreadBatch.set(event.conversationId, event.unreadCount);
+        return;
+      }
+      if (event.type === 'message:status') {
+        this.historyStatusBatch.set(
+          `${event.conversationId || ''}\u0000${event.messageId}`,
+          event
+        );
+        return;
+      }
+      if (event.type === 'message:reactions' || event.type === 'announcement:reactions') {
+        this.historyReactionBatch.set(event.messageId, {
+          messageId: event.messageId,
+          summary: event.summary
+        });
+        return;
+      }
+      if (event.type === 'announcement:reads') {
+        this.historyAnnouncementReadBatch.set(event.messageId, event);
+        return;
+      }
+    }
+    this.rawEmitEvent(event);
+  };
   private peersById = new Map<string, Peer>();
   private readonly knownOnlinePeerIds = new Set<string>();
   private readonly peerUnreachableFailures = new Map<string, { count: number; lastAt: number }>();
@@ -113,6 +182,54 @@ class LanternApp {
   private outboundResumeTimer: NodeJS.Timeout | null = null;
   private updateService!: UpdateService;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+
+  private beginHistoryEventBatch(): void {
+    this.historyEventBatchDepth += 1;
+  }
+
+  private endHistoryEventBatch(): void {
+    if (this.historyEventBatchDepth <= 0) return;
+    this.historyEventBatchDepth -= 1;
+    if (this.historyEventBatchDepth > 0) return;
+    const messages = Array.from(this.historyMessageBatch.values());
+    const removed = Array.from(this.historyRemovalBatch.values());
+    const unread = Array.from(this.historyUnreadBatch, ([conversationId, unreadCount]) => ({
+      conversationId,
+      unreadCount
+    }));
+    const statuses = Array.from(this.historyStatusBatch.values()).map(
+      ({ messageId, conversationId, status }) => ({ messageId, conversationId, status })
+    );
+    const reactions = Array.from(this.historyReactionBatch.values());
+    const announcementReads = Array.from(this.historyAnnouncementReadBatch.values()).map(
+      ({ messageId, summary }) => ({ messageId, summary })
+    );
+    this.historyMessageBatch.clear();
+    this.historyRemovalBatch.clear();
+    this.historyUnreadBatch.clear();
+    this.historyStatusBatch.clear();
+    this.historyReactionBatch.clear();
+    this.historyAnnouncementReadBatch.clear();
+    if (
+      messages.length === 0 &&
+      removed.length === 0 &&
+      unread.length === 0 &&
+      statuses.length === 0 &&
+      reactions.length === 0 &&
+      announcementReads.length === 0
+    ) {
+      return;
+    }
+    this.rawEmitEvent({
+      type: 'messages:batch',
+      messages,
+      removed,
+      unread,
+      statuses,
+      reactions,
+      announcementReads
+    });
+  }
 
   private getDefaultAttachmentsDir(): string {
     return path.resolve(getAttachmentsDir(app.getPath('documents')));
@@ -217,6 +334,25 @@ class LanternApp {
 
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
     await fs.promises.copyFile(sourcePath, destination);
+  }
+
+  private async saveAlbumToDirectory(files: Array<{ filePath: string; fileName: string }>): Promise<{ saved: number; canceled: boolean }> {
+    const validFiles = files
+      .map((file) => ({ filePath: path.resolve(file.filePath || ''), fileName: path.basename((file.fileName || '').trim()) || 'imagem' }))
+      .filter((file) => fs.existsSync(file.filePath) && fs.statSync(file.filePath).isFile());
+    if (!validFiles.length) throw new Error('Nenhuma imagem do álbum está disponível para salvar.');
+    const options = { title: 'Salvar álbum em', buttonLabel: 'Selecionar pasta', properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'> };
+    const result = this.mainWindow ? await dialog.showOpenDialog(this.mainWindow, options) : await dialog.showOpenDialog(options);
+    const directory = result.filePaths[0] ? path.resolve(result.filePaths[0]) : '';
+    if (result.canceled || !directory) return { saved: 0, canceled: true };
+    const used = new Set<string>();
+    for (const file of validFiles) {
+      const parsed = path.parse(file.fileName); let name = file.fileName; let number = 2;
+      while (used.has(name) || fs.existsSync(path.join(directory, name))) { name = `${parsed.name} (${number})${parsed.ext}`; number += 1; }
+      used.add(name);
+      await fs.promises.copyFile(file.filePath, path.join(directory, name));
+    }
+    return { saved: validFiles.length, canceled: false };
   }
 
   private profileFromAccount(user: AuthenticatedUser): Profile {
@@ -631,8 +767,12 @@ class LanternApp {
       sendAnnouncement: (text, replyTo) => this.messageService.sendAnnouncement(text, replyTo),
       sendAnnouncementFile: (filePath, replyTo) =>
         this.messageService.sendAnnouncementFile(filePath, replyTo),
+      sendAnnouncementFiles: (filePaths, replyTo) =>
+        this.messageService.sendAnnouncementFiles(filePaths, replyTo),
       sendFile: (peerId, filePath, replyTo) => this.messageService.sendFile(peerId, filePath, replyTo),
+      sendFiles: (peerId, filePaths, replyTo) => this.messageService.sendFiles(peerId, filePaths, replyTo),
       sendGroupFile: (groupId, filePath, replyTo) => this.sendGroupFile(groupId, filePath, replyTo),
+      sendGroupFiles: (groupId, filePaths, replyTo) => this.sendGroupFiles(groupId, filePaths, replyTo),
       forwardMessageToPeer: (targetPeerId, sourceMessageId) =>
         this.forwardMessageToPeer(targetPeerId, sourceMessageId),
       editMessage: (conversationId, messageId, text) =>
@@ -698,13 +838,14 @@ class LanternApp {
             .map((conversation) => [conversation.id, conversation.unreadCount])
         ),
       getArchivedConversationIds: () => this.db.getArchivedConversationIds(),
-      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName)
+      saveFileAs: (filePath, fileName) => this.saveFileAs(filePath, fileName),
+      saveAlbumToDirectory: (files) => this.saveAlbumToDirectory(files)
       ,getUpdateState: () => this.updateService.getState()
       ,forceUpdate: () => this.updateService.check(true)
       ,installUpdate: () => this.updateService.install()
     });
 
-    this.emitEvent = ipc.emitEvent;
+    this.rawEmitEvent = ipc.emitEvent;
     this.emitEvent({
       type: 'relay:connection',
       connected: this.relay?.isConnected() || false,
@@ -1405,9 +1546,14 @@ class LanternApp {
                 (value): value is GroupEvent => Boolean(value && typeof value === 'object')
               )
             : [];
-          events
-            .sort((left, right) => left.seq - right.seq || left.eventId.localeCompare(right.eventId))
-            .forEach((event) => this.applyGroupEvent(event));
+          this.beginHistoryEventBatch();
+          try {
+            events
+              .sort((left, right) => left.seq - right.seq || left.eventId.localeCompare(right.eventId))
+              .forEach((event) => this.applyGroupEvent(event));
+          } finally {
+            this.endHistoryEventBatch();
+          }
         } else if (conversationId.startsWith('dm:')) {
           const peerUserId = conversationId.slice(3).trim();
           if (peerUserId) {
@@ -3268,6 +3414,7 @@ class LanternApp {
           fileSize: payload.size,
           fileSha256: payload.sha256,
           filePath: null,
+          albumId: typeof payload.albumId === 'string' && payload.albumId.trim() ? payload.albumId.trim() : null,
           status: 'sent',
           reaction: null,
           deletedAt: null,
@@ -3342,6 +3489,7 @@ class LanternApp {
       if (peerId) touchedConversationIds.add(`dm:${peerId}`);
     }
     this.beginSyncActivity();
+    this.beginHistoryEventBatch();
     try {
       for (const frame of ordered) {
         if (frame.from === this.profile.deviceId) {
@@ -3351,10 +3499,11 @@ class LanternApp {
         }
       }
     } finally {
+      this.endHistoryEventBatch();
       this.endSyncActivity();
     }
     for (const conversationId of touchedConversationIds) {
-      this.emitEvent({ type: 'conversation:synchronized', conversationId });
+      this.emitEvent({ type: 'conversation:synchronized', conversationId, refresh: false });
     }
   }
 
@@ -3395,6 +3544,7 @@ class LanternApp {
         senderDeviceId: this.profile.deviceId, receiverDeviceId: frame.to, type: 'file',
         bodyText: null, fileId: payload.fileId, fileName: payload.filename,
         fileSize: payload.size, fileSha256: payload.sha256, filePath: null,
+        albumId: typeof payload.albumId === 'string' && payload.albumId.trim() ? payload.albumId.trim() : null,
         status: 'delivered', reaction: null, deletedAt: null,
         replyToMessageId: replyTo?.messageId || null,
         replyToSenderDeviceId: replyTo?.senderDeviceId || null,
@@ -3650,8 +3800,13 @@ class LanternApp {
   }
 
   private handleGroupSnapshots(snapshots: GroupSnapshot[]): void {
-    for (const snapshot of snapshots) {
-      this.applyGroupSnapshot(snapshot);
+    this.beginHistoryEventBatch();
+    try {
+      for (const snapshot of snapshots) {
+        this.applyGroupSnapshot(snapshot);
+      }
+    } finally {
+      this.endHistoryEventBatch();
     }
     this.emitEvent({ type: 'groups:updated', groups: this.getVisibleGroups() });
     for (const snapshot of snapshots) {
@@ -3875,6 +4030,9 @@ class LanternApp {
       fileSize: typeof rawMessage.fileSize === 'number' ? rawMessage.fileSize : null,
       fileSha256: typeof rawMessage.fileSha256 === 'string' ? rawMessage.fileSha256 : null,
       filePath: null,
+      albumId: typeof rawMessage.albumId === 'string' && rawMessage.albumId.trim()
+        ? rawMessage.albumId.trim()
+        : null,
       status: direction === 'out' ? 'delivered' : 'delivered',
       reaction: null,
       deletedAt: null,
@@ -4997,7 +5155,8 @@ class LanternApp {
   private async sendGroupFile(
     groupId: string,
     filePath: string,
-    replyTo?: MessageReplyPayload | null
+    replyTo?: MessageReplyPayload | null,
+    albumId: string | null = null
   ): Promise<DbMessage> {
     const group = this.db.getGroupById(groupId);
     if (!group) {
@@ -5014,6 +5173,7 @@ class LanternApp {
     const messageId = randomUUID();
     const managedFilePath = await this.ensureManagedOutgoingFileCopy(filePath, messageId);
     const { offer } = await this.fileTransfer.createOffer(group.groupId, managedFilePath, messageId);
+    if (albumId) offer.albumId = albumId;
     this.cleanupEphemeralOutgoingFile(filePath);
     const sanitizedReply = this.sanitizeGroupReply(replyTo);
     const message: DbMessage = {
@@ -5029,6 +5189,7 @@ class LanternApp {
       fileSize: offer.size,
       fileSha256: offer.sha256,
       filePath: managedFilePath,
+      albumId,
       status: 'sent',
       reaction: null,
       deletedAt: null,
@@ -5082,6 +5243,23 @@ class LanternApp {
       this.emitEvent({ type: 'message:updated', message: pending });
       return pending;
     }
+  }
+
+  private async sendGroupFiles(
+    groupId: string,
+    filePaths: string[],
+    replyTo?: MessageReplyPayload | null
+  ): Promise<DbMessage[]> {
+    const paths = Array.from(new Set(filePaths.map((value) => (value || '').trim()).filter(Boolean)));
+    if (paths.length === 0) throw new Error('Nenhum anexo foi selecionado.');
+    const isImage = (filePath: string) => /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(filePath);
+    const imagePaths = paths.filter(isImage);
+    const otherPaths = paths.filter((filePath) => !isImage(filePath));
+    const albumId = imagePaths.length > 1 ? randomUUID() : null;
+    const messages: DbMessage[] = [];
+    for (const filePath of imagePaths) messages.push(await this.sendGroupFile(groupId, filePath, replyTo, albumId));
+    for (const filePath of otherPaths) messages.push(await this.sendGroupFile(groupId, filePath, replyTo, null));
+    return messages;
   }
 
   private async uploadGroupFileToRelay(

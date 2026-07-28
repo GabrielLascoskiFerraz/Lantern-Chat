@@ -1673,6 +1673,8 @@ body {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
   padding: calc(14px * var(--lantern-density-scale)) clamp(calc(12px * var(--lantern-density-scale)), 5vw, calc(56px * var(--lantern-density-scale))) calc(36px * var(--lantern-density-scale));
   display: flex;
   flex-direction: column;
@@ -1682,6 +1684,13 @@ body {
     radial-gradient(circle at 60px 60px, color-mix(in srgb, var(--teams-muted) 6%, transparent) 1px, transparent 0),
     var(--teams-bg);
   background-size: 80px 80px;
+}
+
+.messages-history-sentinel {
+  width: 100%;
+  height: 1px;
+  flex: 0 0 1px;
+  pointer-events: none;
 }
 
 .messages-skeleton-list {
@@ -6809,4 +6818,201 @@ body {
 
 .platform-emoji-native {
   display: inline;
+}
+
+.message-album {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  width: min(440px, 68vw);
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--colorNeutralBackground3);
+}
+
+.message-album-2 .message-album-tile:first-child:last-child,
+.message-album-1 .message-album-tile:first-child:last-child {
+  grid-column: 1 / -1;
+}
+
+.message-album-tile {
+  position: relative;
+  min-width: 0;
+  min-height: 130px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--colorNeutralBackground3);
+  cursor: pointer;
+}
+
+.message-album-tile:disabled { cursor: default; }
+.message-album-tile img { width: 100%; height: 100%; min-height: 130px; object-fit: cover; display: block; }
+.message-album-loading { display: grid; min-height: 130px; place-items: center; }
+.message-album-more { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, #000 54%, transparent); color: #fff; font-size: calc(18px * var(--lantern-effective-font-scale)); line-height: 1; font-weight: 700; }
+.message-album-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: var(--colorNeutralForeground3); font-size: 13px; }
+.album-preview-navigation {
+  display: inline-flex;
+  align-items: stretch;
+  gap: calc(8px * var(--lantern-density-scale));
+  min-height: 32px;
+}
+
+.album-preview-navigation > .fui-Button {
+  flex: 0 0 auto;
+}
+
+.album-preview-navigation .image-preview-position {
+  display: inline-flex;
+  min-width: 72px;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  text-align: center;
+  color: var(--colorNeutralForeground2);
+  font-size: calc(12px * var(--lantern-effective-font-scale)) !important;
+  line-height: normal;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.album-gallery-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-width: min(920px, calc(100vw - 32px)) !important;
+  height: min(780px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+}
+
+.album-gallery-dialog .fui-DialogBody {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.album-gallery-title {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8px * var(--lantern-density-scale));
+}
+
+.album-gallery-count {
+  color: var(--colorNeutralForeground3);
+  font-size: calc(12px * var(--lantern-effective-font-scale));
+  font-weight: 400;
+}
+
+.album-gallery-content {
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: auto;
+  padding-inline-end: calc(4px * var(--lantern-density-scale));
+}
+
+.album-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: calc(10px * var(--lantern-density-scale));
+}
+
+.album-gallery-item {
+  position: relative;
+  min-width: 0;
+  aspect-ratio: 1;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: var(--borderRadiusLarge);
+  background: var(--colorNeutralBackground3);
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.album-gallery-item:not(:disabled):hover {
+  border-color: var(--colorBrandStroke1);
+  box-shadow: var(--shadow8);
+  transform: translateY(-1px);
+}
+
+.album-gallery-item:not(:disabled):focus-visible {
+  outline: 2px solid var(--colorStrokeFocus2);
+  outline-offset: 2px;
+}
+
+.album-gallery-item:disabled {
+  cursor: default;
+}
+
+.album-gallery-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 160ms ease;
+}
+
+.album-gallery-item:not(:disabled):hover img {
+  transform: scale(1.025);
+}
+
+.album-gallery-loading {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: calc(8px * var(--lantern-density-scale));
+  color: var(--colorNeutralForeground3);
+  font-size: calc(12px * var(--lantern-effective-font-scale));
+}
+
+.album-gallery-index {
+  position: absolute;
+  inset-inline-end: 8px;
+  inset-block-end: 8px;
+  display: grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  padding-inline: 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: color-mix(in srgb, #000 62%, transparent);
+  font-size: calc(11px * var(--lantern-effective-font-scale));
+  line-height: 1;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.album-gallery-actions {
+  align-items: center;
+  padding-top: calc(8px * var(--lantern-density-scale));
+}
+
+.album-gallery-status {
+  margin-inline-end: auto;
+  color: var(--colorNeutralForeground3);
+  font-size: calc(12px * var(--lantern-effective-font-scale));
+}
+
+@media (max-width: 620px) {
+  .message-album { width: min(100%, 360px); }
+  .message-album-tile, .message-album-tile img, .message-album-loading { min-height: 108px; }
+  .album-gallery-dialog {
+    width: 100vw;
+    max-width: 100vw !important;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+  .album-gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: calc(6px * var(--lantern-density-scale));
+  }
+  .album-gallery-actions {
+    flex-wrap: wrap;
+  }
+  .album-gallery-status {
+    flex-basis: 100%;
+  }
 }

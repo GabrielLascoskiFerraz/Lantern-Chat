@@ -39,6 +39,7 @@ interface MessageComposerProps {
   onSubmitEdit?: (text: string) => Promise<void>;
   onTypingChange?: (isTyping: boolean) => Promise<void>;
   onSendFile?: (filePath: string, replyTo?: MessageReplyReference | null) => Promise<void>;
+  onSendFiles?: (filePaths: string[], replyTo?: MessageReplyReference | null) => Promise<void>;
   onPaste?: () => void;
   replyDraft?: ComposerReplyDraft | null;
   onCancelReply?: () => void;
@@ -568,6 +569,7 @@ export const MessageComposer = ({
   onSubmitEdit,
   onTypingChange,
   onSendFile,
+  onSendFiles,
   onPaste,
   replyDraft,
   onCancelReply,
@@ -1253,9 +1255,8 @@ export const MessageComposer = ({
       if (pendingFilePaths.length > 0 && onSendFile) {
         const filePathsToSend = [...pendingFilePaths];
         setPendingFilePaths([]);
-        for (const filePath of filePathsToSend) {
-          await onSendFile(filePath, replyTo);
-        }
+        if (filePathsToSend.length > 1 && onSendFiles) await onSendFiles(filePathsToSend, replyTo);
+        else for (const filePath of filePathsToSend) await onSendFile(filePath, replyTo);
         sentSomething = true;
       }
       if (sentSomething && replyTo) {

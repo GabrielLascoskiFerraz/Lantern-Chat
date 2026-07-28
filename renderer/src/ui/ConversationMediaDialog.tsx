@@ -217,6 +217,7 @@ export const ConversationMediaDialog = ({
   const [error, setError] = useState('');
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [viewer, setViewer] = useState<{ item: ConversationMediaItem; src: string; filePath: string } | null>(null);
+  const removedMessageIdsRef = useRef(new Set<string>());
 
   const load = useCallback(async (append: boolean) => {
     if (!open || loading) return;
@@ -229,7 +230,10 @@ export const ConversationMediaDialog = ({
         PAGE_SIZE
       );
       setItems((current) => {
-        const combined = append ? [...current, ...page.items] : page.items;
+        const availableItems = page.items.filter(
+          (item) => !removedMessageIdsRef.current.has(item.messageId)
+        );
+        const combined = append ? [...current, ...availableItems] : availableItems;
         return Array.from(new Map(combined.map((item) => [item.messageId, item])).values());
       });
       setCursor(page.nextCursor);
@@ -242,10 +246,17 @@ export const ConversationMediaDialog = ({
 
   useEffect(() => {
     if (!open) return;
+    removedMessageIdsRef.current.clear();
     setItems([]); setCursor(null); setHasMore(false); setError(''); setViewer(null);
     setLoading(true);
     void ipcClient.listConversationMedia(conversationId, kind, null, PAGE_SIZE)
-      .then((page) => { setItems(page.items); setCursor(page.nextCursor); setHasMore(page.hasMore); })
+      .then((page) => {
+        setItems(page.items.filter(
+          (item) => !removedMessageIdsRef.current.has(item.messageId)
+        ));
+        setCursor(page.nextCursor);
+        setHasMore(page.hasMore);
+      })
       .catch((cause) => setError(cause instanceof Error ? cause.message : 'Não foi possível consultar os arquivos.'))
       .finally(() => setLoading(false));
   }, [conversationId, kind, open, refreshRevision]);
@@ -257,7 +268,9 @@ export const ConversationMediaDialog = ({
       setRefreshRevision((current) => current + 1);
     }
     if (event.type === 'message:removed' && event.conversationId === conversationId) {
+      removedMessageIdsRef.current.add(event.messageId);
       setItems((current) => current.filter((item) => item.messageId !== event.messageId));
+      setViewer((current) => current?.item.messageId === event.messageId ? null : current);
     }
   }), [conversationId, open]);
 

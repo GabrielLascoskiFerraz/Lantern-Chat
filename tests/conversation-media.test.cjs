@@ -69,6 +69,23 @@ test('galeria canônica filtra e pagina a mesma base para os dois participantes'
       store.listConversationMedia(bob.userId, alice.userId, 'media').items.map((item) => item.messageId),
       ['media-2', 'media-1']
     );
+    store.saveFrame({
+      messageId: 'delete-media-1',
+      type: 'chat:delete',
+      senderUserId: alice.userId,
+      targetUserId: bob.userId,
+      conversationId: `dm:${[alice.userId, bob.userId].sort().join(':')}`,
+      createdAt: createdAt + 1,
+      payload: { targetMessageId: 'media-1' }
+    });
+    assert.deepEqual(
+      store.listConversationMedia(alice.userId, bob.userId, 'media').items.map((item) => item.messageId),
+      ['media-2']
+    );
+    assert.deepEqual(
+      store.listConversationMedia(bob.userId, alice.userId, 'media').items.map((item) => item.messageId),
+      ['media-2']
+    );
     store.close();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
