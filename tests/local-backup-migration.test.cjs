@@ -138,7 +138,7 @@ test('consolida backups locais em usuários, DMs, grupos e anexos canônicos', a
     const manifest = validateConvertedBackup(converted.backupFile);
     assert.equal(manifest.kind, 'lantern-relay-backup');
     assert.equal(manifest.version, 2);
-    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.schemaVersion, 3);
     assert.equal(manifest.source, 'lantern-local-backups');
     assert.equal(manifest.appVersion, require('../package.json').version);
     assert.equal(manifest.counts.groups, 1);

@@ -9,6 +9,7 @@ import { isUpdatePlatform } from '../relay/updateStore';
 
 interface RelayUiSettings {
   port: number;
+  localHostname: string;
   tlsCertFile: string;
   tlsKeyFile: string;
   startAtLogin: boolean;
@@ -59,6 +60,11 @@ const runConvertedBackupImport = (bundlePath: string): Promise<Record<string, un
 const normalizeSettings = (value: Partial<RelayUiSettings>): RelayUiSettings => ({
   port: Number.isFinite(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535
     ? Math.trunc(Number(value.port)) : 43190,
+  localHostname: (() => {
+    const raw = String(value.localHostname || 'lantern-relay.local').trim().toLowerCase().replace(/\.+$/, '');
+    const label = raw.endsWith('.local') ? raw.slice(0, -6) : raw;
+    return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label) ? `${label}.local` : 'lantern-relay.local';
+  })(),
   tlsCertFile: String(value.tlsCertFile || '').trim(),
   tlsKeyFile: String(value.tlsKeyFile || '').trim(),
   startAtLogin: value.startAtLogin === true,
@@ -109,7 +115,7 @@ const startRelay = async () => {
   process.env.LANTERN_WEB_CLIENT_DIR = path.join(process.resourcesPath, 'dist-renderer');
   const runtime = require('../relay/main') as typeof import('../relay/main');
   const config: RelayConfig = {
-    host: '0.0.0.0', port: settings.port, pingIntervalMs: 5_000, peerTimeoutMs: 30_000,
+    host: '0.0.0.0', port: settings.port, localHostname: settings.localHostname, pingIntervalMs: 5_000, peerTimeoutMs: 30_000,
     presenceBroadcastIntervalMs: 12_000, maxPayloadBytes: 8 * 1024 * 1024,
     tlsCertFile: settings.tlsCertFile || null, tlsKeyFile: settings.tlsKeyFile || null, externalMode: false
   };
@@ -293,7 +299,7 @@ ipcMain.handle('relay-ui:openDashboard', async () => {
 ipcMain.handle('relay-ui:updateSettings', async (_event, value: Partial<RelayUiSettings>) => {
   const previous = loadSettings();
   const next = saveSettings(value);
-  const connectionChanged = previous.port !== next.port || previous.tlsCertFile !== next.tlsCertFile || previous.tlsKeyFile !== next.tlsKeyFile;
+  const connectionChanged = previous.port !== next.port || previous.localHostname !== next.localHostname || previous.tlsCertFile !== next.tlsCertFile || previous.tlsKeyFile !== next.tlsKeyFile;
   return relay && connectionChanged ? restartRelay() : snapshot();
 });
 const pickPem = async (title: string) => {

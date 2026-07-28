@@ -277,6 +277,7 @@ Usar diretório, host e porta personalizados:
 LANTERN_RELAY_DATA_DIR='/caminho/lantern-relay' \
 LANTERN_RELAY_HOST='0.0.0.0' \
 LANTERN_RELAY_PORT='43190' \
+LANTERN_RELAY_LOCAL_HOSTNAME='lantern-relay.local' \
 npm run relay:start
 ```
 
@@ -295,6 +296,7 @@ Variáveis disponíveis:
 | --- | --- |
 | `LANTERN_RELAY_DATA_DIR` | Diretório dos dados do Relay |
 | `LANTERN_RELAY_HOST` / `LANTERN_RELAY_PORT` | Interface e porta de escuta |
+| `LANTERN_RELAY_LOCAL_HOSTNAME` | Nome mDNS editável usado na rede local, sempre terminado em `.local` |
 | `LANTERN_RELAY_TLS_CERT` / `LANTERN_RELAY_TLS_KEY` | Certificado e chave TLS |
 | `LANTERN_RELAY_EXTERNAL=1` | Ativa o modo externo e exige TLS |
 | `LANTERN_RELAY_MASTER_KEY` | Fornece uma chave mestra externamente |
@@ -314,6 +316,7 @@ A Relay UI permite:
 - iniciar, parar e reiniciar o servidor;
 - iniciar com o sistema e ligar o Relay automaticamente;
 - configurar porta, certificado e chave;
+- configurar o endereço local `.local` usado na detecção automática e nas conexões manuais;
 - gerenciar contas, permissões e redefinições de senha;
 - administrar anúncios, calendário e GIFs;
 - selecionar os instaladores distribuídos aos clientes;

@@ -137,8 +137,29 @@ const renderAddresses = (state) => {
   const addresses = Array.isArray(state.localAddresses) ? state.localAddresses : [];
   const protocol = state.tls ? 'wss' : 'ws';
   const port = state.port || state.settings?.port || 43190;
+  const localHostname = state.settings?.localHostname || 'lantern-relay.local';
+  const localEndpoint = `${protocol}://${localHostname}:${port}`;
+  const localButton = document.createElement('button');
+  localButton.type = 'button';
+  localButton.className = 'address local-address';
+  const localCode = document.createElement('code');
+  const localHint = document.createElement('span');
+  localCode.textContent = localEndpoint;
+  localHint.textContent = 'Copiar';
+  localButton.append(localCode, localHint);
+  localButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(localEndpoint);
+      localHint.textContent = 'Copiado';
+      showFeedback('Endereço .local copiado para a área de transferência.');
+      window.setTimeout(() => { localHint.textContent = 'Copiar'; }, 1_600);
+    } catch (error) {
+      showFeedback(cleanError(error), 'error');
+    }
+  });
+  list.append(localButton);
   if (!addresses.length) {
-    list.append(emptyState('⌁', 'Nenhuma interface de rede', 'Conecte este computador a uma rede local.'));
+    list.append(emptyState('⌁', 'Nenhuma interface de rede', 'O endereço .local continua disponível quando o mDNS estiver ativo.'));
     return;
   }
   for (const ip of addresses) {
@@ -523,6 +544,7 @@ const render = (state) => {
 
   if (!settingsDirty) {
     $('port-input').value = String(state.settings?.port || 43190);
+    $('local-hostname-input').value = state.settings?.localHostname || 'lantern-relay.local';
     $('cert-input').value = state.settings?.tlsCertFile || '';
     $('key-input').value = state.settings?.tlsKeyFile || '';
     $('start-at-login').checked = Boolean(state.settings?.startAtLogin);
@@ -626,6 +648,7 @@ $('pick-key').addEventListener('click', async () => {
   if (selected) { $('key-input').value = selected; markSettingsDirty(); }
 });
 $('port-input').addEventListener('input', markSettingsDirty);
+$('local-hostname-input').addEventListener('input', markSettingsDirty);
 $('start-at-login').addEventListener('change', markSettingsDirty);
 $('start-relay-on-launch').addEventListener('change', markSettingsDirty);
 $('save-settings').addEventListener('click', async () => {
@@ -634,9 +657,15 @@ $('save-settings').addEventListener('click', async () => {
     showFeedback('Informe uma porta entre 1 e 65535.', 'error');
     return;
   }
+  const localHostname = $('local-hostname-input').value.trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(localHostname)) {
+    showFeedback('Informe um nome local válido, por exemplo lantern-relay.local.', 'error');
+    return;
+  }
   await runAction(async () => {
     const state = await api.updateSettings({
       port,
+      localHostname,
       tlsCertFile: $('cert-input').value,
       tlsKeyFile: $('key-input').value,
       startAtLogin: $('start-at-login').checked,

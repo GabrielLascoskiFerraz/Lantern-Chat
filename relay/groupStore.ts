@@ -149,6 +149,14 @@ export class GroupStore {
     this.persist();
   }
 
+  flushPersistence(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.persist();
+  }
+
   getStoreFile(): string {
     return this.canonicalState?.location || this.legacyStoreFile;
   }
@@ -582,13 +590,36 @@ export class GroupStore {
       : Number.MAX_SAFE_INTEGER;
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 100, 500));
     const allEvents = this.eventsByGroupId.get(group.groupId) || [];
+    const deletedMessageIds = new Set(
+      allEvents
+        .filter((event) => event.type === 'group.message.deletedForEveryone')
+        .map((event) => {
+          const payload = event.payload && typeof event.payload === 'object'
+            ? event.payload as Record<string, unknown>
+            : {};
+          return typeof payload.targetMessageId === 'string'
+            ? payload.targetMessageId
+            : typeof payload.messageId === 'string'
+              ? payload.messageId
+              : '';
+        })
+        .filter(Boolean)
+    );
     const createdCandidates = allEvents
-      .filter((event) =>
-        event.type === 'group.message.created' &&
-        (safeBeforeSeq < Number.MAX_SAFE_INTEGER
+      .filter((event) => {
+        if (event.type !== 'group.message.created') return false;
+        if (!(safeBeforeSeq < Number.MAX_SAFE_INTEGER
           ? event.seq < safeBeforeSeq
-          : event.createdAt < safeBefore)
-      )
+          : event.createdAt < safeBefore)) return false;
+        const payload = event.payload && typeof event.payload === 'object'
+          ? event.payload as Record<string, unknown>
+          : {};
+        const message = payload.message && typeof payload.message === 'object'
+          ? payload.message as Record<string, unknown>
+          : {};
+        const messageId = typeof message.messageId === 'string' ? message.messageId : '';
+        return Boolean(messageId && !deletedMessageIds.has(messageId));
+      })
       .slice(-(safeLimit + 1));
     const hasMore = createdCandidates.length > safeLimit;
     const createdPage = createdCandidates.slice(-safeLimit);
@@ -624,6 +655,51 @@ export class GroupStore {
       return typeof metadata.messageId === 'string' && messageIds.has(metadata.messageId);
     });
     return { events, hasMore };
+  }
+
+  getUnreadMessageCountForDevice(
+    groupId: string,
+    deviceId: string,
+    afterSeq = 0
+  ): number {
+    const group = this.getRequiredGroup(groupId);
+    this.assertActiveMember(group, deviceId);
+    const safeAfterSeq = Math.max(0, Math.trunc(afterSeq) || 0);
+    const events = this.eventsByGroupId.get(group.groupId) || [];
+    const deletedMessageIds = new Set(
+      events
+        .filter((event) => event.type === 'group.message.deletedForEveryone')
+        .map((event) => {
+          const payload =
+            event.payload && typeof event.payload === 'object'
+              ? event.payload as Record<string, unknown>
+              : {};
+          return typeof payload.targetMessageId === 'string'
+            ? payload.targetMessageId
+            : '';
+        })
+        .filter(Boolean)
+    );
+    return events.reduce((count, event) => {
+      if (
+        event.seq <= safeAfterSeq ||
+        event.type !== 'group.message.created' ||
+        event.actorDeviceId === deviceId
+      ) {
+        return count;
+      }
+      const payload =
+        event.payload && typeof event.payload === 'object'
+          ? event.payload as Record<string, unknown>
+          : {};
+      const message =
+        payload.message && typeof payload.message === 'object'
+          ? payload.message as Record<string, unknown>
+          : {};
+      const messageId =
+        typeof message.messageId === 'string' ? message.messageId : '';
+      return messageId && !deletedMessageIds.has(messageId) ? count + 1 : count;
+    }, 0);
   }
 
   listMediaForDevice(

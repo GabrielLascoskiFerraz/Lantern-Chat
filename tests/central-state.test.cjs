@@ -46,6 +46,40 @@ test('um Relay novo começa sem conta administrativa padrão', () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('migração do Relay atualiza canonical_frames antigo antes de criar o índice de alvo', () => {
+  const root = createTempDir();
+  const dataDir = path.join(root, 'central');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const databaseFile = path.join(dataDir, 'lantern-relay.db');
+  const legacy = new Database(databaseFile);
+  legacy.exec(`
+    CREATE TABLE canonical_frames (
+      messageId TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      senderUserId TEXT NOT NULL,
+      targetUserId TEXT,
+      conversationId TEXT NOT NULL,
+      payloadCipher TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      deletedAt INTEGER
+    );
+  `);
+  legacy.close();
+
+  try {
+    const store = new CentralStore(dataDir, silentLog);
+    const migrated = new Database(databaseFile, { readonly: true });
+    const columns = migrated.prepare('PRAGMA table_info(canonical_frames)').all();
+    const columnNames = columns.map((column) => column.name);
+    assert.equal(columnNames.includes('targetMessageId'), true);
+    assert.ok(migrated
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_frames_target_message'")
+      .get());
+    migrated.close();
+    store.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('estado canônico é cifrado e sobrevive à reabertura do SQLite', () => {
   const root = createTempDir();
   const dataDir = path.join(root, 'central');
@@ -175,7 +209,7 @@ test('pesquisa, anexos, auditoria e backup permanecem canônicos e cifrados', as
     const manifest = validateConvertedBackup(backup.file);
     assert.equal(manifest.kind, 'lantern-relay-backup');
     assert.equal(manifest.version, 2);
-    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.schemaVersion, 3);
     assert.equal(manifest.source, 'lantern-relay');
     assert.equal(manifest.appVersion, '9.8.7-test');
     assert.equal(manifest.counts.users, 2);
@@ -340,6 +374,55 @@ test('sincronização incremental usa sequência canônica e deduplica reenvios'
   }
 });
 
+test('mensagens recebidas offline permanecem não lidas até a sequência ser confirmada', () => {
+  const root = createTempDir();
+  try {
+    const store = new CentralStore(path.join(root, 'central'), silentLog);
+    const sender = createAdmin(store);
+    const receiver = store.createUser({
+      username: 'offline-unread',
+      displayName: 'Offline Unread',
+      password: 'offline-unread-password'
+    });
+    const conversationId =
+      `dm:${[sender.userId, receiver.userId].sort().join(':')}`;
+    for (let index = 1; index <= 3; index += 1) {
+      store.saveFrame({
+        messageId: `offline-unread-${index}`,
+        type: 'chat:text',
+        senderUserId: sender.userId,
+        targetUserId: receiver.userId,
+        conversationId,
+        createdAt: Date.now() + index,
+        payload: { text: `offline ${index}` }
+      });
+    }
+
+    let preference = store.getUserPreferences(receiver.userId).conversations
+      .find((item) => item.conversationId === `dm:${sender.userId}`);
+    assert.equal(preference.unreadCount, 3);
+
+    const secondSeq = store.getFrameServerSeq('offline-unread-2');
+    store.setUserConversationPreference(receiver.userId, {
+      conversationId: `dm:${sender.userId}`,
+      readSeq: secondSeq,
+      readAt: Date.now()
+    });
+    preference = store.getUserPreferences(receiver.userId).conversations
+      .find((item) => item.conversationId === `dm:${sender.userId}`);
+    assert.equal(preference.unreadCount, 1);
+
+    store.close();
+    const reopened = new CentralStore(path.join(root, 'central'), silentLog);
+    preference = reopened.getUserPreferences(receiver.userId).conversations
+      .find((item) => item.conversationId === `dm:${sender.userId}`);
+    assert.equal(preference.unreadCount, 1);
+    reopened.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('diretório só oculta contas desativadas e limpa estados antigos de contato esquecido', () => {
   const root = createTempDir();
   const dataDir = path.join(root, 'central');
@@ -412,7 +495,8 @@ test('onboarding e preferências do usuário persistem no Relay canônico', () =
     const preferences = reopened.getUserPreferences(user.userId);
     assert.deepEqual(preferences.conversations[0], {
       conversationId: 'dm:peer', pinned: true, archived: true, manualUnread: true,
-      readAt: 0, updatedAt: preferences.conversations[0].updatedAt
+      readAt: 0, readSeq: 0, unreadCount: 1,
+      updatedAt: preferences.conversations[0].updatedAt
     });
     assert.deepEqual(preferences.messages[0], {
       messageId: 'favorite-message', favorite: true,

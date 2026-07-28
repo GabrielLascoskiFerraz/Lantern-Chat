@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('relayUi', {
   removeUpdateInstaller: (platform: 'win32' | 'darwin' | 'linux') => ipcRenderer.invoke('relay-ui:removeUpdateInstaller', platform),
   stickerPreview: (relativePath: string) => ipcRenderer.invoke('relay-ui:stickerPreview', relativePath),
   openDashboard: () => ipcRenderer.invoke('relay-ui:openDashboard'),
-  updateSettings: (input: { port?: number; tlsCertFile?: string; tlsKeyFile?: string; startAtLogin?: boolean; startRelayOnLaunch?: boolean }) =>
+  updateSettings: (input: { port?: number; localHostname?: string; tlsCertFile?: string; tlsKeyFile?: string; startAtLogin?: boolean; startRelayOnLaunch?: boolean }) =>
     ipcRenderer.invoke('relay-ui:updateSettings', input),
   pickCertificate: () => ipcRenderer.invoke('relay-ui:pickCertificate'),
   pickPrivateKey: () => ipcRenderer.invoke('relay-ui:pickPrivateKey')

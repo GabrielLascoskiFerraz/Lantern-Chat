@@ -2304,7 +2304,11 @@ export class RelayClient {
       Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535
         ? Math.trunc(rawPort)
         : DEFAULT_RELAY_PORT;
-    return formatWsUrl(remoteAddress, port, envelope.secure === true);
+    const advertisedHostname = asString(envelope.hostname);
+    const host = advertisedHostname && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/i.test(advertisedHostname)
+      ? advertisedHostname
+      : remoteAddress;
+    return formatWsUrl(host, port, envelope.secure === true);
   }
 
   private queueCentralDownloadWork(

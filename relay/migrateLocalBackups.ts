@@ -117,7 +117,16 @@ const slug = (text: string): string => {
   const normalized = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9._-]+/g, '.').replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
   return (normalized || 'usuario').slice(0, 40).padEnd(3, '0');
 };
+const isAnnouncementMessage = (row: LegacyMessage): boolean =>
+  row.type === 'announcement' || row.conversationId === 'announcements';
+const canonicalLegacyConversationKey = (row: LegacyMessage): string => {
+  if (row.conversationId.startsWith('group:')) return row.conversationId;
+  if (isAnnouncementMessage(row)) return 'announcements';
+  return `dm:${[row.senderDeviceId, row.receiverDeviceId || '']
+    .sort((left, right) => left.localeCompare(right)).join(':')}`;
+};
 const messageSignature = (row: LegacyMessage): string => JSON.stringify({
+  conversation: canonicalLegacyConversationKey(row),
   sender: row.senderDeviceId, receiver: row.receiverDeviceId, type: row.type, text: row.bodyText, fileId: row.fileId,
   fileName: row.fileName, fileSize: row.fileSize, sha: row.fileSha256, reply: row.replyToMessageId, forwarded: row.forwardedFromMessageId,
   editedAt: row.editedAt, deletedAt: row.deletedAt
@@ -126,17 +135,35 @@ const messageSignature = (row: LegacyMessage): string => JSON.stringify({
 const resolveAttachment = (message: LegacyMessage, backups: LegacyBackup[]): ResolvedAttachment | null => {
   const source = backups.find((backup) => backup.root === message.sourceRoot);
   const pools = [source, ...backups.filter((backup) => backup !== source)].filter((item): item is LegacyBackup => Boolean(item));
-  const expectedNames = new Set([message.filePath ? path.basename(message.filePath) : '', message.fileName ? `${message.messageId}_${message.fileName}` : '', message.fileName || ''].filter(Boolean));
-  let candidates = pools.flatMap((backup) => backup.attachmentFiles.filter((file) => expectedNames.has(path.basename(file))));
-  if (!candidates.length && message.fileSize !== null) candidates = pools.flatMap((backup) => backup.attachmentFiles.filter((file) => fs.statSync(file).size === message.fileSize));
-  for (const file of candidates) {
+  const ranked = pools.flatMap((backup) => backup.attachmentFiles.map((file) => {
+    const basename = path.basename(file);
+    const rank =
+      message.filePath && basename === path.basename(message.filePath) ? 0 :
+      message.fileName && basename === `${message.messageId}_${message.fileName}` ? 1 :
+      message.fileName && basename === message.fileName ? 2 :
+      message.fileSize !== null && fs.statSync(file).size === message.fileSize ? 3 : 99;
+    return { file, rank };
+  })).filter((candidate) => candidate.rank < 99)
+    .sort((left, right) => left.rank - right.rank || left.file.localeCompare(right.file));
+  const verified: Array<ResolvedAttachment & { rank: number }> = [];
+  for (const { file, rank } of ranked) {
     const size = fs.statSync(file).size;
     if (message.fileSize !== null && size !== message.fileSize) continue;
     const sha256 = sha256File(file);
     if (message.fileSha256 && sha256 !== message.fileSha256.toLowerCase()) continue;
-    return { file, size, sha256 };
+    verified.push({ file, size, sha256, rank });
   }
-  return null;
+  if (!verified.length) return null;
+  const bestRank = verified[0].rank;
+  const best = verified.filter((candidate) => candidate.rank === bestRank);
+  if (!message.fileSha256 && new Set(best.map((candidate) => candidate.sha256)).size > 1) {
+    return null;
+  }
+  return {
+    file: best[0].file,
+    size: best[0].size,
+    sha256: best[0].sha256
+  };
 };
 
 const buildPlan = (options: CliOptions): MigrationPlan => {
@@ -172,6 +199,11 @@ const buildPlan = (options: CliOptions): MigrationPlan => {
     return { deviceId: profile.deviceId, profile, username, password: configured.password || '', department: configured.department || '', role: configured.role || 'user' } satisfies PlannedUser;
   });
   const knownDevices = new Set(users.map((user) => user.deviceId));
+  for (const user of users) {
+    if (user.password) {
+      warnings.push(`A senha informada para ${user.username} foi ignorada: contas migradas sempre definem a própria senha no primeiro acesso.`);
+    }
+  }
   const messageById = new Map<string, LegacyMessage>();
   for (const backup of backups) for (const message of backup.messages) {
     const existing = messageById.get(message.messageId);
@@ -250,7 +282,11 @@ const latestRows = (backups: LegacyBackup[], rows: (backup: LegacyBackup) => Jso
     const id = key(row); const current = latest.get(id);
     if (id && (!current || numberValue(row, timestamp) >= numberValue(current, timestamp))) latest.set(id, row);
   }
-  return Array.from(latest.values());
+  return Array.from(latest.values()).sort(
+    (left, right) =>
+      numberValue(left, timestamp) - numberValue(right, timestamp) ||
+      key(left).localeCompare(key(right))
+  );
 };
 
 const writeFileChunks = (file: string, write: (index: number, chunk: Buffer) => void): void => {
@@ -269,7 +305,7 @@ const buildGroups = (plan: MigrationPlan, deviceToUser: Map<string, string>, gro
     if (id && (!current || numberValue(row, 'updatedAt') >= numberValue(current, 'updatedAt'))) groupRows.set(id, row);
   }
   const outputGroups: RelayGroup[] = []; const eventsByGroupId: Record<string, RelayGroupEvent[]> = {}; const attachmentMetadata: RelayGroupAttachmentMetadata[] = [];
-  for (const [groupId, row] of groupRows) {
+  for (const [groupId, row] of Array.from(groupRows.entries()).sort(([left], [right]) => left.localeCompare(right))) {
     const memberRows = plan.backups.flatMap((backup) => backup.groupMembers.filter((member) => value(member, 'groupId') === groupId));
     const memberByDevice = new Map<string, Json>();
     for (const member of memberRows) { const id = value(member, 'deviceId'); const current = memberByDevice.get(id); if (id && deviceToUser.has(id) && (!current || numberValue(member, 'updatedAt') >= numberValue(current, 'updatedAt'))) memberByDevice.set(id, member); }
@@ -281,28 +317,39 @@ const buildGroups = (plan: MigrationPlan, deviceToUser: Map<string, string>, gro
       members[userId] = { groupId, deviceId: userId, role: (['owner','admin'].includes(value(member, 'role')) ? value(member, 'role') : 'member') as RelayGroupMember['role'], status: (['left','removed'].includes(value(member, 'status')) ? value(member, 'status') : 'active') as RelayGroupMember['status'], displayNameSnapshot: nullable(member, 'displayNameSnapshot'), avatarEmojiSnapshot: nullable(member, 'avatarEmojiSnapshot'), avatarBgSnapshot: nullable(member, 'avatarBgSnapshot'), joinedAt: numberValue(member, 'joinedAt') || numberValue(row, 'createdAt'), updatedAt: numberValue(member, 'updatedAt') || numberValue(row, 'updatedAt') };
     }
     if (!Object.values(members).some((member) => member.role === 'owner')) members[createdBy] = { ...(members[createdBy] || { groupId, deviceId: createdBy, status: 'active', displayNameSnapshot: null, avatarEmojiSnapshot: null, avatarBgSnapshot: null, joinedAt: numberValue(row, 'createdAt'), updatedAt: numberValue(row, 'updatedAt') }), role: 'owner' };
-    const pinnedIds = Array.from(new Set(plan.backups.flatMap((backup) => backup.pinned.filter((pin) => value(pin, 'groupId') === groupId).map((pin) => value(pin, 'messageId'))).filter(Boolean)));
+    const retainedGroupMessages = plan.messages.filter((item) => item.conversationId === `group:${groupId}`);
+    const retainedMessageIds = new Set(retainedGroupMessages.map((item) => item.messageId));
+    const pinnedIds = Array.from(new Set(plan.backups.flatMap((backup) => backup.pinned
+      .filter((pin) => value(pin, 'groupId') === groupId)
+      .map((pin) => value(pin, 'messageId')))
+      .filter((messageId) => Boolean(messageId && retainedMessageIds.has(messageId)))))
+      .sort((left, right) => left.localeCompare(right));
     const group: RelayGroup = { groupId, name: value(row, 'name') || 'Grupo', emoji: value(row, 'emoji') || '👥', avatarBg: value(row, 'avatarBg') || '#147ad6', description: value(row, 'description'), createdByDeviceId: createdBy, createdAt: numberValue(row, 'createdAt') || Date.now(), updatedAt: numberValue(row, 'updatedAt') || Date.now(), lastEventSeq: 0, deletedAt: numberValue(row, 'deletedAt') || null, settings: { allowMembersToPin: row.allowMembersToPin === undefined || numberValue(row, 'allowMembersToPin') !== 0, allowMembersToEditInfo: numberValue(row, 'allowMembersToEditInfo') === 1 }, members, pinnedMessageIds: pinnedIds };
     const events: RelayGroupEvent[] = [];
     const append = (type: RelayGroupEvent['type'], actorDeviceId: string, payload: unknown, createdAt: number): void => { events.push({ eventId: randomUUID(), groupId, seq: events.length + 1, type, actorDeviceId, payload, createdAt }); };
     append('group.created', createdBy, { group, members: Object.values(members), pinnedMessageIds: pinnedIds }, group.createdAt);
-    for (const message of plan.messages.filter((item) => item.conversationId === `group:${groupId}`)) {
+    for (const message of retainedGroupMessages) {
       const sender = deviceToUser.get(message.senderDeviceId); if (!sender || !members[sender]) continue;
       const resolved = plan.attachments.get(message.messageId);
       let metadata: RelayGroupAttachmentMetadata | null = null;
       if (message.type === 'file' && resolved && message.fileId) {
         const fileId = message.fileId;
-        metadata = { groupId, messageId: message.messageId, fileId, senderDeviceId: sender, fileName: message.fileName || 'Arquivo', fileSize: resolved.size, sha256: resolved.sha256, createdAt: message.createdAt, expiresAt: Number.MAX_SAFE_INTEGER, recipients: Object.keys(members), receivedByDeviceId: Object.fromEntries(Object.keys(members).map((id) => [id, message.createdAt])), replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId, uploadedAt: message.createdAt, deletedAt: null };
-        groupChunks.reset(fileId); writeFileChunks(resolved.file, (index, chunk) => groupChunks.write(index, chunk, fileId)); attachmentMetadata.push(metadata);
+        const recipients = Object.values(members).filter((member) => member.status === 'active').map((member) => member.deviceId);
+        metadata = { groupId, messageId: message.messageId, fileId, senderDeviceId: sender, fileName: message.fileName || 'Arquivo', fileSize: resolved.size, sha256: resolved.sha256, createdAt: message.createdAt, expiresAt: Number.MAX_SAFE_INTEGER, recipients, receivedByDeviceId: { [sender]: message.createdAt }, replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId, uploadedAt: message.createdAt, deletedAt: null };
+        groupChunks.reset(groupId, fileId, 'chunks');
+        writeFileChunks(resolved.file, (index, chunk) => groupChunks.write(index, chunk, groupId, fileId, 'chunks'));
+        attachmentMetadata.push(metadata);
       }
       append('group.message.created', sender, { message: { messageId: message.messageId, groupId, type: message.type === 'file' ? 'file' : 'text', senderDeviceId: sender, bodyText: message.bodyText || '', fileId: message.fileId, fileName: message.fileName, fileSize: resolved?.size || message.fileSize, fileSha256: resolved?.sha256 || message.fileSha256, replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId, createdAt: message.createdAt, editedAt: message.editedAt }, ...(metadata ? { attachment: metadata } : {}) }, message.createdAt);
       if (metadata) append('group.attachment.available', sender, { metadata }, message.createdAt);
     }
-    const groupMessageIds = new Set(plan.messages.filter((item) => item.conversationId === `group:${groupId}`).map((item) => item.messageId));
+    const groupMessageIds = retainedMessageIds;
     for (const reactionRow of latestRows(plan.backups, (backup) => backup.reactions, (item) => `${value(item, 'messageId')}\0${value(item, 'reactorDeviceId')}`, 'updatedAt')) {
       const targetMessageId = value(reactionRow, 'messageId'); const actor = deviceToUser.get(value(reactionRow, 'reactorDeviceId')); const reaction = value(reactionRow, 'reaction');
       if (!groupMessageIds.has(targetMessageId) || !actor || !members[actor] || !ALLOWED_REACTIONS.has(reaction)) continue;
-      append('group.message.reactionChanged', actor, { targetMessageId, reaction, updatedAt: numberValue(reactionRow, 'updatedAt') }, numberValue(reactionRow, 'updatedAt'));
+      const targetCreatedAt = retainedGroupMessages.find((message) => message.messageId === targetMessageId)?.createdAt || 0;
+      const updatedAt = Math.max(numberValue(reactionRow, 'updatedAt'), targetCreatedAt);
+      append('group.message.reactionChanged', actor, { targetMessageId, reaction, updatedAt }, updatedAt);
     }
     for (const messageId of pinnedIds) append('group.message.pinned', createdBy, { messageId, pinnedMessageIds: pinnedIds }, group.updatedAt);
     group.lastEventSeq = events.length; outputGroups.push(group); eventsByGroupId[groupId] = events;
@@ -334,8 +381,10 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
     const existingNames = new Set(store.listUsers().map((user) => user.username)); const deviceToUser = new Map<string, string>();
     for (const planned of plan.users) {
       if (existingNames.has(planned.username)) throw new Error(`Nome de usuário já existe no Relay: ${planned.username}.`);
-      const passwordSetupRequired = !planned.password;
-      const created = store.createUser({ username: planned.username, displayName: planned.profile.displayName, department: planned.department, password: planned.password || undefined, passwordSetupRequired, role: planned.role }, 'migration');
+      // A migração nunca transporta nem instala senhas do cliente antigo.
+      // Cada usuário cria sua senha no primeiro acesso ao Relay canônico.
+      const passwordSetupRequired = true;
+      const created = store.createUser({ username: planned.username, displayName: planned.profile.displayName, department: planned.department, password: undefined, passwordSetupRequired, role: planned.role }, 'migration');
       store.updateUser(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg, statusMessage: planned.profile.statusMessage }, 'migration');
       store.completeProfileSetup(created.userId, { avatarEmoji: planned.profile.avatarEmoji, avatarBg: planned.profile.avatarBg });
       deviceToUser.set(planned.deviceId, created.userId);
@@ -356,30 +405,39 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
     for (const row of latestRows(plan.backups, (backup) => backup.reactions, (item) => `${value(item, 'messageId')}\0${value(item, 'reactorDeviceId')}`, 'updatedAt')) {
       const message = messageById.get(value(row, 'messageId')); const reactor = deviceToUser.get(value(row, 'reactorDeviceId')); const reaction = value(row, 'reaction');
       if (!message || !reactor || !ALLOWED_REACTIONS.has(reaction)) continue;
-      if (message.type === 'announcement') announcementReactions.set(message.messageId, { ...(announcementReactions.get(message.messageId) || {}), [reactor]: reaction });
+      if (isAnnouncementMessage(message)) announcementReactions.set(message.messageId, { ...(announcementReactions.get(message.messageId) || {}), [reactor]: reaction });
       else if (!message.conversationId.startsWith('group:')) {
+        if (
+          value(row, 'reactorDeviceId') !== message.senderDeviceId &&
+          value(row, 'reactorDeviceId') !== message.receiverDeviceId
+        ) continue;
         const target = message.senderDeviceId === value(row, 'reactorDeviceId') ? message.receiverDeviceId && deviceToUser.get(message.receiverDeviceId) : deviceToUser.get(message.senderDeviceId);
         if (!target) continue;
         const conversationId = `dm:${[reactor, target].sort((a, b) => a.localeCompare(b)).join(':')}`;
         const reactionMessageId = `migration-reaction-${createHash('sha256').update(`${message.messageId}\0${reactor}`).digest('hex').slice(0, 32)}`;
-        const createdAt = numberValue(row, 'updatedAt');
+        const createdAt = Math.max(numberValue(row, 'updatedAt'), message.createdAt);
         directReactionFrames.push({ messageId: reactionMessageId, type: 'chat:react', senderUserId: reactor, targetUserId: target, conversationId, payload: { targetMessageId: message.messageId, reaction }, clientCreatedAt: createdAt, createdAt });
       }
     }
     const announcementReads = new Map<string, Record<string, number>>();
     for (const row of latestRows(plan.backups, (backup) => backup.announcementReads, (item) => `${value(item, 'messageId')}\0${value(item, 'readerDeviceId')}`, 'readAt')) {
       const reader = deviceToUser.get(value(row, 'readerDeviceId')); const messageId = value(row, 'messageId');
-      if (reader && messageById.get(messageId)?.type === 'announcement') announcementReads.set(messageId, { ...(announcementReads.get(messageId) || {}), [reader]: numberValue(row, 'readAt') });
+      if (reader && messageById.has(messageId) && isAnnouncementMessage(messageById.get(messageId)!)) {
+        announcementReads.set(messageId, { ...(announcementReads.get(messageId) || {}), [reader]: numberValue(row, 'readAt') });
+      }
     }
     for (const message of plan.messages.filter((item) => !item.conversationId.startsWith('group:'))) {
       const sender = deviceToUser.get(message.senderDeviceId); const target = message.receiverDeviceId ? deviceToUser.get(message.receiverDeviceId) || null : null;
-      if (!sender || (message.type !== 'announcement' && !target)) continue;
-      const conversationId = message.type === 'announcement' ? 'announcements' : `dm:${[sender, target!].sort((a, b) => a.localeCompare(b)).join(':')}`;
+      const announcement = isAnnouncementMessage(message);
+      if (!sender || (!announcement && !target)) continue;
+      const conversationId = announcement ? 'announcements' : `dm:${[sender, target!].sort((a, b) => a.localeCompare(b)).join(':')}`;
       const resolved = plan.attachments.get(message.messageId);
       const payload = message.type === 'file' ? { fileId: message.fileId, messageId: message.messageId, filename: message.fileName || 'Arquivo', size: resolved?.size || message.fileSize || 0, sha256: resolved?.sha256 || message.fileSha256 || '', replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId } : { text: message.bodyText || '', replyTo: replyPayload(message, deviceToUser), forwardedFromMessageId: message.forwardedFromMessageId, editedAt: message.editedAt };
-      const frameType = message.type === 'announcement' ? 'announce' : message.type === 'file' ? 'file:offer' : 'chat:text';
-      directFrames.push({ messageId: message.messageId, type: frameType, senderUserId: sender, targetUserId: target, conversationId, payload, clientCreatedAt: message.createdAt, createdAt: message.createdAt });
-      if (message.type === 'announcement') { announcements += 1; announcementState.push({ messageId: message.messageId, frame: { type: frameType, messageId: message.messageId, from: sender, to: null, createdAt: message.createdAt, payload }, createdAt: message.createdAt, expiresAt: Number.MAX_SAFE_INTEGER, expiredAt: null, deletedAt: null, reactionsByDeviceId: announcementReactions.get(message.messageId) || {}, readByDeviceId: announcementReads.get(message.messageId) || {} }); }
+      const frameType = announcement
+        ? message.type === 'file' ? 'file:offer' : 'announce'
+        : message.type === 'file' ? 'file:offer' : 'chat:text';
+      directFrames.push({ messageId: message.messageId, type: frameType, senderUserId: sender, targetUserId: announcement ? null : target, conversationId, payload, clientCreatedAt: message.createdAt, createdAt: message.createdAt });
+      if (announcement) { announcements += 1; announcementState.push({ messageId: message.messageId, frame: { type: frameType, messageId: message.messageId, from: sender, to: null, createdAt: message.createdAt, payload }, createdAt: message.createdAt, expiresAt: Number.MAX_SAFE_INTEGER, expiredAt: null, deletedAt: null, reactionsByDeviceId: announcementReactions.get(message.messageId) || {}, readByDeviceId: announcementReads.get(message.messageId) || {} }); }
       else directMessages += 1;
       if (message.type === 'file' && resolved && message.fileId) {
         store.initAttachment({ attachmentId: message.fileId, messageId: message.messageId, ownerUserId: sender, conversationId, fileName: message.fileName || 'Arquivo', mimeType: 'application/octet-stream', size: resolved.size, sha256: resolved.sha256 });
@@ -387,7 +445,11 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
       }
     }
     const directReactionIds = new Set(directReactionFrames.map((frame) => frame.messageId));
-    for (const frame of [...directFrames, ...directReactionFrames].sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId))) {
+    for (const frame of [...directFrames, ...directReactionFrames].sort((a, b) =>
+      a.createdAt - b.createdAt ||
+      (a.type === 'chat:react' ? 1 : 0) - (b.type === 'chat:react' ? 1 : 0) ||
+      a.messageId.localeCompare(b.messageId)
+    )) {
       store.saveFrame(frame); if (directReactionIds.has(frame.messageId)) reactions += 1;
     }
     if (announcementState.length) store.writeCanonicalState('announcements', { version: 1, savedAt: Date.now(), announcements: announcementState }, 1);
@@ -395,9 +457,15 @@ const applyPlan = (plan: MigrationPlan, options: CliOptions): Json => {
       const owner = deviceToUser.get(backup.profile.deviceId); if (!owner) continue;
       for (const row of backup.conversations) {
         const id = value(row, 'id'); if (!id.startsWith('dm:')) continue; const peer = deviceToUser.get(value(row, 'peerDeviceId') || id.slice(3)); if (!peer) continue;
-        store.setUserConversationPreference(owner, { conversationId: `dm:${[owner, peer].sort((a, b) => a.localeCompare(b)).join(':')}`, archived: numberValue(row, 'archivedAt') > 0, readAt: numberValue(row, 'lastReadAt'), manualUnread: numberValue(row, 'unreadCount') > 0 });
+        store.setUserConversationPreference(owner, { conversationId: `dm:${peer}`, archived: numberValue(row, 'archivedAt') > 0, readAt: numberValue(row, 'lastReadAt'), manualUnread: numberValue(row, 'unreadCount') > 0 });
       }
-      for (const favorite of backup.favorites) store.setUserMessagePreference(owner, { messageId: value(favorite, 'messageId'), favorite: true });
+      const retainedMessageIds = new Set(plan.messages.map((message) => message.messageId));
+      for (const favorite of backup.favorites) {
+        const messageId = value(favorite, 'messageId');
+        if (retainedMessageIds.has(messageId)) {
+          store.setUserMessagePreference(owner, { messageId, favorite: true });
+        }
+      }
     }
     const groupChunks = new EncryptedChunkStore(path.join(staging, 'group-attachments'), store.getEncryption()); const groupState = buildGroups(plan, deviceToUser, groupChunks); if (groupState.groups.length) store.writeCanonicalState('groups', { version: 1, ...groupState }, 1);
     store.close();

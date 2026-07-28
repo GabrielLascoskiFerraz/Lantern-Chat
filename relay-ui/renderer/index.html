@@ -299,7 +299,7 @@
             <div class="card-header compact">
               <div>
                 <h3>Endereços disponíveis</h3>
-                <p>Selecione um endereço para copiá-lo.</p>
+                <p>Use o endereço .local ou um IP para conectar clientes na rede.</p>
               </div>
               <span id="port-label" class="section-meta">Porta 43190</span>
             </div>
@@ -318,6 +318,11 @@
               </div>
             </div>
             <div class="settings-form">
+              <label class="field">
+                <span>Endereço local</span>
+                <input id="local-hostname-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="lantern-relay.local">
+                <small>Usado na rede local e na detecção automática via mDNS.</small>
+              </label>
               <label class="field port-field">
                 <span>Porta</span>
                 <input id="port-input" type="number" min="1" max="65535" inputmode="numeric">

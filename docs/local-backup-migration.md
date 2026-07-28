@@ -31,7 +31,7 @@ Nenhum dado é alterado sem `--apply`. O relatório JSON informa backups e perfi
 
 ## 2. Mapeamento opcional de contas
 
-Use `--mapping` para definir usuários, setores e, opcionalmente, senhas já conhecidas:
+Use `--mapping` para definir usuários e setores. O campo `password` ainda é aceito para compatibilidade com mapas antigos, mas é deliberadamente ignorado:
 
 ```json
 {
@@ -46,7 +46,7 @@ Use `--mapping` para definir usuários, setores e, opcionalmente, senhas já con
 }
 ```
 
-As chaves são os `deviceId` mostrados no dry-run. Quando o mapeamento não informa uma senha, a conta convertida fica com a criação de senha pendente: o usuário entra pela primeira vez informando apenas o nome de usuário e define sua senha obrigatoriamente no assistente inicial. Quando uma senha é informada no mapeamento, ela é preservada e essa etapa não aparece.
+As chaves são os `deviceId` mostrados no dry-run. Toda conta convertida fica sem senha e com a criação de senha pendente: o usuário entra pela primeira vez informando apenas o nome de usuário e define sua senha obrigatoriamente no assistente inicial. Senhas do cliente antigo nunca são transportadas para o Relay canônico.
 
 A relação fica no arquivo `contas-convertidas.json` dentro do backup convertido, criado com permissão restrita ao usuário do sistema. O arquivo indica quais contas ainda precisam criar uma senha, sem inventar ou armazenar senhas temporárias para elas.
 

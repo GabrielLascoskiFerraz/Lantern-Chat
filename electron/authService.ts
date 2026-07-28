@@ -278,6 +278,7 @@ export class AuthService {
     archived?: boolean;
     manualUnread?: boolean;
     readAt?: number;
+    readSeq?: number;
   }): Promise<void> {
     await this.authenticatedRequest('/api/client/preferences/conversation', 'PUT', input);
   }

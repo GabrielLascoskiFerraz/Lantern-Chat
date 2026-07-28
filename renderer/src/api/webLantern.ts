@@ -25,7 +25,10 @@ import {
   forEachFileChunk,
   mergeAttachmentCache
 } from './attachmentTransfer';
-import { sortCanonicalMessages } from '../utils/messageOrder';
+import {
+  CanonicallyOrderedMessage,
+  sortCanonicalMessages
+} from '../utils/messageOrder';
 
 type Json = Record<string, any>;
 type PendingRequest = { resolve: (value: Json) => void; reject: (error: Error) => void; timer: number };
@@ -44,6 +47,13 @@ type PendingGroupSync = {
 };
 type ReactionValue = '👍' | '👎' | '❤️' | '😢' | '😊' | '😂';
 type ReactionState = { reaction: ReactionValue; updatedAt: number };
+
+class RelayHttpError extends Error {
+  constructor(message: string, readonly status: number | null) {
+    super(message);
+    this.name = 'RelayHttpError';
+  }
+}
 
 const TOKEN_KEY = 'lantern.web.token';
 const DEVICE_KEY = 'lantern.web.device';
@@ -142,8 +152,10 @@ export class WebLanternBridge {
   private user: AuthenticatedUser | null = null;
   private socket: WebSocket | null = null;
   private connecting: Promise<void> | null = null;
+  private rejectConnecting: ((error: Error) => void) | null = null;
   private reconnectTimer: number | null = null;
   private intentionalClose = false;
+  private lastConnectionError: string | null = null;
   private directory = new Map<string, Peer>();
   private online = new Set<string>();
   private groups = new Map<string, GroupInfo>();
@@ -155,6 +167,7 @@ export class WebLanternBridge {
   private favorites = new Set<string>();
   private reactions = new Map<string, AnnouncementReactionSummary>();
   private reactionActors = new Map<string, Map<string, ReactionState>>();
+  private reactionUpdatedAt = new Map<string, number>();
   private announcementReads = new Map<string, AnnouncementReadSummary>();
   private announcementReaders = new Map<string, Map<string, number>>();
   private unread: Record<string, number> = {};
@@ -218,18 +231,30 @@ export class WebLanternBridge {
     try {
       response = await fetch(path, { ...init, headers, cache: 'no-store' });
     } catch {
-      throw new Error('Não foi possível conectar ao Relay. Verifique sua rede e tente novamente.');
+      throw new RelayHttpError(
+        'Não foi possível conectar ao Relay. Verifique sua rede e tente novamente.',
+        null
+      );
     }
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (body.message) throw new Error(String(body.message));
+      if (body.message) throw new RelayHttpError(String(body.message), response.status);
       if (response.status === 404 || response.status === 405) {
-        throw new Error('O endereço respondeu, mas não parece ser um Relay Lantern. Confira o endereço e a porta.');
+        throw new RelayHttpError(
+          'O endereço respondeu, mas não parece ser um Relay Lantern. Confira o endereço e a porta.',
+          response.status
+        );
       }
       if (response.status >= 500) {
-        throw new Error('O Relay encontrou um problema temporário. Aguarde um instante e tente novamente.');
+        throw new RelayHttpError(
+          'O Relay encontrou um problema temporário. Aguarde um instante e tente novamente.',
+          response.status
+        );
       }
-      throw new Error(`O Relay recusou a operação (HTTP ${response.status}).`);
+      throw new RelayHttpError(
+        `O Relay recusou a operação (HTTP ${response.status}).`,
+        response.status
+      );
     }
     return body;
   }
@@ -249,6 +274,8 @@ export class WebLanternBridge {
     this.intentionalClose = true;
     const previousSocket = this.socket;
     this.socket = null;
+    this.rejectConnecting?.(new Error('A sessão da conta foi encerrada.'));
+    this.rejectConnecting = null;
     this.connecting = null;
     previousSocket?.close();
 
@@ -289,10 +316,12 @@ export class WebLanternBridge {
     this.favorites.clear();
     this.reactions.clear();
     this.reactionActors.clear();
+    this.reactionUpdatedAt.clear();
     this.announcementReads.clear();
     this.announcementReaders.clear();
     this.unread = {};
     this.activeConversation = 'announcements';
+    this.lastConnectionError = null;
     this.files.clear();
     this.mediaMessages.clear();
     this.attachmentDownloadByFileId.clear();
@@ -305,7 +334,9 @@ export class WebLanternBridge {
     const preferences = asRecord(body.preferences);
     this.favorites = new Set((Array.isArray(preferences.messages) ? preferences.messages : []).filter((item: Json) => item.favorite).map((item: Json) => String(item.messageId)));
     for (const item of Array.isArray(preferences.conversations) ? preferences.conversations : []) {
-      if (item.manualUnread) this.unread[String(item.conversationId)] = Math.max(1, this.unread[String(item.conversationId)] || 0);
+      const conversationId = String(item.conversationId || '');
+      if (!conversationId) continue;
+      this.unread[conversationId] = Math.max(0, Number(item.unreadCount || 0));
     }
   }
 
@@ -315,7 +346,7 @@ export class WebLanternBridge {
       relay: relayConfig(),
       endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null,
       user: this.user,
-      connectionError: null
+      connectionError: this.lastConnectionError
     };
   }
 
@@ -350,8 +381,32 @@ export class WebLanternBridge {
     this.connecting = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(endpoint());
       this.socket = socket;
-      const timeout = window.setTimeout(() => reject(new Error('Tempo de conexão com o Relay excedido.')), 10_000);
-      socket.onopen = () => socket.send(JSON.stringify({
+      let settled = false;
+      const fail = (error: Error, closeSocket = false): void => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        if (this.accountGeneration === accountGeneration) {
+          this.connecting = null;
+          this.rejectConnecting = null;
+          this.lastConnectionError = error.message;
+        }
+        if (closeSocket) {
+          try { socket.close(); } catch { /* noop */ }
+        }
+        reject(error);
+      };
+      this.rejectConnecting = (error) => fail(error, true);
+      const timeout = window.setTimeout(() => {
+        if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
+        fail(new Error('Tempo de conexão com o Relay excedido.'), true);
+      }, 10_000);
+      socket.onopen = () => {
+        if (this.accountGeneration !== accountGeneration || this.socket !== socket) {
+          socket.close();
+          return;
+        }
+        socket.send(JSON.stringify({
         type: 'relay:hello',
         payload: {
           deviceId: this.deviceId(),
@@ -363,15 +418,20 @@ export class WebLanternBridge {
           appVersion: this.appVersion,
           sessionToken: this.token
         }
-      }));
+        }));
+      };
       socket.onmessage = (event) => {
         if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
         const envelope = asRecord(JSON.parse(String(event.data)));
         if (envelope.type === 'relay:hello:ok') {
+          if (settled) return;
+          settled = true;
           window.clearTimeout(timeout);
           const nextUser = asRecord(envelope.payload).user as AuthenticatedUser | undefined;
           if (nextUser) this.user = nextUser;
           this.connecting = null;
+          this.rejectConnecting = null;
+          this.lastConnectionError = null;
           this.emit({ type: 'relay:connection', connected: true, endpoint: endpoint() });
           resolve();
           return;
@@ -379,10 +439,8 @@ export class WebLanternBridge {
         void this.handleEnvelope(envelope);
       };
       socket.onerror = () => {
-        window.clearTimeout(timeout);
         if (this.accountGeneration !== accountGeneration || this.socket !== socket) return;
-        this.connecting = null;
-        reject(new Error('Não foi possível conectar ao Relay.'));
+        fail(new Error('Não foi possível conectar ao Relay.'), true);
       };
       socket.onclose = () => {
         window.clearTimeout(timeout);
@@ -412,7 +470,7 @@ export class WebLanternBridge {
           this.attachmentDownloads.delete(requestId);
           download.reject(disconnectError);
         }
-        reject(disconnectError);
+        fail(disconnectError);
         this.emit({ type: 'relay:connection', connected: false, endpoint: null });
         if (!this.intentionalClose && this.token) {
           if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
@@ -605,9 +663,13 @@ export class WebLanternBridge {
     emit = true
   ): void {
     if (!messageId || !actorDeviceId || (reaction !== null && !this.isReaction(reaction))) return;
+    const updateKey = `${messageId}\0${actorDeviceId}`;
+    const normalizedUpdatedAt = Number.isFinite(updatedAt) ? Math.trunc(updatedAt) : 0;
+    if ((this.reactionUpdatedAt.get(updateKey) || 0) > normalizedUpdatedAt) return;
+    this.reactionUpdatedAt.set(updateKey, normalizedUpdatedAt);
     const actors = new Map(this.reactionActors.get(messageId) || []);
     if (reaction === null) actors.delete(actorDeviceId);
-    else actors.set(actorDeviceId, { reaction, updatedAt });
+    else actors.set(actorDeviceId, { reaction, updatedAt: normalizedUpdatedAt });
     if (actors.size > 0) this.reactionActors.set(messageId, actors);
     else this.reactionActors.delete(messageId);
     const summary = this.reactionSummary(messageId);
@@ -617,8 +679,14 @@ export class WebLanternBridge {
 
   private replaceReactions(messageId: string, value: unknown, updatedAt: number, announcement: boolean): void {
     const actors = new Map<string, ReactionState>();
+    const prefix = `${messageId}\0`;
+    for (const key of Array.from(this.reactionUpdatedAt.keys())) {
+      if (key.startsWith(prefix)) this.reactionUpdatedAt.delete(key);
+    }
     for (const [actorDeviceId, reaction] of Object.entries(asRecord(value))) {
-      if (this.isReaction(reaction)) actors.set(actorDeviceId, { reaction, updatedAt });
+      if (!this.isReaction(reaction)) continue;
+      actors.set(actorDeviceId, { reaction, updatedAt });
+      this.reactionUpdatedAt.set(`${messageId}\0${actorDeviceId}`, updatedAt);
     }
     if (actors.size > 0) this.reactionActors.set(messageId, actors);
     else this.reactionActors.delete(messageId);
@@ -806,9 +874,25 @@ export class WebLanternBridge {
       case 'relay:history:snapshot': {
         const frames = (Array.isArray(payload.frames) ? payload.frames : [])
           .map(asRecord)
-          .filter((frame) => frame.messageId && frame.createdAt);
+          .filter(
+            (frame): frame is Json & CanonicallyOrderedMessage =>
+              typeof frame.messageId === 'string' &&
+              frame.messageId.length > 0 &&
+              Number.isFinite(Number(frame.createdAt)) &&
+              Number(frame.createdAt) > 0
+          );
+        const touchedConversationIds = new Set<string>();
         for (const frame of sortCanonicalMessages(frames)) {
           this.applyCanonicalFrame(frame);
+          if (frame.to === null || !this.user?.userId) continue;
+          const peerId =
+            frame.from === this.user.userId
+              ? String(frame.to || '')
+              : String(frame.from || '');
+          if (peerId) touchedConversationIds.add(`dm:${peerId}`);
+        }
+        for (const conversationId of touchedConversationIds) {
+          this.emit({ type: 'conversation:synchronized', conversationId });
         }
         return;
       }
@@ -840,7 +924,13 @@ export class WebLanternBridge {
       case 'relay:announcement:snapshot': {
         const frames = (Array.isArray(payload.frames) ? payload.frames : [])
           .map(asRecord)
-          .filter((frame) => frame.messageId && frame.createdAt);
+          .filter(
+            (frame): frame is Json & CanonicallyOrderedMessage =>
+              typeof frame.messageId === 'string' &&
+              frame.messageId.length > 0 &&
+              Number.isFinite(Number(frame.createdAt)) &&
+              Number(frame.createdAt) > 0
+          );
         for (const frame of sortCanonicalMessages(frames)) this.applyCanonicalFrame(frame);
         const serverTime = Number(payload.serverTime || Date.now());
         const reactions = asRecord(payload.reactions);
@@ -1196,13 +1286,20 @@ export class WebLanternBridge {
             await this.connect();
             this.requestNotificationPermission();
           }
+          this.lastConnectionError = null;
         }
-        catch {
-          this.token = '';
-          this.user = null;
-          window.localStorage.removeItem(TOKEN_KEY);
-          window.sessionStorage.removeItem(TOKEN_KEY);
-          this.resetAccountRuntimeState();
+        catch (error) {
+          const status = error instanceof RelayHttpError ? error.status : null;
+          if (status === 401 || status === 403) {
+            this.token = '';
+            this.user = null;
+            window.localStorage.removeItem(TOKEN_KEY);
+            window.sessionStorage.removeItem(TOKEN_KEY);
+            this.resetAccountRuntimeState();
+          } else {
+            this.lastConnectionError =
+              error instanceof Error ? error.message : 'Relay indisponível.';
+          }
         }
         return this.authState();
       },
@@ -1643,6 +1740,10 @@ export class WebLanternBridge {
       setActiveConversation: async (id) => { this.activeConversation = id; },
       markConversationRead: async (id) => {
         this.unread[id] = 0;
+        const readSeq = (this.messages.get(id) || []).reduce(
+          (highest, message) => Math.max(highest, Number(message.serverSeq || 0)),
+          0
+        );
         if (id === 'announcements') {
           const messageIds = (this.messages.get(id) || []).map((item) => item.messageId);
           if (messageIds.length) this.send('relay:announcement:read', { messageIds, readAt: Date.now() });
@@ -1652,7 +1753,15 @@ export class WebLanternBridge {
             void this.sendAck(peerId, message.messageId, 'read');
           }
         }
-        await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, manualUnread: false, readAt: Date.now() }) });
+        await this.http('/api/client/preferences/conversation', {
+          method: 'PUT',
+          body: JSON.stringify({
+            conversationId: id,
+            manualUnread: false,
+            readAt: Date.now(),
+            readSeq
+          })
+        });
       },
       markConversationUnread: async (id) => { this.unread[id] = Math.max(1, this.unread[id] || 0); await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, manualUnread: true }) }); },
       archiveConversation: async (id) => { await this.http('/api/client/preferences/conversation', { method: 'PUT', body: JSON.stringify({ conversationId: id, archived: true }) }); return 1; },

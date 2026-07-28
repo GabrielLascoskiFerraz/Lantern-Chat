@@ -24,6 +24,8 @@ export interface UserConversationPreference {
   archived: boolean;
   manualUnread: boolean;
   readAt: number;
+  readSeq: number;
+  unreadCount: number;
   updatedAt: number;
 }
 

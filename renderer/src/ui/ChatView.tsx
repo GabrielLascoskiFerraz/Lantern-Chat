@@ -544,6 +544,11 @@ export const ChatView = ({
   const loadingOlderRef = useRef(loadingOlder);
   const searchJumpInFlightRef = useRef(false);
   const previousFavoritesOnlyRef = useRef(false);
+  const userNavigatingHistoryRef = useRef(false);
+  const viewportAnchorRef = useRef<{ messageId: string; offset: number } | null>(null);
+  const viewportAnchorTimeoutRef = useRef<number | null>(null);
+  const restoringViewportAnchorRef = useRef(false);
+  const touchStartYRef = useRef<number | null>(null);
 
   const displayedMessages = useMemo(
     () =>
@@ -1021,6 +1026,64 @@ export const ChatView = ({
     });
   }, []);
 
+  const cancelForcedBottomFollow = useCallback(() => {
+    userNavigatingHistoryRef.current = true;
+    forceScrollOnOpenRef.current = false;
+    stickToBottomRef.current = false;
+    if (forceScrollTimeoutRef.current) {
+      window.clearTimeout(forceScrollTimeoutRef.current);
+      forceScrollTimeoutRef.current = null;
+    }
+  }, []);
+
+  const captureViewportAnchor = useCallback(() => {
+    const node = messagesScrollRef.current;
+    if (!node) return;
+    const containerTop = node.getBoundingClientRect().top;
+    let selected: { messageId: string; offset: number; top: number } | null = null;
+    for (const [messageId, row] of Object.entries(messageRowRefs.current)) {
+      if (!row) continue;
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom <= containerTop + 1) continue;
+      if (!selected || rect.top < selected.top) {
+        selected = {
+          messageId,
+          offset: rect.top - containerTop,
+          top: rect.top
+        };
+      }
+    }
+    viewportAnchorRef.current = selected
+      ? { messageId: selected.messageId, offset: selected.offset }
+      : null;
+  }, []);
+
+  const restoreViewportAnchor = useCallback(() => {
+    const node = messagesScrollRef.current;
+    const anchor = viewportAnchorRef.current;
+    if (!node || !anchor) return;
+    const row = messageRowRefs.current[anchor.messageId];
+    if (!row) return;
+    const containerTop = node.getBoundingClientRect().top;
+    const delta = row.getBoundingClientRect().top - containerTop - anchor.offset;
+    if (Math.abs(delta) <= 0.5) return;
+    restoringViewportAnchorRef.current = true;
+    node.scrollTop += delta;
+    window.requestAnimationFrame(() => {
+      restoringViewportAnchorRef.current = false;
+    });
+  }, []);
+
+  const keepViewportAnchorDuringHydration = useCallback(() => {
+    if (viewportAnchorTimeoutRef.current) {
+      window.clearTimeout(viewportAnchorTimeoutRef.current);
+    }
+    viewportAnchorTimeoutRef.current = window.setTimeout(() => {
+      viewportAnchorRef.current = null;
+      viewportAnchorTimeoutRef.current = null;
+    }, 2_000);
+  }, []);
+
   const loadOlderWithViewportLock = useCallback(async (): Promise<number> => {
     if (favoritesOnly || pinnedOnly) return 0;
     const node = messagesScrollRef.current;
@@ -1028,6 +1091,7 @@ export const ChatView = ({
     if (loadingOlderRef.current) return 0;
     if (!hasMoreOlderRef.current) return 0;
 
+    captureViewportAnchor();
     const previousHeight = node.scrollHeight;
     const previousTop = node.scrollTop;
     const loadedCount = await onLoadOlderMessages();
@@ -1041,12 +1105,21 @@ export const ChatView = ({
 
     const nextNode = messagesScrollRef.current;
     if (!nextNode) return loadedCount;
-    const delta = nextNode.scrollHeight - previousHeight;
-    if (delta > 0) {
-      nextNode.scrollTop = previousTop + delta;
+    if (viewportAnchorRef.current) restoreViewportAnchor();
+    else {
+      const delta = nextNode.scrollHeight - previousHeight;
+      if (delta > 0) nextNode.scrollTop = previousTop + delta;
     }
+    keepViewportAnchorDuringHydration();
     return loadedCount;
-  }, [favoritesOnly, pinnedOnly, onLoadOlderMessages]);
+  }, [
+    captureViewportAnchor,
+    favoritesOnly,
+    keepViewportAnchorDuringHydration,
+    onLoadOlderMessages,
+    pinnedOnly,
+    restoreViewportAnchor
+  ]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -1072,7 +1145,23 @@ export const ChatView = ({
         Math.abs(current.top - previous.top) <= 1 &&
         (Math.abs(current.client - previous.client) > 1 || Math.abs(current.height - previous.height) > 1);
 
-      stickToBottomRef.current = layoutShiftOnly ? true : isNearBottom();
+      const userMovedUp =
+        !restoringViewportAnchorRef.current &&
+        current.top < previous.top - 1;
+      if (userMovedUp) {
+        cancelForcedBottomFollow();
+        captureViewportAnchor();
+        keepViewportAnchorDuringHydration();
+      }
+      stickToBottomRef.current = layoutShiftOnly
+        ? true
+        : userNavigatingHistoryRef.current
+          ? false
+          : isNearBottom();
+      if (isNearBottom()) {
+        userNavigatingHistoryRef.current = false;
+        viewportAnchorRef.current = null;
+      }
       if (node.scrollTop <= 56 && hasMoreOlderRef.current && !loadingOlderRef.current) {
         void loadOlderWithViewportLock();
       }
@@ -1082,8 +1171,39 @@ export const ChatView = ({
     stickToBottomRef.current = isNearBottom();
     snapshotMetrics();
     node.addEventListener('scroll', onScroll, { passive: true });
-    return () => node.removeEventListener('scroll', onScroll);
-  }, [peer?.deviceId, loadOlderWithViewportLock]);
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) cancelForcedBottomFollow();
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      touchStartYRef.current = event.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const currentY = event.touches[0]?.clientY;
+      if (
+        touchStartYRef.current !== null &&
+        currentY !== undefined &&
+        currentY > touchStartYRef.current + 2
+      ) {
+        cancelForcedBottomFollow();
+      }
+      touchStartYRef.current = currentY ?? null;
+    };
+    node.addEventListener('wheel', onWheel, { passive: true });
+    node.addEventListener('touchstart', onTouchStart, { passive: true });
+    node.addEventListener('touchmove', onTouchMove, { passive: true });
+    return () => {
+      node.removeEventListener('scroll', onScroll);
+      node.removeEventListener('wheel', onWheel);
+      node.removeEventListener('touchstart', onTouchStart);
+      node.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [
+    cancelForcedBottomFollow,
+    captureViewportAnchor,
+    keepViewportAnchorDuringHydration,
+    loadOlderWithViewportLock,
+    peer?.deviceId
+  ]);
 
   useEffect(() => {
     if (normalizedQuery) return;
@@ -1091,6 +1211,14 @@ export const ChatView = ({
     if (!node || typeof ResizeObserver === 'undefined') return;
     let frame: number | null = null;
     const observer = new ResizeObserver(() => {
+      if (viewportAnchorRef.current && userNavigatingHistoryRef.current) {
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        frame = window.requestAnimationFrame(() => {
+          restoreViewportAnchor();
+          frame = null;
+        });
+        return;
+      }
       if (!(stickToBottomRef.current || isNearBottom())) return;
       if (frame !== null) {
         window.cancelAnimationFrame(frame);
@@ -1107,10 +1235,12 @@ export const ChatView = ({
         window.cancelAnimationFrame(frame);
       }
     };
-  }, [normalizedQuery]);
+  }, [normalizedQuery, restoreViewportAnchor]);
 
   useEffect(() => {
     if (normalizedQuery) return;
+    userNavigatingHistoryRef.current = false;
+    viewportAnchorRef.current = null;
     stickToBottomRef.current = true;
     forceScrollOnOpenRef.current = true;
     if (forceScrollTimeoutRef.current) {
@@ -1130,6 +1260,16 @@ export const ChatView = ({
     }, 1800);
     return () => window.cancelAnimationFrame(frameA);
   }, [peer?.deviceId, normalizedQuery]);
+
+  useEffect(
+    () => () => {
+      if (viewportAnchorTimeoutRef.current) {
+        window.clearTimeout(viewportAnchorTimeoutRef.current);
+        viewportAnchorTimeoutRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (normalizedQuery) return;

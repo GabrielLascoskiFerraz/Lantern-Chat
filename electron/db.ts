@@ -1023,6 +1023,32 @@ export class DbService {
     return Math.max(0, Number(row?.unreadCount || 0));
   }
 
+  setConversationReadState(
+    conversationId: string,
+    unreadCount: number,
+    lastReadAt: number
+  ): void {
+    this.db.prepare(`
+      UPDATE conversations
+      SET unreadCount = ?, lastReadAt = MAX(lastReadAt, ?), updatedAt = ?
+      WHERE id = ?
+    `).run(
+      Math.max(0, Math.trunc(unreadCount)),
+      Math.max(0, Math.trunc(lastReadAt)),
+      Date.now(),
+      conversationId
+    );
+  }
+
+  getConversationMaxServerSeq(conversationId: string): number {
+    const row = this.db.prepare(`
+      SELECT MAX(serverSeq) AS serverSeq
+      FROM messages
+      WHERE conversationId = ?
+    `).get(conversationId) as { serverSeq: number | null } | undefined;
+    return Math.max(0, Number(row?.serverSeq || 0));
+  }
+
   getConversationLastReadAt(conversationId: string): number {
     const row = this.db
       .prepare('SELECT lastReadAt FROM conversations WHERE id = ?')

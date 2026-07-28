@@ -85,6 +85,9 @@ class LanternApp {
   private syncIdleTimer: NodeJS.Timeout | null = null;
   private readonly syncIdleGraceMs = 450;
   private incomingFrameQueue: Promise<void> = Promise.resolve();
+  private canonicalBootstrapPromise: Promise<void> = Promise.resolve();
+  private resolveCanonicalBootstrap: (() => void) | null = null;
+  private canonicalBootstrapTimer: NodeJS.Timeout | null = null;
   private readonly groupFileDownloadByRequestId = new Map<
     string,
     { fileId: string; groupId: string; messageId: string; senderDeviceId: string }
@@ -303,7 +306,12 @@ class LanternApp {
     for (const preference of snapshot.conversations) {
       if (preference.pinned) this.canonicalPinnedConversationIds.add(preference.conversationId);
       this.db.setConversationArchived(preference.conversationId, preference.archived);
-      if (preference.manualUnread) this.db.markConversationUnread(preference.conversationId);
+      this.db.setConversationReadState(
+        preference.conversationId,
+        preference.unreadCount,
+        preference.readAt
+      );
+      this.emitConversationUnread(preference.conversationId);
     }
     for (const preference of snapshot.messages) {
       if (preference.favorite) {
@@ -399,13 +407,14 @@ class LanternApp {
       },
       onHistorySnapshot: (frames, serverHighWaterSeq) => {
         const initializeCursor = this.db.getCanonicalSyncCursor() === null && this.db.getMaxServerSeq() === 0;
-        void this.applyCanonicalHistorySnapshot(frames).then(() => {
+        void this.enqueueCanonicalWork(async () => {
+          await this.applyCanonicalHistorySnapshot(frames);
           if (initializeCursor && serverHighWaterSeq > 0) {
             this.db.setCanonicalSyncCursor(serverHighWaterSeq);
           }
         }).catch((error) => {
           console.error('[Lantern][Relay] falha ao aplicar histórico canônico:', error);
-        });
+        }).finally(() => this.releaseCanonicalBootstrap());
       },
       onPresence: (peers) => {
         try {
@@ -487,6 +496,7 @@ class LanternApp {
           endpoint
         });
         if (!connected) {
+          this.prepareCanonicalBootstrap();
           void this.pauseGroupFileDownloadsForDisconnect();
           this.knownOnlinePeerIds.clear();
           if (this.presence.clearOnlinePeers()) {
@@ -509,9 +519,11 @@ class LanternApp {
         this.resumeActiveConversationAttachmentDownloads();
         void (async () => {
           try {
+            await this.canonicalBootstrapPromise;
             await this.resumePendingCanonicalFrames();
             await this.syncCanonicalHistoryIncrementally();
             await this.relay?.syncGroups(this.db.getGroupSeqMap());
+            await this.refreshCanonicalUserPreferences();
             // Primeiro aplicamos o snapshot canônico; depois retomamos uploads/downloads locais.
             await this.resumePendingGroupFiles();
             await this.resumePendingGroupAttachmentDownloads();
@@ -710,7 +722,9 @@ class LanternApp {
     this.reconcileLegacyIncomingFilePaths();
     if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.updateService.check(false);
 
-    if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.relay.start().then(() => {
+    if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) {
+      this.prepareCanonicalBootstrap();
+      void this.relay.start().then(() => {
       this.emitEvent({
         type: 'relay:connection',
         connected: this.relay?.isConnected() || false,
@@ -727,6 +741,7 @@ class LanternApp {
         message: 'Não foi possível iniciar conexão com o Relay. A UI continua disponível.'
       });
     });
+    }
 
     this.updateCheckTimer = setInterval(() => {
       if (this.authState.authenticated && !this.authState.user?.passwordSetupRequired) void this.updateService.check(false);
@@ -1405,7 +1420,9 @@ class LanternApp {
                 : this.db.getConversationServerCursor(conversationId, before)) ||
                 Number.MAX_SAFE_INTEGER
             );
-            await this.applyCanonicalHistorySnapshot(frames);
+            await this.enqueueCanonicalWork(() =>
+              this.applyCanonicalHistorySnapshot(frames)
+            );
           }
         }
       } catch (error) {
@@ -1749,8 +1766,7 @@ class LanternApp {
   }
 
   private enqueueIncomingFrame(frame: ProtocolFrame): void {
-    const task = this.incomingFrameQueue.then(() => this.handleIncomingFrame(frame));
-    this.incomingFrameQueue = task.catch(() => undefined);
+    const task = this.enqueueCanonicalWork(() => this.handleIncomingFrame(frame));
     void task.catch((error) => {
       if (process.env.LANTERN_DEBUG_DISCOVERY === '1') {
         console.warn(
@@ -1765,6 +1781,38 @@ class LanternApp {
         );
       }
     });
+  }
+
+  private enqueueCanonicalWork(work: () => Promise<void>): Promise<void> {
+    const task = this.incomingFrameQueue.then(work);
+    this.incomingFrameQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private prepareCanonicalBootstrap(): void {
+    this.releaseCanonicalBootstrap();
+    this.canonicalBootstrapPromise = new Promise<void>((resolve) => {
+      this.resolveCanonicalBootstrap = resolve;
+    });
+    // Um Relay compatível sempre envia o snapshot logo após o hello. Ainda
+    // assim, não deixamos a retomada de fila, grupos e anexos bloqueada para
+    // sempre se uma conexão intermediária omitir essa mensagem.
+    this.canonicalBootstrapTimer = setTimeout(() => {
+      if (!this.resolveCanonicalBootstrap) return;
+      console.warn('[Lantern][Relay] snapshot inicial não chegou a tempo; retomando sincronização incremental.');
+      this.releaseCanonicalBootstrap();
+    }, 12_000);
+    this.canonicalBootstrapTimer.unref?.();
+  }
+
+  private releaseCanonicalBootstrap(): void {
+    if (this.canonicalBootstrapTimer) {
+      clearTimeout(this.canonicalBootstrapTimer);
+      this.canonicalBootstrapTimer = null;
+    }
+    const resolve = this.resolveCanonicalBootstrap;
+    this.resolveCanonicalBootstrap = null;
+    resolve?.();
   }
 
   private async resyncConversation(conversationId: string): Promise<void> {
@@ -1908,15 +1956,21 @@ class LanternApp {
     try {
       for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
         const page = await this.relay.requestIncrementalHistory(cursor, 500);
-        if (page.frames.length === 0) break;
-        await this.applyCanonicalHistorySnapshot(page.frames);
+        if (page.frames.length > 0) {
+          await this.enqueueCanonicalWork(() =>
+            this.applyCanonicalHistorySnapshot(page.frames)
+          );
+        }
         const nextCursor = Math.max(
           page.nextServerSeq,
           ...page.frames.map((frame) => frame.serverSeq || 0)
         );
-        if (nextCursor <= cursor) break;
-        cursor = nextCursor;
-        this.db.setCanonicalSyncCursor(cursor);
+        if (nextCursor > cursor) {
+          cursor = nextCursor;
+          this.db.setCanonicalSyncCursor(cursor);
+        } else if (page.hasMore) {
+          break;
+        }
         if (!page.hasMore) break;
       }
     } finally {
@@ -2039,7 +2093,8 @@ class LanternApp {
     void this.authService.updateConversationPreference({
       conversationId,
       manualUnread: false,
-      readAt: Date.now()
+      readAt: Date.now(),
+      readSeq: this.db.getConversationMaxServerSeq(conversationId)
     }).catch(() => undefined);
 
     if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
@@ -3277,6 +3332,15 @@ class LanternApp {
       if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
       return left.messageId.localeCompare(right.messageId);
     });
+    const touchedConversationIds = new Set<string>();
+    for (const frame of ordered) {
+      if (frame.to === null) continue;
+      const peerId =
+        frame.from === this.profile.deviceId
+          ? frame.to
+          : frame.from;
+      if (peerId) touchedConversationIds.add(`dm:${peerId}`);
+    }
     this.beginSyncActivity();
     try {
       for (const frame of ordered) {
@@ -3288,6 +3352,9 @@ class LanternApp {
       }
     } finally {
       this.endSyncActivity();
+    }
+    for (const conversationId of touchedConversationIds) {
+      this.emitEvent({ type: 'conversation:synchronized', conversationId });
     }
   }
 
@@ -3374,6 +3441,7 @@ class LanternApp {
   }
 
   private cleanup(): void {
+    this.releaseCanonicalBootstrap();
     if (this.updateCheckTimer) {
       clearInterval(this.updateCheckTimer);
       this.updateCheckTimer = null;

@@ -56,7 +56,16 @@ export interface AccountSession {
   active: boolean;
 }
 export interface UserPreferencesSnapshot {
-  conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
+  conversations: Array<{
+    conversationId: string;
+    pinned: boolean;
+    archived: boolean;
+    manualUnread: boolean;
+    readAt: number;
+    readSeq: number;
+    unreadCount: number;
+    updatedAt: number;
+  }>;
   messages: Array<{ messageId: string; favorite: boolean; updatedAt: number }>;
 }
 export interface ClientAuthState {

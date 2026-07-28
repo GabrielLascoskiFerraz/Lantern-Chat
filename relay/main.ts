@@ -145,6 +145,7 @@ class RelayWorkQueue {
 export interface RelayConfig {
   host: string;
   port: number;
+  localHostname: string;
   pingIntervalMs: number;
   peerTimeoutMs: number;
   presenceBroadcastIntervalMs: number;
@@ -287,6 +288,7 @@ interface RelayDashboardSnapshot {
   uptimeMs: number;
   host: string;
   port: number;
+  localHostname: string;
   tls: boolean;
   peersOnline: number;
   sessionsOpen: number;
@@ -359,6 +361,7 @@ export interface ManagedStickerImportResult {
 const DEFAULT_CONFIG: RelayConfig = {
   host: '0.0.0.0',
   port: 43190,
+  localHostname: 'lantern-relay.local',
   pingIntervalMs: 5_000,
   peerTimeoutMs: 30_000,
   presenceBroadcastIntervalMs: 12_000,
@@ -378,6 +381,16 @@ const asString = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+};
+
+const normalizeLocalHostname = (value: string | null | undefined): string => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/\.+$/, '');
+  if (!normalized) return DEFAULT_CONFIG.localHostname;
+  const label = normalized.endsWith('.local') ? normalized.slice(0, -6) : normalized;
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) {
+    throw new Error('O nome local deve usar letras, números e hífens, por exemplo: lantern-relay.local.');
+  }
+  return `${label}.local`;
 };
 
 const asFiniteNumber = (value: unknown): number | null => {
@@ -582,7 +595,7 @@ const normalizeAnnouncementReadPayload = (value: unknown): RelayAnnouncementRead
   };
 };
 
-const parseCliArg = (name: '--host' | '--port'): string | undefined => {
+const parseCliArg = (name: '--host' | '--port' | '--local-hostname'): string | undefined => {
   const index = process.argv.indexOf(name);
   if (index < 0) return undefined;
   return process.argv[index + 1];
@@ -1971,9 +1984,12 @@ export class LanternRelay {
   private readonly routeQueue = new RelayWorkQueue(16, MAX_QUEUED_ROUTES);
 
   constructor(config: RelayConfig) {
-    this.config = config;
-    const tlsEnabled = Boolean(config.tlsCertFile && config.tlsKeyFile);
-    if (config.externalMode && !tlsEnabled) {
+    this.config = {
+      ...config,
+      localHostname: normalizeLocalHostname(config.localHostname)
+    };
+    const tlsEnabled = Boolean(this.config.tlsCertFile && this.config.tlsKeyFile);
+    if (this.config.externalMode && !tlsEnabled) {
       throw new Error(
         'LANTERN_RELAY_EXTERNAL=1 exige LANTERN_RELAY_TLS_CERT e LANTERN_RELAY_TLS_KEY.'
       );
@@ -2086,12 +2102,84 @@ export class LanternRelay {
     }, { level: 'warn' });
   }
 
-  createCanonicalBackup() {
+  createCanonicalBackup(actor = 'relay-ui') {
+    if (this.groupStore.getAttachmentStats().activeUploads > 0) {
+      throw new Error('Aguarde a conclusão dos uploads de grupo antes de criar o backup.');
+    }
+    this.groupStore.flushPersistence();
+    if (!this.persistAnnouncementStore()) {
+      throw new Error('Não foi possível consolidar os anúncios antes do backup.');
+    }
     return this.centralStore.createBackup([
       { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
       { name: 'stickers', source: RELAY_STICKERS_DIR },
       { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
-    ], 'relay-ui', RELAY_VERSION);
+    ], actor, RELAY_VERSION);
+  }
+
+  private getClientUserPreferences(userId: string) {
+    const snapshot = this.centralStore.getUserPreferences(userId);
+    const byConversation = new Map(
+      snapshot.conversations.map((preference) => [
+        preference.conversationId,
+        { ...preference }
+      ])
+    );
+    for (const group of this.groupStore.listGroupsForDevice(userId)) {
+      const conversationId = `group:${group.groupId}`;
+      const current = byConversation.get(conversationId) || {
+        conversationId,
+        pinned: false,
+        archived: false,
+        manualUnread: false,
+        readAt: 0,
+        readSeq: 0,
+        unreadCount: 0,
+        updatedAt: 0
+      };
+      const unreadCount = this.groupStore.getUnreadMessageCountForDevice(
+        group.groupId,
+        userId,
+        current.readSeq
+      );
+      byConversation.set(conversationId, {
+        ...current,
+        unreadCount: Math.max(current.manualUnread ? 1 : 0, unreadCount)
+      });
+    }
+    const announcementPreference = byConversation.get('announcements') || {
+      conversationId: 'announcements',
+      pinned: false,
+      archived: false,
+      manualUnread: false,
+      readAt: 0,
+      readSeq: 0,
+      unreadCount: 0,
+      updatedAt: 0
+    };
+    const now = Date.now();
+    const unreadAnnouncements = Array.from(this.announcementsById.values()).filter(
+      (announcement) =>
+        !announcement.deletedAt &&
+        !announcement.expiredAt &&
+        announcement.expiresAt > now &&
+        !announcement.readByDeviceId[userId]
+    ).length;
+    byConversation.set('announcements', {
+      ...announcementPreference,
+      unreadCount: Math.max(
+        announcementPreference.manualUnread ? 1 : 0,
+        unreadAnnouncements
+      )
+    });
+    return {
+      conversations: Array.from(byConversation.values()).sort(
+        (left, right) =>
+          right.updatedAt - left.updatedAt ||
+          left.conversationId.localeCompare(right.conversationId)
+      ),
+      messages: snapshot.messages
+    };
   }
 
   getManagementSnapshot() {
@@ -2362,7 +2450,7 @@ export class LanternRelay {
     try {
       this.bonjour = new BonjourService();
       this.published = this.bonjour.publish({
-        name: `LanternRelay-${process.pid}`,
+        name: this.config.localHostname.replace(/\.local$/i, ''),
         type: RELAY_MDNS_TYPE,
         protocol: RELAY_MDNS_PROTOCOL,
         port: this.config.port,
@@ -2370,6 +2458,7 @@ export class LanternRelay {
           app: 'LanternRelay',
           version: RELAY_VERSION,
           port: String(this.config.port),
+          hostname: this.config.localHostname,
           secure: String(Boolean(this.config.tlsCertFile))
         }
       });
@@ -2439,6 +2528,7 @@ export class LanternRelay {
         type: RELAY_DISCOVERY_UDP_RESPONSE,
         version: RELAY_VERSION,
         port: this.config.port,
+        hostname: this.config.localHostname,
         secure: Boolean(this.config.tlsCertFile),
         serverTime: Date.now()
       })
@@ -3019,7 +3109,7 @@ export class LanternRelay {
         res,
         method,
         account
-          ? { ok: true, preferences: this.centralStore.getUserPreferences(account.userId) }
+          ? { ok: true, preferences: this.getClientUserPreferences(account.userId) }
           : { ok: false, error: 'UNAUTHORIZED' },
         account ? 200 : 401
       );
@@ -3035,12 +3125,31 @@ export class LanternRelay {
       }
       try {
         const body = await this.readJsonBody(req);
+        const conversationId = asString(body.conversationId) || '';
+        const requestedReadSeq =
+          typeof body.readSeq === 'number' && Number.isFinite(body.readSeq)
+            ? Math.max(0, Math.trunc(body.readSeq))
+            : undefined;
+        let readSeq = requestedReadSeq;
+        if (conversationId.startsWith('group:') && requestedReadSeq !== undefined) {
+          const groupId = conversationId.slice('group:'.length).trim();
+          const group = this.groupStore.getGroup(groupId);
+          const membership = group?.members[account.userId];
+          // A sequência de grupos também é canônica. Não permita que um
+          // cliente avance a marca de leitura além dos eventos existentes.
+          readSeq = group && membership?.status === 'active'
+            ? Math.min(requestedReadSeq, Math.max(0, group.lastEventSeq))
+            : undefined;
+        }
         this.centralStore.setUserConversationPreference(account.userId, {
-          conversationId: asString(body.conversationId) || '',
+          conversationId,
           pinned: typeof body.pinned === 'boolean' ? body.pinned : undefined,
           archived: typeof body.archived === 'boolean' ? body.archived : undefined,
           manualUnread: typeof body.manualUnread === 'boolean' ? body.manualUnread : undefined,
-          readAt: typeof body.readAt === 'number' ? body.readAt : undefined
+          // Horários do cliente nunca são autoridade. A sequência indica até
+          // qual mensagem realmente visível naquele dispositivo foi lida.
+          readAt: typeof body.readAt === 'number' ? Date.now() : undefined,
+          readSeq
         });
         this.writeJson(res, method, { ok: true });
       } catch (error) {
@@ -3331,11 +3440,7 @@ export class LanternRelay {
       }
       if (requestUrl.pathname === '/api/admin/backup' && method === 'POST') {
         try {
-          const backup = await this.centralStore.createBackup([
-            { name: 'group-attachments', source: GROUP_ATTACHMENTS_DIR },
-            { name: 'stickers', source: RELAY_STICKERS_DIR },
-            { name: 'updates', source: path.join(resolveRelayDataDir(), 'updates') }
-          ], adminSession.userId, RELAY_VERSION);
+          const backup = await this.createCanonicalBackup(adminSession.userId);
           this.writeJson(res, method, { ok: true, backup }, 201);
         } catch (error) {
           this.writeJson(res, method, {
@@ -3865,6 +3970,7 @@ export class LanternRelay {
       uptimeMs: Math.max(0, now - this.startedAt),
       host: this.config.host,
       port: this.config.port,
+      localHostname: this.config.localHostname,
       tls: Boolean(this.config.tlsCertFile),
       peersOnline: peers.length,
       sessionsOpen: this.sessionsBySocket.size,
@@ -4261,8 +4367,12 @@ export class LanternRelay {
     }
     const afterSeq = Math.max(0, Math.trunc(asFiniteNumber(record?.afterSeq) || 0));
     const limit = Math.max(1, Math.min(Math.trunc(asFiniteNumber(record?.limit) || 500), 1_000));
-    const frames = this.centralStore.listFramesForUserAfterSeq(session.peer.deviceId, afterSeq, limit);
-    const mapped = frames.map((frame) => ({
+    const page = this.centralStore.getIncrementalFramePageForUser(
+      session.peer.deviceId,
+      afterSeq,
+      limit
+    );
+    const mapped = page.frames.map((frame) => ({
       serverSeq: frame.serverSeq,
       type: frame.type,
       messageId: frame.messageId,
@@ -4276,8 +4386,8 @@ export class LanternRelay {
       payload: {
         requestId,
         frames: mapped,
-        hasMore: mapped.length === limit,
-        nextServerSeq: mapped.length > 0 ? mapped[mapped.length - 1].serverSeq : afterSeq
+        hasMore: page.hasMore,
+        nextServerSeq: page.nextServerSeq
       }
     });
   }
@@ -4821,7 +4931,6 @@ export class LanternRelay {
         return;
       }
       this.sendGroupAck(session, requestId, cached.result.response);
-      if (cached.result.events.length > 0) this.broadcastGroupEvents(cached.result.events);
       return;
     }
 
@@ -5160,7 +5269,6 @@ export class LanternRelay {
         return;
       }
       this.sendGroupAck(session, requestId, cached.result.response);
-      if (cached.result.events.length > 0) this.broadcastGroupEvents(cached.result.events);
       return;
     }
     try {
@@ -5461,6 +5569,26 @@ export class LanternRelay {
       };
     }
 
+    if (persistence === 'duplicate') {
+      // Um retry idempotente só recebe a confirmação da gravação original.
+      // Reaplicar estado derivado (especialmente anúncios) poderia regredir
+      // uma edição/reação mais nova e reentregar um evento antigo.
+      this.sendEnvelope(session.socket, {
+        type: 'relay:send:ack',
+        payload: {
+          frameMessageId: frame.messageId,
+          deliveredTo: [],
+          persisted: true,
+          duplicate: true,
+          serverSeq: outboundFrame.serverSeq ?? null,
+          createdAt: outboundFrame.createdAt
+        }
+      });
+      this.reliabilityMetrics.acceptedFrames += 1;
+      this.reliabilityMetrics.duplicateFrames += 1;
+      return;
+    }
+
     if (frame.type === 'announce' || (frame.type === 'file:offer' && frame.to === null)) {
       this.trackAnnouncement(outboundFrame);
     } else if (frame.type === 'chat:edit' && frame.to === null) {
@@ -5487,18 +5615,13 @@ export class LanternRelay {
         frameMessageId: frame.messageId,
         deliveredTo: [],
         persisted: persistence !== 'ephemeral',
-        duplicate: persistence === 'duplicate',
+        duplicate: false,
         serverSeq: outboundFrame.serverSeq ?? null,
         createdAt: outboundFrame.createdAt
       }
     });
 
     this.reliabilityMetrics.acceptedFrames += 1;
-    if (persistence === 'duplicate') this.reliabilityMetrics.duplicateFrames += 1;
-    // O ACK idempotente encerra o retry. Roteá-lo novamente poderia entregar
-    // uma base ou mutação antiga depois de operações mais novas e regredir a
-    // projeção do destinatário. Clientes ausentes recuperam o frame do histórico.
-    if (persistence === 'duplicate') return;
     void this.routeQueue.enqueue(async () => {
       this.reliabilityMetrics.activeRoutes += 1;
       this.reliabilityMetrics.peakActiveRoutes = Math.max(
@@ -6458,6 +6581,9 @@ export class LanternRelay {
 const config: RelayConfig = {
   host: asString(parseCliArg('--host')) || asString(process.env.LANTERN_RELAY_HOST) || DEFAULT_CONFIG.host,
   port: parseInteger(parseCliArg('--port') || process.env.LANTERN_RELAY_PORT, DEFAULT_CONFIG.port),
+  localHostname: normalizeLocalHostname(
+    asString(parseCliArg('--local-hostname')) || asString(process.env.LANTERN_RELAY_LOCAL_HOSTNAME) || DEFAULT_CONFIG.localHostname
+  ),
   pingIntervalMs: parseInteger(process.env.LANTERN_RELAY_PING_INTERVAL_MS, DEFAULT_CONFIG.pingIntervalMs),
   peerTimeoutMs: parseInteger(process.env.LANTERN_RELAY_PEER_TIMEOUT_MS, DEFAULT_CONFIG.peerTimeoutMs),
   presenceBroadcastIntervalMs: parseInteger(

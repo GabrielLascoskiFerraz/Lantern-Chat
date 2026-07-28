@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 
 export const RELAY_BACKUP_KIND = 'lantern-relay-backup';
 export const RELAY_BACKUP_VERSION = 2;
-export const RELAY_SCHEMA_VERSION = 2;
+export const RELAY_SCHEMA_VERSION = 3;
 export const LEGACY_CONVERTED_BACKUP_KIND = 'lantern-relay-converted-backup';
 
 export const resolveBackupAppVersion = (): string | null => {

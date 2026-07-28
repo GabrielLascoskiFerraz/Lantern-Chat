@@ -247,8 +247,6 @@ export class CentralStore {
         ON canonical_frames(targetUserId, createdAt);
       CREATE INDEX IF NOT EXISTS idx_frames_sender_time
         ON canonical_frames(senderUserId, createdAt, messageId);
-      CREATE INDEX IF NOT EXISTS idx_frames_target_message
-        ON canonical_frames(conversationId, targetMessageId);
       CREATE TABLE IF NOT EXISTS canonical_frame_sequence (
         serverSeq INTEGER PRIMARY KEY AUTOINCREMENT,
         messageId TEXT NOT NULL UNIQUE,
@@ -303,6 +301,7 @@ export class CentralStore {
         archived INTEGER NOT NULL DEFAULT 0,
         manualUnread INTEGER NOT NULL DEFAULT 0,
         readAt INTEGER NOT NULL DEFAULT 0,
+        readSeq INTEGER NOT NULL DEFAULT 0,
         updatedAt INTEGER NOT NULL,
         PRIMARY KEY(userId, conversationId),
         FOREIGN KEY(userId) REFERENCES users(userId) ON DELETE CASCADE
@@ -385,6 +384,14 @@ export class CentralStore {
     if (!userColumns.some((column) => column.name === 'passwordSetupRequired')) {
       this.db.exec('ALTER TABLE users ADD COLUMN passwordSetupRequired INTEGER NOT NULL DEFAULT 0;');
     }
+    const conversationPreferenceColumns = this.db
+      .prepare('PRAGMA table_info(user_conversation_preferences)')
+      .all() as Array<{ name: string }>;
+    if (!conversationPreferenceColumns.some((column) => column.name === 'readSeq')) {
+      this.db.exec(
+        'ALTER TABLE user_conversation_preferences ADD COLUMN readSeq INTEGER NOT NULL DEFAULT 0;'
+      );
+    }
     const frameColumns = this.db.prepare('PRAGMA table_info(canonical_frames)').all() as Array<{ name: string }>;
     if (!frameColumns.some((column) => column.name === 'clientCreatedAt')) {
       this.db.exec('ALTER TABLE canonical_frames ADD COLUMN clientCreatedAt INTEGER;');
@@ -432,7 +439,7 @@ export class CentralStore {
       INSERT OR IGNORE INTO canonical_frame_sequence(messageId)
       SELECT messageId FROM canonical_frames ORDER BY createdAt, messageId;
     `);
-    this.db.pragma('user_version = 2');
+    this.db.pragma('user_version = 3');
     this.setSettingIfMissing('retention.policy', 'forever');
   }
 
@@ -849,20 +856,134 @@ export class CentralStore {
   }
 
   getUserPreferences(userId: string): {
-    conversations: Array<{ conversationId: string; pinned: boolean; archived: boolean; manualUnread: boolean; readAt: number; updatedAt: number }>;
+    conversations: Array<{
+      conversationId: string;
+      pinned: boolean;
+      archived: boolean;
+      manualUnread: boolean;
+      readAt: number;
+      readSeq: number;
+      unreadCount: number;
+      updatedAt: number;
+    }>;
     messages: Array<{ messageId: string; favorite: boolean; updatedAt: number }>;
   } {
-    const conversations = this.db.prepare(`
-      SELECT conversationId, pinned, archived, manualUnread, readAt, updatedAt
+    const storedConversations = this.db.prepare(`
+      SELECT conversationId, pinned, archived, manualUnread, readAt, readSeq, updatedAt
       FROM user_conversation_preferences WHERE userId = ? ORDER BY updatedAt DESC
-    `).all(userId) as Array<{ conversationId: string; pinned: number; archived: number; manualUnread: number; readAt: number; updatedAt: number }>;
+    `).all(userId) as Array<{
+      conversationId: string;
+      pinned: number;
+      archived: number;
+      manualUnread: number;
+      readAt: number;
+      readSeq: number;
+      updatedAt: number;
+    }>;
     const messages = this.db.prepare(`
       SELECT messageId, favorite, updatedAt
       FROM user_message_preferences WHERE userId = ? AND favorite = 1
       ORDER BY updatedAt DESC
     `).all(userId) as Array<{ messageId: string; favorite: number; updatedAt: number }>;
+
+    const directPeers = this.db.prepare(`
+      SELECT DISTINCT
+        CASE WHEN frame.senderUserId = ? THEN frame.targetUserId
+             ELSE frame.senderUserId END AS peerUserId
+      FROM canonical_frames frame
+      WHERE frame.deletedAt IS NULL
+        AND frame.targetUserId IS NOT NULL
+        AND frame.type IN ('chat:text', 'file:offer')
+        AND (frame.senderUserId = ? OR frame.targetUserId = ?)
+    `).all(userId, userId, userId) as Array<{ peerUserId: string | null }>;
+    const storedById = new Map(storedConversations.map((row) => [row.conversationId, row]));
+    const consumedStoredIds = new Set<string>();
+    const conversations: Array<{
+      conversationId: string;
+      pinned: boolean;
+      archived: boolean;
+      manualUnread: boolean;
+      readAt: number;
+      readSeq: number;
+      unreadCount: number;
+      updatedAt: number;
+    }> = [];
+    for (const { peerUserId } of directPeers) {
+      if (!peerUserId) continue;
+      const conversationId = `dm:${peerUserId}`;
+      const canonicalConversationId =
+        `dm:${[userId, peerUserId].sort((left, right) => left.localeCompare(right)).join(':')}`;
+      const stored =
+        storedById.get(conversationId) ||
+        storedById.get(canonicalConversationId);
+      if (stored) consumedStoredIds.add(stored.conversationId);
+      const readAt = Math.max(0, Number(stored?.readAt || 0));
+      let readSeq = Math.max(0, Number(stored?.readSeq || 0));
+      if (readSeq === 0 && readAt > 0) {
+        const derived = this.db.prepare(`
+          SELECT MAX(sequence.serverSeq) AS serverSeq
+          FROM canonical_frames frame
+          JOIN canonical_frame_sequence sequence ON sequence.messageId = frame.messageId
+          WHERE frame.deletedAt IS NULL
+            AND frame.type IN ('chat:text', 'file:offer')
+            AND frame.createdAt <= ?
+            AND ((frame.senderUserId = ? AND frame.targetUserId = ?)
+              OR (frame.senderUserId = ? AND frame.targetUserId = ?))
+        `).get(readAt, userId, peerUserId, peerUserId, userId) as {
+          serverSeq: number | null;
+        };
+        readSeq = Math.max(0, Number(derived.serverSeq || 0));
+      }
+      const unreadRow = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM canonical_frames base
+        JOIN canonical_frame_sequence sequence ON sequence.messageId = base.messageId
+        WHERE base.deletedAt IS NULL
+          AND base.type IN ('chat:text', 'file:offer')
+          AND base.senderUserId = ?
+          AND base.targetUserId = ?
+          AND sequence.serverSeq > ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM canonical_frames mutation
+            WHERE mutation.deletedAt IS NULL
+              AND mutation.type = 'chat:delete'
+              AND mutation.conversationId = base.conversationId
+              AND mutation.targetMessageId = base.messageId
+          )
+      `).get(peerUserId, userId, readSeq) as { count: number };
+      const manualUnread = Boolean(stored?.manualUnread);
+      conversations.push({
+        conversationId,
+        pinned: Boolean(stored?.pinned),
+        archived: Boolean(stored?.archived),
+        manualUnread,
+        readAt,
+        readSeq,
+        unreadCount: Math.max(manualUnread ? 1 : 0, Number(unreadRow.count || 0)),
+        updatedAt: Number(stored?.updatedAt || 0)
+      });
+    }
+    for (const stored of storedConversations) {
+      if (consumedStoredIds.has(stored.conversationId)) continue;
+      conversations.push({
+        conversationId: stored.conversationId,
+        pinned: Boolean(stored.pinned),
+        archived: Boolean(stored.archived),
+        manualUnread: Boolean(stored.manualUnread),
+        readAt: stored.readAt,
+        readSeq: stored.readSeq,
+        unreadCount: stored.manualUnread ? 1 : 0,
+        updatedAt: stored.updatedAt
+      });
+    }
+    conversations.sort(
+      (left, right) =>
+        right.updatedAt - left.updatedAt ||
+        left.conversationId.localeCompare(right.conversationId)
+    );
     return {
-      conversations: conversations.map((row) => ({ ...row, pinned: Boolean(row.pinned), archived: Boolean(row.archived), manualUnread: Boolean(row.manualUnread) })),
+      conversations,
       messages: messages.map((row) => ({ ...row, favorite: Boolean(row.favorite) }))
     };
   }
@@ -873,19 +994,70 @@ export class CentralStore {
     archived?: boolean;
     manualUnread?: boolean;
     readAt?: number;
+    readSeq?: number;
   }): void {
     const conversationId = input.conversationId.trim();
     if (!conversationId) throw new Error('Conversa inválida.');
     const current = this.db.prepare(`
-      SELECT pinned, archived, manualUnread, readAt FROM user_conversation_preferences
+      SELECT pinned, archived, manualUnread, readAt, readSeq
+      FROM user_conversation_preferences
       WHERE userId = ? AND conversationId = ?
-    `).get(userId, conversationId) as { pinned: number; archived: number; manualUnread: number; readAt: number } | undefined;
+    `).get(userId, conversationId) as {
+      pinned: number;
+      archived: number;
+      manualUnread: number;
+      readAt: number;
+      readSeq: number;
+    } | undefined;
+    let nextReadSeq =
+      input.readSeq === undefined
+        ? current?.readSeq || 0
+        : Math.max(0, Math.trunc(input.readSeq));
+    if (conversationId.startsWith('dm:')) {
+      const peerUserId = conversationId.slice(3).trim();
+      if (peerUserId) {
+        const highWater = this.db.prepare(`
+          SELECT MAX(sequence.serverSeq) AS serverSeq
+          FROM canonical_frames frame
+          JOIN canonical_frame_sequence sequence ON sequence.messageId = frame.messageId
+          WHERE frame.deletedAt IS NULL
+            AND frame.type IN ('chat:text', 'file:offer')
+            AND ((frame.senderUserId = ? AND frame.targetUserId = ?)
+              OR (frame.senderUserId = ? AND frame.targetUserId = ?))
+        `).get(userId, peerUserId, peerUserId, userId) as { serverSeq: number | null };
+        const maximum = Math.max(0, Number(highWater.serverSeq || 0));
+        if (input.readSeq !== undefined) {
+          nextReadSeq = Math.min(nextReadSeq, maximum);
+        } else if (input.readAt !== undefined) {
+          const derived = this.db.prepare(`
+            SELECT MAX(sequence.serverSeq) AS serverSeq
+            FROM canonical_frames frame
+            JOIN canonical_frame_sequence sequence ON sequence.messageId = frame.messageId
+            WHERE frame.deletedAt IS NULL
+              AND frame.type IN ('chat:text', 'file:offer')
+              AND frame.createdAt <= ?
+              AND ((frame.senderUserId = ? AND frame.targetUserId = ?)
+                OR (frame.senderUserId = ? AND frame.targetUserId = ?))
+          `).get(
+            Math.max(0, Math.trunc(input.readAt)),
+            userId,
+            peerUserId,
+            peerUserId,
+            userId
+          ) as { serverSeq: number | null };
+          nextReadSeq = Math.max(nextReadSeq, Number(derived.serverSeq || 0));
+        }
+      }
+    }
     this.db.prepare(`
-      INSERT INTO user_conversation_preferences(userId, conversationId, pinned, archived, manualUnread, readAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO user_conversation_preferences(
+        userId, conversationId, pinned, archived, manualUnread, readAt, readSeq, updatedAt
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(userId, conversationId) DO UPDATE SET
         pinned=excluded.pinned, archived=excluded.archived, manualUnread=excluded.manualUnread,
-        readAt=excluded.readAt, updatedAt=excluded.updatedAt
+        readAt=excluded.readAt, readSeq=MAX(user_conversation_preferences.readSeq, excluded.readSeq),
+        updatedAt=excluded.updatedAt
     `).run(
       userId,
       conversationId,
@@ -893,6 +1065,7 @@ export class CentralStore {
       input.archived === undefined ? current?.archived || 0 : input.archived ? 1 : 0,
       input.manualUnread === undefined ? current?.manualUnread || 0 : input.manualUnread ? 1 : 0,
       input.readAt === undefined ? current?.readAt || 0 : Math.max(0, Math.trunc(input.readAt)),
+      nextReadSeq,
       Date.now()
     );
   }
@@ -1286,6 +1459,7 @@ export class CentralStore {
     actor = 'admin',
     appVersion?: string | null
   ): Promise<CanonicalBackup> {
+    this.verifyBackupIntegrity();
     const counts = this.getBackupCounts();
     const backup = await new BackupService(
       this.dataDir,
@@ -1329,6 +1503,14 @@ export class CentralStore {
   }
 
   verifyBackupIntegrity(): Record<string, number> {
+    const masterKeyFile = path.join(this.dataDir, 'master.key');
+    if (!fs.existsSync(masterKeyFile)) {
+      throw new Error('A chave mestra do Relay não foi encontrada.');
+    }
+    const persistedMasterKey = fs.readFileSync(masterKeyFile);
+    if (persistedMasterKey.length !== 32 || !persistedMasterKey.equals(this.masterKey)) {
+      throw new Error('A chave mestra persistida não corresponde ao banco canônico.');
+    }
     const decryptJsonRows = (table: string, column: string): number => {
       const rows = this.db.prepare(`SELECT ${column} AS cipher FROM ${table}`).all() as Array<{ cipher: string }>;
       for (const row of rows) {
@@ -1538,12 +1720,21 @@ export class CentralStore {
     }));
   }
 
-  listFramesForUserAfterSeq(userId: string, afterSeq = 0, limit = 500): CanonicalFrame[] {
+  getIncrementalFramePageForUser(
+    userId: string,
+    afterSeq = 0,
+    limit = 500
+  ): {
+    frames: CanonicalFrame[];
+    hasMore: boolean;
+    nextServerSeq: number;
+  } {
     const safeAfterSeq = Math.max(0, Math.trunc(afterSeq) || 0);
     const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 1_000));
     const rows = this.db.prepare(`
       SELECT sequence.serverSeq, frame.messageId, frame.type, frame.senderUserId,
-        frame.targetUserId, frame.conversationId, frame.payloadCipher, frame.createdAt
+        frame.targetUserId, frame.conversationId, frame.payloadCipher,
+        frame.clientCreatedAt, frame.createdAt
       FROM canonical_frame_sequence sequence
       JOIN canonical_frames frame ON frame.messageId = sequence.messageId
       LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
@@ -1551,13 +1742,64 @@ export class CentralStore {
       WHERE sequence.serverSeq > ?
         AND frame.deletedAt IS NULL
         AND frame.targetUserId IS NOT NULL
+        AND frame.type IN ('chat:edit', 'chat:react', 'chat:delete')
         AND frame.createdAt > COALESCE(state.clearedAt, 0)
         AND (frame.senderUserId = ? OR frame.targetUserId = ?)
       ORDER BY sequence.serverSeq ASC
       LIMIT ?
+    `).all(userId, userId, safeAfterSeq, userId, userId, safeLimit + 1) as Array<{
+      serverSeq: number; messageId: string; type: string; senderUserId: string;
+      targetUserId: string | null; conversationId: string; payloadCipher: string;
+      clientCreatedAt: number | null; createdAt: number;
+    }>;
+    const hasMore = rows.length > safeLimit;
+    const retained = rows.slice(0, safeLimit);
+    const frames = retained.map((row) => ({
+      serverSeq: row.serverSeq,
+      messageId: row.messageId,
+      type: row.type,
+      senderUserId: row.senderUserId,
+      targetUserId: row.targetUserId,
+      conversationId: row.conversationId,
+      clientCreatedAt: row.clientCreatedAt,
+      createdAt: row.createdAt,
+      payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
+    }));
+    const lastReturnedSeq = frames.length > 0
+      ? frames[frames.length - 1].serverSeq || safeAfterSeq
+      : safeAfterSeq;
+    return {
+      frames,
+      hasMore,
+      // Quando não há outra página de mutações, o cursor pode avançar sobre
+      // mensagens-base que serão obtidas somente ao abrir a conversa.
+      nextServerSeq: hasMore
+        ? lastReturnedSeq
+        : Math.max(safeAfterSeq, this.getFrameSequenceHighWaterMark(), lastReturnedSeq)
+    };
+  }
+
+  listFramesForUserAfterSeq(userId: string, afterSeq = 0, limit = 500): CanonicalFrame[] {
+    const safeAfterSeq = Math.max(0, Math.trunc(afterSeq) || 0);
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 500, 100_000));
+    const rows = this.db.prepare(`
+      SELECT sequence.serverSeq, frame.messageId, frame.type, frame.senderUserId,
+        frame.targetUserId, frame.conversationId, frame.payloadCipher,
+        frame.clientCreatedAt, frame.createdAt
+      FROM canonical_frame_sequence sequence
+      JOIN canonical_frames frame ON frame.messageId = sequence.messageId
+      LEFT JOIN user_conversation_state state ON state.userId = ? AND state.peerUserId =
+        CASE WHEN frame.senderUserId = ? THEN frame.targetUserId ELSE frame.senderUserId END
+      WHERE sequence.serverSeq > ?
+        AND frame.deletedAt IS NULL
+        AND frame.createdAt > COALESCE(state.clearedAt, 0)
+        AND (frame.senderUserId = ? OR frame.targetUserId = ? OR frame.targetUserId IS NULL)
+      ORDER BY sequence.serverSeq ASC
+      LIMIT ?
     `).all(userId, userId, safeAfterSeq, userId, userId, safeLimit) as Array<{
       serverSeq: number; messageId: string; type: string; senderUserId: string;
-      targetUserId: string | null; conversationId: string; payloadCipher: string; createdAt: number;
+      targetUserId: string | null; conversationId: string; payloadCipher: string;
+      clientCreatedAt: number | null; createdAt: number;
     }>;
     return rows.map((row) => ({
       serverSeq: row.serverSeq,
@@ -1566,6 +1808,7 @@ export class CentralStore {
       senderUserId: row.senderUserId,
       targetUserId: row.targetUserId,
       conversationId: row.conversationId,
+      clientCreatedAt: row.clientCreatedAt,
       createdAt: row.createdAt,
       payload: JSON.parse(this.encrypted.decrypt(row.payloadCipher))
     }));
@@ -1660,6 +1903,12 @@ export class CentralStore {
         SELECT messageId, serverSeq
         FROM visible
         WHERE type IN ('chat:text', 'file:offer')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM visible deletion
+            WHERE deletion.type = 'chat:delete'
+              AND deletion.targetMessageId = visible.messageId
+          )
           AND (
             (? < ${Number.MAX_SAFE_INTEGER} AND serverSeq < ?)
             OR (? = ${Number.MAX_SAFE_INTEGER} AND createdAt < ?)

@@ -63,6 +63,8 @@ export interface UserPreferencesSnapshot {
     archived: boolean;
     manualUnread: boolean;
     readAt: number;
+    readSeq: number;
+    unreadCount: number;
     updatedAt: number;
   }>;
   messages: Array<{
