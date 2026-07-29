@@ -115,46 +115,46 @@
           </div>
         </div>
 
-        <div class="metrics" aria-label="Métricas do Relay">
+        <div class="metrics" aria-label="Resumo essencial do Relay">
           <article class="metric-card card">
-            <div class="metric-head"><span>Usuários online</span><i class="metric-icon">●</i></div>
+            <div class="metric-head">
+              <span>Contas</span>
+              <i class="metric-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg></i>
+            </div>
+            <strong id="metric-accounts">0</strong>
+            <small id="metric-accounts-detail">Contas cadastradas</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head">
+              <span>Usuários online</span>
+              <i class="metric-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8-1a2.5 2.5 0 1 0 0-5M3 19a5 5 0 0 1 10 0m1-5a4 4 0 0 1 6 3.5"/></svg></i>
+            </div>
             <strong id="metric-peers">0</strong>
             <small id="metric-sessions">0 sessões ativas</small>
           </article>
           <article class="metric-card card">
-            <div class="metric-head"><span>Contas</span><i class="metric-icon">♙</i></div>
-            <strong id="metric-accounts">0</strong>
-            <small id="metric-retention">Retenção —</small>
-          </article>
-          <article class="metric-card card">
-            <div class="metric-head"><span>Frames</span><i class="metric-icon">↕</i></div>
-            <strong id="metric-frames">0</strong>
-            <small>Eventos persistidos</small>
-          </article>
-          <article class="metric-card card">
-            <div class="metric-head"><span>Anexos</span><i class="metric-icon">⌁</i></div>
-            <strong id="metric-attachments">0</strong>
-            <small id="metric-storage">0 B armazenados</small>
-          </article>
-          <article class="metric-card card">
-            <div class="metric-head"><span>Transferências</span><i class="metric-icon">⇅</i></div>
-            <strong id="metric-transfers">0</strong>
-            <small id="metric-transfer-health">Nenhuma falha</small>
-          </article>
-          <article class="metric-card card">
-            <div class="metric-head"><span>Latência de entrega</span><i class="metric-icon">↝</i></div>
+            <div class="metric-head">
+              <span>Latência</span>
+              <i class="metric-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17h3l2-6 3 9 3-13 2 10h3"/></svg></i>
+            </div>
             <strong id="metric-latency">0 ms</strong>
             <small id="metric-latency-detail">p95 0 ms · máxima 0 ms</small>
           </article>
           <article class="metric-card card">
-            <div class="metric-head"><span>Confiabilidade</span><i class="metric-icon">✓</i></div>
-            <strong id="metric-accepted">0</strong>
-            <small id="metric-reliability-detail">Nenhuma entrega pendente</small>
-          </article>
-          <article class="metric-card card">
-            <div class="metric-head"><span>Tempo ativo</span><i class="metric-icon">◷</i></div>
+            <div class="metric-head">
+              <span>Tempo de execução</span>
+              <i class="metric-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg></i>
+            </div>
             <strong id="metric-uptime">—</strong>
             <small id="metric-started">Servidor parado</small>
+          </article>
+          <article class="metric-card card">
+            <div class="metric-head">
+              <span>Armazenamento</span>
+              <i class="metric-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></i>
+            </div>
+            <strong id="metric-storage-total">0 B</strong>
+            <small>Todos os dados armazenados pelo Relay</small>
           </article>
         </div>
       </section>
@@ -357,6 +357,7 @@
       </section>
     </main>
   </div>
+  <script src="./web-adapter.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

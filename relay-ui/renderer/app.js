@@ -498,18 +498,17 @@ const render = (state) => {
   const running = Boolean(state.running);
   const store = state.centralStore || {};
   const transfers = state.transferMetrics || {};
-  const reliability = state.reliabilityMetrics || {};
   const port = state.port || state.settings?.port || 43190;
   const peers = Array.isArray(state.peers) ? state.peers : [];
   const announcements = Array.isArray(state.announcements) ? state.announcements : [];
-  const transferTotal = Number(transfers.uploadsCompleted || 0) + Number(transfers.downloadsCompleted || 0);
-  const transferFailures = Number(transfers.uploadsFailed || 0) + Number(transfers.downloadsFailed || 0) + Number(transfers.sendFailures || 0);
 
   $('status-pill').className = `live-pill ${running ? '' : 'offline'}`.trim();
   $('status-label').textContent = running ? 'Relay online' : 'Relay offline';
-  $('connection-summary').textContent = running
-    ? `${state.tls ? 'WSS seguro' : 'WS local'} · porta ${port} · ${number(state.sessionsOpen)} sessão(ões)`
-    : 'O servidor está parado e não aceita conexões.';
+  if (document.querySelector('.page-section.active')?.id === 'overview') {
+    $('connection-summary').textContent = running
+      ? `${state.tls ? 'WSS seguro' : 'WS local'} · porta ${port} · ${number(state.sessionsOpen)} sessão(ões)`
+      : 'O servidor está parado e não aceita conexões.';
+  }
   $('operation-icon').className = `operation-icon ${running ? '' : 'offline'}`.trim();
   $('operation-title').textContent = running ? 'Relay em operação' : 'Relay parado';
   $('operation-detail').textContent = running
@@ -519,18 +518,12 @@ const render = (state) => {
   $('metric-peers').textContent = number(state.peersOnline);
   $('metric-sessions').textContent = `${number(state.sessionsOpen)} sessões ativas`;
   $('metric-accounts').textContent = number(store.users);
-  $('metric-retention').textContent = `Retenção ${store.retentionPolicy || '—'}`;
-  $('metric-frames').textContent = number(store.frames);
-  $('metric-attachments').textContent = number(store.attachments);
-  $('metric-storage').textContent = `${bytes(store.attachmentBytes)} armazenados`;
-  $('metric-transfers').textContent = number(transferTotal);
-  $('metric-transfer-health').textContent = transferFailures ? `${number(transferFailures)} falha(s)` : 'Nenhuma falha';
+  $('metric-accounts-detail').textContent = `${number(store.users)} conta(s) cadastrada(s)`;
   $('metric-latency').textContent = `${Number(transfers.averageSendLatencyMs || 0).toFixed(1)} ms`;
   $('metric-latency-detail').textContent = `p95 ${Number(transfers.p95SendLatencyMs || 0).toFixed(1)} ms · máxima ${Number(transfers.maxSendLatencyMs || 0).toFixed(1)} ms`;
-  $('metric-accepted').textContent = number(reliability.acceptedFrames);
-  $('metric-reliability-detail').textContent = `${number(reliability.activeRoutes)} entregas · ${number(reliability.queuedRoutes)} aguardando · ${number(reliability.queuedCommands)} comandos · ${number(reliability.sessionsAwaitingHeartbeat)} sessões atrasadas`;
   $('metric-uptime').textContent = running ? duration(state.uptimeMs) : '—';
   $('metric-started').textContent = running ? `Iniciado às ${time(state.startedAt)}` : 'Servidor parado';
+  $('metric-storage-total').textContent = bytes(state.totalStorageBytes);
   $('last-update').textContent = `Atualizado às ${time(state.now || Date.now())}`;
 
   $('port-label').textContent = `Porta ${port}`;
@@ -740,11 +733,43 @@ $('calendar-refresh-now').addEventListener('click', async () => {
 });
 
 const navLinks = Array.from(document.querySelectorAll('.nav-link'));
+const pageSections = Array.from(document.querySelectorAll('.page-section'));
+const sectionTitles = {
+  overview: ['Visão geral do Relay', 'Estado e recursos essenciais do servidor.'],
+  activity: ['Atividade', 'Usuários conectados e anúncios ativos.'],
+  connection: ['Conexão', 'Endereços, segurança e inicialização do Relay.'],
+  accounts: ['Contas', 'Criação e gerenciamento das contas do Lantern.'],
+  'password-resets': ['Redefinições de senha', 'Solicitações de recuperação de acesso.'],
+  'relay-gifs': ['GIFs do Relay', 'Catálogo compartilhado entre todos os clientes.'],
+  'client-updates': ['Atualizações', 'Instaladores distribuídos aos clientes Lantern.'],
+  'announcement-settings': ['Anúncios', 'Expiração e publicação automática por calendário.']
+};
+const activateSection = (requestedSection, { updateHash = false } = {}) => {
+  const sectionId = pageSections.some((section) => section.id === requestedSection)
+    ? requestedSection
+    : 'overview';
+  for (const section of pageSections) {
+    section.classList.toggle('active', section.id === sectionId);
+  }
+  for (const link of navLinks) {
+    link.classList.toggle('active', link.dataset.section === sectionId);
+  }
+  const [title, summary] = sectionTitles[sectionId] || sectionTitles.overview;
+  document.querySelector('.topbar h1').textContent = title;
+  $('connection-summary').textContent = summary;
+  document.getElementById(sectionId).scrollTop = 0;
+  if (updateHash && window.location.hash !== `#${sectionId}`) {
+    window.history.replaceState(null, '', `#${sectionId}`);
+  }
+};
 for (const link of navLinks) {
-  link.addEventListener('click', () => {
-    for (const item of navLinks) item.classList.toggle('active', item === link);
+  link.addEventListener('click', (event) => {
+    event.preventDefault();
+    activateSection(link.dataset.section, { updateHash: true });
   });
 }
+window.addEventListener('hashchange', () => activateSection(window.location.hash.slice(1)));
+activateSection(window.location.hash.slice(1));
 
 void refresh({ silent: false }).then(() => refreshManagement()).catch(() => undefined);
 window.setInterval(() => void refresh(), 3_000);

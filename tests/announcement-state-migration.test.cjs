@@ -90,6 +90,7 @@ test('announcements.json cifrado é migrado e reaberto apenas pelo SQLite', asyn
 
     const liveCreatedAt = Date.now();
     reopenedRelay.trackAnnouncement({
+      serverSeq: 777,
       type: 'announce',
       messageId: 'announcement-live',
       from: 'author-two',
@@ -118,8 +119,52 @@ test('announcements.json cifrado é migrado e reaberto apenas pelo SQLite', asyn
       afterRestartSnapshot.announcements.map((item) => item.text).sort(),
       ['Anúncio gravado antes do ACK', 'Anúncio persistente'].sort()
     );
+    assert.equal(
+      afterRestartRelay
+        .listActiveAnnouncementFrames()
+        .find((frame) => frame.messageId === 'announcement-live')
+        ?.serverSeq,
+      777,
+      'a sequência canônica do anúncio deve sobreviver ao reinício do Relay'
+    );
     await afterRestartRelay.start();
     await afterRestartRelay.stop('test-final-reopen');
+
+    // Se o estado derivado de anúncios estiver incompleto, a reconstrução pela
+    // base canônica também precisa restaurar a sequência, não apenas o horário.
+    const recoveryStore = new CentralStore(path.join(root, 'central'), silentLog);
+    const recoveryAuthor = recoveryStore.createUser({
+      username: 'announcement-recovery-author',
+      displayName: 'Autor de recuperação',
+      password: 'announcement-recovery-password'
+    });
+    assert.equal(
+      recoveryStore.saveFrame({
+        messageId: 'announcement-recovered',
+        type: 'announce',
+        senderUserId: recoveryAuthor.userId,
+        targetUserId: null,
+        conversationId: 'announcements',
+        clientCreatedAt: now + 1,
+        createdAt: now + 1,
+        payload: { text: 'Recuperado da base canônica' }
+      }),
+      'inserted'
+    );
+    const recoveredSequence = recoveryStore.getFrame('announcement-recovered').serverSeq;
+    recoveryStore.close();
+
+    const recoveredRelay = new LanternRelay(relayConfig(port));
+    assert.equal(
+      recoveredRelay
+        .listActiveAnnouncementFrames()
+        .find((frame) => frame.messageId === 'announcement-recovered')
+        ?.serverSeq,
+      recoveredSequence,
+      'a reconstrução de anúncios deve copiar serverSeq da base canônica'
+    );
+    await recoveredRelay.start();
+    await recoveredRelay.stop('test-recovered-frame');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

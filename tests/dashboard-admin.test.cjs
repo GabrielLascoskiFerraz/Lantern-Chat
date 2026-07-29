@@ -59,16 +59,28 @@ test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () =
 
     const dashboardResponse = await fetch(`${baseUrl}/`);
     const dashboardHtml = await dashboardResponse.text();
-    assert.match(dashboardHtml, /grid-template-columns:244px minmax\(0,1fr\)/);
-    assert.match(dashboardHtml, /class="nav-icon"><svg/);
-    assert.match(dashboardHtml, /--accent:\s*#5b5fc7/);
-    assert.doesNotMatch(dashboardHtml, /Disponível somente no localhost/);
-    assert.doesNotMatch(dashboardHtml, /id="new-password"/);
-    assert.match(dashboardHtml, /entra com a senha vazia/);
-    const script = dashboardHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1] || '';
-    assert.ok(script.length > 0);
-    assert.doesNotMatch(script, /\?\./, 'dashboard não deve exigir optional chaining no Safari');
-    assert.doesNotThrow(() => new Function(script));
+    const sharedRenderer = fs.readFileSync(path.join(__dirname, '..', 'relay-ui', 'renderer', 'index.html'), 'utf8')
+      .replace('../../assets/icon.png', '/lantern-icon.png')
+      .replace('./styles.css', '/dashboard-assets/styles.css')
+      .replace('./web-adapter.js', '/dashboard-assets/web-adapter.js')
+      .replace('./app.js', '/dashboard-assets/app.js');
+    assert.equal(dashboardHtml, sharedRenderer, 'a dashboard web deve usar exatamente o HTML do Relay UI');
+    assert.match(dashboardHtml, /id="metric-accounts"/);
+    assert.match(dashboardHtml, /id="metric-storage-total"/);
+    assert.match(dashboardHtml, /class="page-section overview-section"/);
+    assert.match(dashboardHtml, /href="#activity"/);
+    assert.match(dashboardHtml, /href="#accounts"/);
+    assert.match(dashboardHtml, /href="#password-resets"/);
+    assert.match(dashboardHtml, /href="#client-updates"/);
+    assert.match(dashboardHtml, /href="#connection"/);
+    const styles = await (await fetch(`${baseUrl}/dashboard-assets/styles.css`)).text();
+    const appScript = await (await fetch(`${baseUrl}/dashboard-assets/app.js`)).text();
+    const adapterScript = await (await fetch(`${baseUrl}/dashboard-assets/web-adapter.js`)).text();
+    assert.equal(styles, fs.readFileSync(path.join(__dirname, '..', 'relay-ui', 'renderer', 'styles.css'), 'utf8'));
+    assert.equal(appScript, fs.readFileSync(path.join(__dirname, '..', 'relay-ui', 'renderer', 'app.js'), 'utf8'));
+    assert.equal(adapterScript, fs.readFileSync(path.join(__dirname, '..', 'relay-ui', 'renderer', 'web-adapter.js'), 'utf8'));
+    assert.doesNotThrow(() => new Function(appScript));
+    assert.doesNotThrow(() => new Function(adapterScript));
     assert.equal((await fetch(`${baseUrl}/api/status`)).status, 401);
 
     const firstTab = await login(baseUrl);
@@ -100,7 +112,22 @@ test('dashboard renova CSRF entre abas e persiste o setor no SQLite', async () =
     assert.equal(session.csrfToken, secondTab.csrfToken);
     const statusResponse = await fetch(`${baseUrl}/api/status`, { headers: { cookie: secondTab.cookie } });
     assert.equal(statusResponse.status, 200);
-    assert.equal((await statusResponse.json()).ok, true);
+    const status = await statusResponse.json();
+    assert.equal(status.ok, true);
+    assert.equal(Number.isFinite(status.totalStorageBytes), true);
+    assert.equal(status.totalStorageBytes > 0, true);
+    const relayUiStatusResponse = await fetch(`${baseUrl}/api/admin/relay-ui/status`, {
+      headers: { cookie: secondTab.cookie }
+    });
+    assert.equal(relayUiStatusResponse.status, 200);
+    const relayUiStatus = await relayUiStatusResponse.json();
+    assert.equal(relayUiStatus.state.running, true);
+    assert.equal(relayUiStatus.state.centralStore.users, 1);
+    const relayUiManagementResponse = await fetch(`${baseUrl}/api/admin/relay-ui/management`, {
+      headers: { cookie: secondTab.cookie }
+    });
+    assert.equal(relayUiManagementResponse.status, 200);
+    assert.equal((await relayUiManagementResponse.json()).management.users.length, 1);
 
     const temporaryAccountResponse = await fetch(`${baseUrl}/api/admin/users`, {
       method: 'POST',

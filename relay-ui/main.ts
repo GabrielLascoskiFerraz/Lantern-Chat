@@ -91,6 +91,25 @@ const localAddresses = (): string[] => Object.values(os.networkInterfaces())
   .filter((entry) => entry.family === 'IPv4' && !entry.internal)
   .map((entry) => entry.address)
   .sort();
+const directorySizeBytes = (root: string): number => {
+  let total = 0;
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile()) {
+        try { total += fs.statSync(entryPath).size; }
+        catch { /* Arquivo temporário removido durante a medição. */ }
+      }
+    }
+  }
+  return total;
+};
 const snapshot = () => {
   const settings = loadSettings();
   return relay
@@ -98,7 +117,7 @@ const snapshot = () => {
     : { running: false, version: app.getVersion(), settings, loginItemSupported: loginItemSupported(), localAddresses: localAddresses(), port: settings.port,
         tls: Boolean(settings.tlsCertFile && settings.tlsKeyFile), peersOnline: 0,
         announcementsActive: 0, uptimeMs: 0, centralStore: {}, transferMetrics: null,
-        reliabilityMetrics: null, peers: [] };
+        reliabilityMetrics: null, peers: [], totalStorageBytes: directorySizeBytes(relayDataDir()) };
 };
 const startRelay = async () => {
   if (relay) return snapshot();

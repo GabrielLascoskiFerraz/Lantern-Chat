@@ -53,6 +53,49 @@ const resolveRelayDataDir = (): string => {
     : path.resolve(process.cwd(), 'dist-relay', 'main.js');
   return path.dirname(entryFile);
 };
+
+const directorySizeBytes = (root: string): number => {
+  let total = 0;
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      try {
+        total += fs.statSync(entryPath).size;
+      } catch {
+        // Arquivos temporários podem desaparecer enquanto o painel é atualizado.
+      }
+    }
+  }
+  return total;
+};
+
+const resolveRelayUiRendererDir = (): string | null => {
+  for (const candidate of [
+    path.resolve(__dirname, '..', 'relay-ui', 'renderer'),
+    path.resolve(__dirname, '..', '..', 'relay-ui', 'renderer'),
+    path.resolve(process.cwd(), 'relay-ui', 'renderer')
+  ]) {
+    try {
+      if (fs.statSync(path.join(candidate, 'index.html')).isFile()) return candidate;
+    } catch {
+      // Tenta a próxima localização, inclusive recursos empacotados.
+    }
+  }
+  return null;
+};
 const LEGACY_ANNOUNCEMENT_STORE_FILE = process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE
   ? path.resolve(process.env.LANTERN_RELAY_ANNOUNCEMENTS_FILE)
   : path.join(resolveRelayDataDir(), 'announcements.json');
@@ -296,6 +339,7 @@ interface RelayDashboardSnapshot {
   announcementStoreFile: string;
   announcementsActive: number;
   stickersAvailable: number;
+  totalStorageBytes: number;
   centralStore: {
     users: number;
     sessions: number;
@@ -436,6 +480,7 @@ const normalizeFrame = (value: unknown): RelayTransportFrame | null => {
   const messageId = asString(record.messageId);
   const from = asString(record.from);
   const createdAt = asFiniteNumber(record.createdAt);
+  const serverSeq = asFiniteNumber(record.serverSeq);
   const toRaw = record.to;
   const to =
     typeof toRaw === 'string'
@@ -449,6 +494,7 @@ const normalizeFrame = (value: unknown): RelayTransportFrame | null => {
   }
 
   return {
+    ...(serverSeq && serverSeq > 0 ? { serverSeq: Math.trunc(serverSeq) } : {}),
     type,
     messageId,
     from,
@@ -728,8 +774,9 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     * { box-sizing: border-box; }
 
     body {
-      min-height: 100vh;
+      height: 100vh;
       margin: 0;
+      overflow: hidden;
       color: var(--text);
       background: var(--teams-bg);
       line-height: 1.35;
@@ -738,8 +785,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
     .dashboard-shell {
       display: grid;
-      min-height: 100vh;
-      grid-template-columns: 360px minmax(0, 1fr);
+      height: 100vh;
+      grid-template-columns: 244px minmax(0, 1fr);
     }
 
     .dashboard-nav {
@@ -764,8 +811,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .nav-caption { padding: 14px 14px 7px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
     .nav-links { display: grid; gap: 4px; }
     .nav-link {
-      display: flex; min-height: 52px; align-items: center; gap: 10px; padding: 0 14px;
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 88%, transparent); color: var(--text); font-size: 14px; font-weight: 650; text-decoration: none;
+      display: flex; min-height: 48px; align-items: center; gap: 11px; padding: 0 14px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent); color: var(--text); font-size: 13px; font-weight: 650; text-decoration: none;
     }
     .nav-link:hover { background: var(--teams-row-hover); }
     .nav-link.active { color: var(--text); background: var(--teams-row-active); box-shadow: inset 3px 0 0 var(--teams-accent); }
@@ -777,7 +824,9 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .page {
       width: 100%;
       min-width: 0;
-      padding: 0 0 32px;
+      height: 100vh;
+      overflow: hidden;
+      padding: 0;
     }
 
     .hero {
@@ -844,7 +893,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 10px;
       margin: 0;
       padding: 18px 24px 10px;
@@ -858,7 +907,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
 
     .metric {
       padding: 14px;
-      min-height: 104px;
+      min-height: 128px;
     }
 
     .metric-label {
@@ -1160,17 +1209,30 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     .dashboard-shell.auth-locked .dashboard-nav,
     .dashboard-shell.auth-locked .topbar,
     .dashboard-shell.auth-locked .page-section:not(#administration) { display:none; }
-    .dashboard-shell.auth-locked #administration { width:min(720px, calc(100vw - 32px)); margin:48px auto 0; }
+    .dashboard-shell.auth-locked .dashboard-page:not(#administration) { display:none !important; }
+    .dashboard-shell.auth-locked #administration { display:block !important; width:min(720px, calc(100vw - 32px)); height:auto; margin:48px auto 0; overflow:visible; }
     .hidden { display: none !important; }
+    .dashboard-page { display: none !important; height: calc(100vh - 72px); overflow: auto; }
+    .grid.dashboard-page.active,
+    .content.dashboard-page.active { display: grid !important; }
+    .admin-section.dashboard-page.active { display: block !important; }
+    .admin-category-panel { display: none; }
+    .admin-category-panel.active { display: block; }
+    .admin-primary[data-admin-page] { display: none; }
+    .admin-primary[data-admin-page].active { display: grid; }
+    .admin-grid { grid-template-columns: 1fr; }
+    .admin-operations { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
     @media (max-width: 880px) {
+      body { height: auto; min-height: 100vh; overflow: auto; }
       .dashboard-shell { display: block; }
       .dashboard-nav { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .dashboard-nav .nav-caption, .dashboard-nav .nav-footer { display: none; }
       .dashboard-nav > div:nth-child(2), .nav-scroll { overflow: hidden; }
       .nav-links { display: flex; overflow-x: auto; }
       .nav-link { flex: 0 0 auto; }
-      .page { width: 100%; }
+      .page { width: 100%; height: auto; overflow: visible; }
+      .dashboard-page { height: auto; min-height: calc(100vh - 130px); overflow: visible; }
       .hero {
         align-items: flex-start;
         flex-direction: column;
@@ -1213,8 +1275,10 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
         <nav class="nav-links">
           <a class="nav-link active" href="#overview"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg></span>Visão geral</a>
           <a class="nav-link" href="#activity"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 16l4-4 3 2 5-7"/></svg></span>Atividade</a>
-          <a class="nav-link" href="#administration"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg></span>Contas e acesso</a>
-          <a class="nav-link" href="#admin-updates"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg></span>Atualizações</a>
+          <a class="nav-link" href="#administration"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"/></svg></span>Contas</a>
+          <a class="nav-link" href="#access"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5V10Zm7 3v4"/></svg></span>Acesso</a>
+          <a class="nav-link" href="#updates"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 20h14"/></svg></span>Atualizações</a>
+          <a class="nav-link" href="#operation"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v5H5V5Zm0 9h14v5H5v-5Zm3-6h.01M8 17h.01"/></svg></span>Operação</a>
         </nav>
       </div>
       <div class="nav-footer">
@@ -1239,50 +1303,35 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </div>
     </header>
 
-    <section class="grid" aria-label="Resumo do Relay">
+    <section class="grid dashboard-page active" data-page="overview" aria-label="Resumo essencial do Relay">
+      <article class="card metric">
+        <div class="metric-label">Contas</div>
+        <div id="metric-accounts" class="metric-value">--</div>
+        <div class="metric-note">contas cadastradas</div>
+      </article>
       <article class="card metric">
         <div class="metric-label">Usuários online</div>
         <div id="metric-peers" class="metric-value">--</div>
         <div id="metric-sessions" class="metric-note">sessões abertas</div>
       </article>
       <article class="card metric">
-        <div class="metric-label">Tempo ativo</div>
+        <div class="metric-label">Latência</div>
+        <div id="metric-latency" class="metric-value">--</div>
+        <div id="metric-latency-max" class="metric-note">p95 -- · máxima --</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Tempo de execução</div>
         <div id="metric-uptime" class="metric-value">--</div>
         <div id="metric-started" class="metric-note">iniciado em --</div>
       </article>
       <article class="card metric">
-        <div class="metric-label">Anúncios ativos</div>
-        <div id="metric-announcements" class="metric-value">--</div>
-        <div class="metric-note">expiram após 24h</div>
-      </article>
-      <article class="card metric">
-        <div class="metric-label">Presença</div>
-        <div id="metric-revision" class="metric-value">--</div>
-        <div id="metric-endpoint" class="metric-note">endpoint --</div>
-      </article>
-      <article class="card metric">
-        <div class="metric-label">Anexos retidos</div>
-        <div id="metric-retained" class="metric-value">--</div>
-        <div id="metric-retained-bytes" class="metric-note">-- armazenados</div>
-      </article>
-      <article class="card metric">
-        <div class="metric-label">Transferências</div>
-        <div id="metric-transfers" class="metric-value">--</div>
-        <div id="metric-transfer-attempts" class="metric-note">-- tentativas</div>
-      </article>
-      <article class="card metric">
-        <div class="metric-label">Retomadas</div>
-        <div id="metric-resumes" class="metric-value">--</div>
-        <div id="metric-transfer-failures" class="metric-note">-- falhas</div>
-      </article>
-      <article class="card metric">
-        <div class="metric-label">Latência de envio</div>
-        <div id="metric-latency" class="metric-value">--</div>
-        <div id="metric-latency-max" class="metric-note">máxima --</div>
+        <div class="metric-label">Armazenamento</div>
+        <div id="metric-storage-total" class="metric-value">--</div>
+        <div class="metric-note">todos os dados do Relay</div>
       </article>
     </section>
 
-    <section class="content" id="activity">
+    <section class="content dashboard-page" data-page="activity" id="activity">
       <article class="card section">
         <div class="section-header">
           <h2 class="section-title">Usuários conectados</h2>
@@ -1300,7 +1349,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </article>
     </section>
 
-    <section class="card admin-section" id="administration" aria-label="Administração do Relay">
+    <section class="card admin-section dashboard-page" data-page="administration" id="administration" aria-label="Administração do Relay">
       <div class="section-header" style="padding:0 0 14px">
         <div>
           <h2 class="section-title">Administração</h2>
@@ -1318,8 +1367,8 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       </div>
 
       <div id="admin-content" class="admin-grid hidden">
-        <div class="admin-primary">
-          <div class="admin-panel">
+        <div class="admin-primary" data-admin-page="administration">
+          <div class="admin-panel admin-category-panel" data-admin-page="administration">
             <h3>Criar conta</h3>
             <form id="admin-create-user" class="admin-form">
               <input id="new-username" placeholder="Usuário (ex.: maria.silva)" required>
@@ -1332,13 +1381,13 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
               <button type="submit">Criar usuário</button>
             </form>
           </div>
-          <div class="admin-panel">
+          <div class="admin-panel admin-category-panel" data-admin-page="administration">
             <h3>Contas de usuário</h3>
             <div id="admin-users" class="admin-users"></div>
           </div>
         </div>
         <div class="admin-operations">
-          <div class="admin-panel">
+          <div class="admin-panel admin-category-panel" data-admin-page="operation">
             <h3>Retenção de mensagens</h3>
             <form id="retention-form" class="admin-form">
               <select id="retention-policy">
@@ -1350,22 +1399,22 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
               <button type="submit">Salvar política</button>
             </form>
           </div>
-          <div class="admin-panel">
+          <div class="admin-panel admin-category-panel" data-admin-page="operation">
             <h3>Operação e auditoria</h3>
             <button id="create-backup" class="admin-action secondary" type="button">Criar backup consistente</button>
             <div id="admin-audit" class="admin-audit"></div>
           </div>
-          <div class="admin-panel" id="admin-updates">
+          <div class="admin-panel admin-category-panel" data-admin-page="updates" id="admin-updates">
             <h3>Atualizações do Lantern</h3>
             <div class="section-meta">Clientes com versão diferente baixarão automaticamente o instalador do sistema correspondente.</div>
             <div id="admin-update-installers" class="admin-users"></div>
           </div>
-          <div class="admin-panel">
+          <div class="admin-panel admin-category-panel" data-admin-page="access">
             <h3>Sessões dos clientes</h3>
             <div class="section-meta">Revogue dispositivos perdidos ou acessos que não reconhece.</div>
             <div id="admin-sessions" class="admin-users admin-sessions-list"></div>
           </div>
-          <div class="admin-panel">
+          <div class="admin-panel admin-category-panel" data-admin-page="access">
             <h3>Redefinições de senha</h3>
             <div class="section-meta">Solicitações enviadas pela tela de acesso.</div>
             <div id="admin-password-resets" class="admin-users"></div>
@@ -1383,10 +1432,34 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     const $ = (id) => document.getElementById(id);
     const dashboardNavLinks = Array.from(document.querySelectorAll('.nav-link'));
     const setActiveDashboardSection = (hash) => {
-      const target = hash || '#overview';
+      const available = new Set(['#overview', '#activity', '#administration', '#access', '#updates', '#operation']);
+      const target = available.has(hash) ? hash : '#overview';
       for (const link of dashboardNavLinks) {
         link.classList.toggle('active', link.getAttribute('href') === target);
       }
+      const category = target.slice(1);
+      const contentPage = ['administration', 'access', 'updates', 'operation'].includes(category)
+        ? 'administration'
+        : category;
+      for (const page of document.querySelectorAll('.dashboard-page')) {
+        page.classList.toggle('active', page.dataset.page === contentPage);
+      }
+      for (const panel of document.querySelectorAll('[data-admin-page]')) {
+        panel.classList.toggle('active', panel.dataset.adminPage === category);
+      }
+      const titles = {
+        overview: ['Visão geral', 'Estado e recursos essenciais do servidor'],
+        activity: ['Atividade', 'Usuários conectados e anúncios ativos'],
+        administration: ['Contas', 'Criação e gerenciamento das contas do Lantern'],
+        access: ['Acesso', 'Sessões e solicitações de redefinição de senha'],
+        updates: ['Atualizações', 'Instaladores distribuídos aos clientes Lantern'],
+        operation: ['Operação', 'Retenção, backup e auditoria do Relay']
+      };
+      const title = titles[category] || titles.overview;
+      const heading = document.querySelector('.hero h1');
+      const subtitle = document.querySelector('.hero .subtitle');
+      if (heading) heading.textContent = title[0];
+      if (subtitle) subtitle.textContent = title[1];
     };
     for (const link of dashboardNavLinks) {
       link.addEventListener('click', () => setActiveDashboardSection(link.getAttribute('href')));
@@ -1511,6 +1584,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
     };
 
     const applySnapshot = (data) => {
+      setText('metric-accounts', String((data.centralStore && data.centralStore.users) || 0));
       setText('metric-peers', String(data.peersOnline));
       setText('metric-sessions', String(data.sessionsOpen) + ' sessões abertas');
       setText('metric-uptime', formatDuration(data.uptimeMs));
@@ -1529,6 +1603,7 @@ const RELAY_DASHBOARD_HTML = `<!doctype html>
       setText('metric-resumes', String(transfers.downloadsResumed || 0));
       setText('metric-transfer-failures', String(transferFailures) + ' falhas · ' + String(transfers.activeUploads || 0) + ' uploads ativos');
       setText('metric-latency', Number(transfers.averageSendLatencyMs || 0).toFixed(1) + ' ms');
+      setText('metric-storage-total', formatBytes(data.totalStorageBytes));
       const reliability = data.reliabilityMetrics || {};
       setText('metric-latency-max', 'p95 ' + Number(transfers.p95SendLatencyMs || 0).toFixed(1) + ' ms · máxima ' + Number(transfers.maxSendLatencyMs || 0).toFixed(1) + ' ms · ' + String(transfers.sendFailures || 0) + ' falhas');
       setText('peers-meta', String(data.peers.length) + ' online');
@@ -1945,6 +2020,7 @@ export class LanternRelay {
   private readonly sessionsBySocket = new Map<WebSocket, RelaySession>();
   private readonly userSessions = new SessionRegistry<RelaySession>();
   private readonly announcementsById = new Map<string, RelayAnnouncementState>();
+  private storageSnapshot = { measuredAt: 0, bytes: 0 };
   private stopPromise: Promise<void> | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private presenceBroadcastTimer: NodeJS.Timeout | null = null;
@@ -3266,6 +3342,92 @@ export class LanternRelay {
         return;
       }
 
+      if (requestUrl.pathname === '/api/admin/relay-ui/status' && method === 'GET') {
+        const snapshot = this.getDashboardSnapshot();
+        this.writeJson(res, method, {
+          ok: true,
+          state: {
+            running: true,
+            ...snapshot,
+            settings: {
+              port: this.config.port,
+              localHostname: this.config.localHostname,
+              tlsCertFile: this.config.tlsCertFile || '',
+              tlsKeyFile: this.config.tlsKeyFile || '',
+              startAtLogin: false,
+              startRelayOnLaunch: true
+            },
+            loginItemSupported: false,
+            localAddresses: []
+          }
+        });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/relay-ui/management' && method === 'GET') {
+        this.writeJson(res, method, { ok: true, management: this.getManagementSnapshot() });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/relay-ui/announcement-ttl' && method === 'PUT') {
+        const body = await this.readJsonBody(req);
+        this.writeJson(res, method, { ok: true, ttlMs: this.setAnnouncementExpiryPolicy(Number(body.ttlMs)) });
+        return;
+      }
+      const announcementExpiryMatch = requestUrl.pathname.match(/^\/api\/admin\/relay-ui\/announcements\/([^/]+)\/expiry$/);
+      if (announcementExpiryMatch && method === 'PUT') {
+        const body = await this.readJsonBody(req);
+        this.setActiveAnnouncementExpiry(decodeURIComponent(announcementExpiryMatch[1]), Number(body.expiresAt));
+        this.writeJson(res, method, { ok: true });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/relay-ui/calendar' && method === 'PUT') {
+        const body = await this.readJsonBody(req);
+        this.writeJson(res, method, {
+          ok: true,
+          calendarAutomation: this.configureCalendarAutomation({
+            enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+            url: typeof body.url === 'string' ? body.url : undefined,
+            updateTime: typeof body.updateTime === 'string' ? body.updateTime : undefined
+          })
+        });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/relay-ui/calendar/refresh' && method === 'POST') {
+        this.writeJson(res, method, { ok: true, result: await this.runCalendarAutomationNow() });
+        return;
+      }
+      if (requestUrl.pathname === '/api/admin/relay-ui/stickers' && method === 'PUT') {
+        let temporary = '';
+        try {
+          const fileName = decodeURIComponent(String(req.headers['x-lantern-file-name'] || ''));
+          temporary = await this.receiveAdminFileUpload(req, fileName, '.gif', 20 * 1024 * 1024);
+          const result = this.addManagedStickers({
+            sourcePaths: [temporary],
+            category: decodeURIComponent(String(req.headers['x-lantern-category'] || '')),
+            replaceExisting: req.headers['x-lantern-replace'] === '1'
+          });
+          this.writeJson(res, method, { ok: true, ...result });
+        } catch (error) {
+          this.writeJson(res, method, { ok: false, error: 'STICKER_UPLOAD_FAILED', message: error instanceof Error ? error.message : String(error) }, 400);
+        } finally {
+          if (temporary) fs.rmSync(path.dirname(temporary), { recursive: true, force: true });
+        }
+        return;
+      }
+      const managedStickerMatch = requestUrl.pathname.match(/^\/api\/admin\/relay-ui\/stickers\/(.+)$/);
+      if (managedStickerMatch && method === 'PATCH') {
+        const body = await this.readJsonBody(req);
+        const sticker = this.updateManagedSticker(decodeURIComponent(managedStickerMatch[1]), {
+          label: asString(body.label) || '',
+          category: asString(body.category) || ''
+        });
+        this.writeJson(res, method, { ok: true, sticker });
+        return;
+      }
+      if (managedStickerMatch && method === 'DELETE') {
+        this.writeJson(res, method, { ok: true, ...this.removeManagedSticker(decodeURIComponent(managedStickerMatch[1])) });
+        return;
+      }
+
       if (requestUrl.pathname === '/api/admin/updates' && method === 'GET') {
         this.writeJson(res, method, { ok: true, updates: this.updateStore.getManifest() });
         return;
@@ -3480,16 +3642,13 @@ export class LanternRelay {
       return;
     }
 
-    if (
-      requestUrl.pathname === '/' ||
-      requestUrl.pathname === '/dashboard' ||
-      requestUrl.pathname === '/dashboard/'
-    ) {
-      res.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store'
-      });
-      res.end(method === 'HEAD' ? undefined : RELAY_DASHBOARD_HTML);
+    if (requestUrl.pathname.startsWith('/dashboard-assets/')) {
+      this.serveRelayUiAsset(requestUrl.pathname.slice('/dashboard-assets/'.length), method, res);
+      return;
+    }
+
+    if (requestUrl.pathname === '/' || requestUrl.pathname === '/dashboard' || requestUrl.pathname === '/dashboard/') {
+      this.serveRelayUiIndex(method, res);
       return;
     }
 
@@ -3518,6 +3677,76 @@ export class LanternRelay {
     if (chunks.length === 0) return {};
     const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
     return asRecord(parsed) || {};
+  }
+
+  private serveRelayUiIndex(method: string, res: ServerResponse): void {
+    const rendererDir = resolveRelayUiRendererDir();
+    if (!rendererDir) {
+      this.writeJson(res, method, { ok: false, error: 'RELAY_UI_NOT_FOUND', message: 'Os recursos do Lantern Relay UI não foram encontrados.' }, 503);
+      return;
+    }
+    const html = fs.readFileSync(path.join(rendererDir, 'index.html'), 'utf8')
+      .replace('../../assets/icon.png', '/lantern-icon.png')
+      .replace('./styles.css', '/dashboard-assets/styles.css')
+      .replace('./web-adapter.js', '/dashboard-assets/web-adapter.js')
+      .replace('./app.js', '/dashboard-assets/app.js');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
+    });
+    res.end(method === 'HEAD' ? undefined : html);
+  }
+
+  private serveRelayUiAsset(name: string, method: string, res: ServerResponse): void {
+    const rendererDir = resolveRelayUiRendererDir();
+    const allowed: Record<string, string> = {
+      'styles.css': 'text/css; charset=utf-8',
+      'app.js': 'text/javascript; charset=utf-8',
+      'web-adapter.js': 'text/javascript; charset=utf-8'
+    };
+    if (!rendererDir || !allowed[name]) {
+      this.writeJson(res, method, { ok: false, error: 'NOT_FOUND' }, 404);
+      return;
+    }
+    const body = fs.readFileSync(path.join(rendererDir, name));
+    res.writeHead(200, {
+      'content-type': allowed[name],
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff'
+    });
+    res.end(method === 'HEAD' ? undefined : body);
+  }
+
+  private async receiveAdminFileUpload(
+    req: IncomingMessage,
+    fileName: string,
+    requiredExtension: string,
+    maximumSize: number
+  ): Promise<string> {
+    const safeName = path.basename(fileName);
+    if (!safeName.toLowerCase().endsWith(requiredExtension.toLowerCase())) throw new Error(`Selecione um arquivo ${requiredExtension}.`);
+    const declaredSize = Number(req.headers['content-length'] || 0);
+    if (declaredSize > maximumSize) throw new Error(`O arquivo excede ${Math.round(maximumSize / 1024 / 1024)} MB.`);
+    const uploadDirectory = path.join(resolveRelayDataDir(), '.admin-uploads', randomUUID());
+    fs.mkdirSync(uploadDirectory, { recursive: true });
+    const temporary = path.join(uploadDirectory, safeName);
+    const chunks: Buffer[] = [];
+    let received = 0;
+    try {
+      for await (const raw of req) {
+        const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        received += chunk.length;
+        if (received > maximumSize) throw new Error('O arquivo excede o limite permitido.');
+        chunks.push(chunk);
+      }
+      if (received <= 0) throw new Error('O arquivo enviado está vazio.');
+      fs.writeFileSync(temporary, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
+      return temporary;
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      throw error;
+    }
   }
 
   private async receiveUpdateUpload(req: IncomingMessage, platform: UpdatePlatform, fileName: string): Promise<string> {
@@ -3961,6 +4190,12 @@ export class LanternRelay {
     const p95SendLatencyMs = sortedSendLatencies.length > 0
       ? sortedSendLatencies[Math.min(sortedSendLatencies.length - 1, Math.floor(sortedSendLatencies.length * 0.95))]
       : 0;
+    if (now - this.storageSnapshot.measuredAt >= 10_000) {
+      this.storageSnapshot = {
+        measuredAt: now,
+        bytes: directorySizeBytes(resolveRelayDataDir())
+      };
+    }
 
     return {
       ok: true,
@@ -3978,6 +4213,7 @@ export class LanternRelay {
       announcementStoreFile: this.centralStore.getDatabaseFile(),
       announcementsActive: announcements.length,
       stickersAvailable: this.listStickerCatalog().length,
+      totalStorageBytes: this.storageSnapshot.bytes,
       centralStore: this.centralStore.getStats(),
       transferMetrics: {
         uploadAttempts: this.transferMetrics.uploadAttempts,
@@ -6197,7 +6433,7 @@ export class LanternRelay {
         const record = asRecord(item);
         if (!record) continue;
         const messageId = asString(record.messageId);
-        const frame = normalizeFrame(record.frame);
+        const persistedFrame = normalizeFrame(record.frame);
         const createdAt = asFiniteNumber(record.createdAt);
         const expiresAt = asFiniteNumber(record.expiresAt);
         const expiredAt = asFiniteNumber(record.expiredAt);
@@ -6219,7 +6455,22 @@ export class LanternRelay {
               entry[1] > 0
           )
         ) as Record<string, number>;
-        if (!messageId || !frame || !createdAt || !expiresAt) continue;
+        if (!messageId || !persistedFrame || !createdAt || !expiresAt) continue;
+        const canonical = this.centralStore.getFrame(messageId);
+        const frame: RelayTransportFrame =
+          canonical &&
+          canonical.conversationId === 'announcements' &&
+          canonical.targetUserId === null
+            ? {
+                type: canonical.type,
+                messageId: canonical.messageId,
+                from: canonical.senderUserId,
+                to: canonical.targetUserId,
+                serverSeq: canonical.serverSeq,
+                createdAt: canonical.createdAt,
+                payload: canonical.payload
+              }
+            : persistedFrame;
         this.announcementsById.set(messageId, {
           messageId,
           frame,
@@ -6255,6 +6506,7 @@ export class LanternRelay {
           reactionsByDeviceId: {},
           readByDeviceId: {},
           frame: {
+            serverSeq: storedFrame.serverSeq,
             type: storedFrame.type,
             messageId: storedFrame.messageId,
             from: storedFrame.senderUserId,
