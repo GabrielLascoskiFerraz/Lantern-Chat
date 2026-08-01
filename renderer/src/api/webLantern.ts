@@ -346,6 +346,7 @@ export class WebLanternBridge {
       relay: relayConfig(),
       endpoint: this.socket?.readyState === WebSocket.OPEN ? endpoint() : null,
       user: this.user,
+      lastUsername: this.user?.username || window.localStorage.getItem('lantern.lastUsername') || '',
       connectionError: this.lastConnectionError
     };
   }
@@ -1345,6 +1346,7 @@ export class WebLanternBridge {
       },
       discoverRelays: async () => [{ host: window.location.hostname, port: RELAY_PORT, secure: window.location.protocol === 'https:' }],
       login: async ({ username, password, rememberMe = true }) => {
+        window.localStorage.setItem('lantern.lastUsername', username.trim());
         const body = await this.http('/api/client/login', { method: 'POST', body: JSON.stringify({ username, password, deviceId: this.deviceId() }) }, false);
         this.resetAccountRuntimeState();
         this.token = String(body.token); this.user = body.user as AuthenticatedUser; this.saveToken(this.token, rememberMe);

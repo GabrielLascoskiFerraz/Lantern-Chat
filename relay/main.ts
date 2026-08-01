@@ -720,6 +720,8 @@ const logRelay = (
   }
 };
 
+// Mantido como fallback autocontido para distribuições antigas do Relay headless.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const RELAY_DASHBOARD_HTML = `<!doctype html>
 <html lang="pt-BR">
 <head>

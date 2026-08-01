@@ -19,6 +19,7 @@ interface StoredClientConfig {
   endpoint?: string;
   deviceId: string;
   rememberMe: boolean;
+  lastUsername?: string;
 }
 
 const DEFAULT_CONFIG: ClientRelayConfig = {
@@ -100,6 +101,7 @@ export class AuthService {
       relay: { ...this.stored.relay },
       endpoint: this.stored.endpoint || null,
       user: this.user ? { ...this.user } : null,
+      lastUsername: this.user?.username || this.stored.lastUsername || '',
       connectionError: this.connectionError
     };
   }
@@ -188,13 +190,16 @@ export class AuthService {
     password: string;
     rememberMe?: boolean;
   }): Promise<ClientAuthState> {
+    const username = input.username.trim();
+    this.stored.lastUsername = username;
+    this.persist();
     const relay = this.normalizeRelay(input.relay);
     const endpoint = await this.resolveEndpoint(relay);
     const response = await this.fetchRelay(endpoint, '/api/client/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        username: input.username.trim(),
+        username,
         password: input.password,
         deviceId: this.stored.deviceId
       })
@@ -521,7 +526,8 @@ export class AuthService {
         encryptedToken: parsed.encryptedToken,
         endpoint: parsed.endpoint,
         deviceId: parsed.deviceId || randomUUID(),
-        rememberMe: parsed.rememberMe !== false
+        rememberMe: parsed.rememberMe !== false,
+        lastUsername: typeof parsed.lastUsername === 'string' ? parsed.lastUsername.trim() : ''
       };
     } catch {
       return { relay: { ...DEFAULT_CONFIG }, deviceId: randomUUID(), rememberMe: true };

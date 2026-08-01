@@ -1,7 +1,7 @@
 {
   "name": "lantern",
-  "version": "1.2.2",
-  "description": "Lantern - mensageria com dados canônicos no Relay",
+  "version": "1.2.3",
+  "description": "Lantern",
   "main": "dist-electron/main.js",
   "author": "Gabriel",
   "license": "MIT",

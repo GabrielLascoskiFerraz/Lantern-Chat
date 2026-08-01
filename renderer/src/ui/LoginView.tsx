@@ -48,7 +48,7 @@ export function LoginView() {
   const [host, setHost] = useState(authState?.relay.host || '');
   const [port, setPort] = useState(String(authState?.relay.port || 43190));
   const [secure, setSecure] = useState(authState?.relay.secure || false);
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(authState?.lastUsername || '');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);

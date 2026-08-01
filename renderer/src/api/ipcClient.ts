@@ -73,6 +73,7 @@ export interface ClientAuthState {
   relay: ClientRelayConfig;
   endpoint: string | null;
   user: AuthenticatedUser | null;
+  lastUsername: string;
   connectionError: string | null;
 }
 
