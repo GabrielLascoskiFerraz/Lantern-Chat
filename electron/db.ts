@@ -2241,6 +2241,9 @@ export class DbService {
     before?: number,
     beforeSeq?: number
   ): DbMessage[] {
+    if (conversationId === ANNOUNCEMENTS_CONVERSATION_ID) {
+      this.purgeExpiredAnnouncementsByExpiry(Date.now());
+    }
     if (before) {
       const canonicalBeforeSeq =
         Number.isFinite(beforeSeq) && Number(beforeSeq) > 0
@@ -2286,6 +2289,7 @@ export class DbService {
   }
 
   getMessagesByIds(messageIds: string[]): DbMessage[] {
+    this.purgeExpiredAnnouncementsByExpiry(Date.now());
     if (messageIds.length === 0) {
       return [];
     }
@@ -2583,7 +2587,22 @@ export class DbService {
     return tx();
   }
 
+  purgeExpiredAnnouncementsByExpiry(now = Date.now()): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT messageId
+         FROM messages
+         WHERE conversationId = 'announcements'
+           AND deletedAt IS NULL
+           AND announcementExpiresAt IS NOT NULL
+           AND announcementExpiresAt <= ?`
+      )
+      .all(now) as Array<{ messageId: string }>;
+    return this.purgeAnnouncementMessageIds(rows.map((row) => row.messageId));
+  }
+
   getActiveAnnouncementMessageIds(): string[] {
+    this.purgeExpiredAnnouncementsByExpiry(Date.now());
     const rows = this.db
       .prepare(
         `SELECT messageId

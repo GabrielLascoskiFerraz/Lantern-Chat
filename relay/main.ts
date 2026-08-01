@@ -2756,11 +2756,21 @@ export class LanternRelay {
   }
 
   private async publishCalendarEvent(event: CalendarAutomationEvent): Promise<boolean> {
+    const publisher = this.centralStore
+      .listUsers()
+      .filter((user) => !user.disabled)
+      .sort((left, right) => {
+        if (left.role !== right.role) return left.role === 'admin' ? -1 : 1;
+        return left.createdAt - right.createdAt || left.userId.localeCompare(right.userId);
+      })[0];
+    if (!publisher) {
+      throw new Error('Não há uma conta ativa para publicar os eventos do calendário.');
+    }
     const formatTime = (value: number) => new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
     const lines = [`📅 ${event.title}`, event.allDay ? 'Evento de dia inteiro' : `${formatTime(event.start)} – ${formatTime(event.end)}`];
     if (event.location) lines.push(`📍 ${event.location}`);
     if (event.description) lines.push('', event.description.slice(0, 1200));
-    const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: 'relay-calendar', to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
+    const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: publisher.userId, to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
     const saved = this.centralStore.saveFrame({ messageId: frame.messageId, type: frame.type, senderUserId: frame.from, targetUserId: null, conversationId: 'announcements', clientCreatedAt: frame.createdAt, createdAt: Date.now(), payload: frame.payload });
     if (saved !== 'inserted') return false;
     const canonical = this.centralStore.getFrame(frame.messageId);

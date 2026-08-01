@@ -205,3 +205,39 @@ test('outbox persiste frames idempotentes entre reaberturas do cliente', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('anúncios vencidos no cache local são removidos antes de serem exibidos', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-expired-announcement-cache-'));
+  try {
+    const db = new DbService(root);
+    db.saveMessage({
+      messageId: 'expired-announcement', conversationId: 'announcements', direction: 'in',
+      senderDeviceId: 'author', receiverDeviceId: null, type: 'announcement',
+      bodyText: 'Não deve piscar na interface', fileId: null, fileName: null, fileSize: null,
+      fileSha256: null, filePath: null, status: 'delivered', reaction: null,
+      deletedAt: null, replyToMessageId: null, replyToSenderDeviceId: null,
+      replyToType: null, replyToPreviewText: null, replyToFileName: null,
+      forwardedFromMessageId: null, editedAt: null,
+      announcementExpiresAt: Date.now() - 1_000, createdAt: Date.now() - 60_000
+    });
+    db.saveMessage({
+      messageId: 'active-announcement', conversationId: 'announcements', direction: 'in',
+      senderDeviceId: 'author', receiverDeviceId: null, type: 'announcement',
+      bodyText: 'Deve permanecer', fileId: null, fileName: null, fileSize: null,
+      fileSha256: null, filePath: null, status: 'delivered', reaction: null,
+      deletedAt: null, replyToMessageId: null, replyToSenderDeviceId: null,
+      replyToType: null, replyToPreviewText: null, replyToFileName: null,
+      forwardedFromMessageId: null, editedAt: null,
+      announcementExpiresAt: Date.now() + 60_000, createdAt: Date.now()
+    });
+
+    assert.deepEqual(
+      db.getMessages('announcements', 50).map((message) => message.messageId),
+      ['active-announcement']
+    );
+    assert.equal(db.getMessageById('expired-announcement'), undefined);
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
