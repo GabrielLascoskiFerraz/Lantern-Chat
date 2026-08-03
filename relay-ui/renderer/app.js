@@ -8,6 +8,7 @@ let actionInFlight = false;
 let managementActionInFlight = false;
 let feedbackTimer = null;
 let pendingBackupImport = null;
+let statusRequestVersion = 0;
 const accountDrafts = new Map();
 const stickerPreviewCache = new Map();
 const STICKER_PREVIEW_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -554,10 +555,17 @@ const render = (state) => {
   setButtons(state);
 };
 
-const refresh = async ({ silent = true } = {}) => {
+const invalidateStatusRequests = () => { statusRequestVersion += 1; };
+
+const refresh = async ({ silent = true, force = false } = {}) => {
+  if (actionInFlight && !force) return;
+  const requestVersion = ++statusRequestVersion;
   try {
-    render(await api.status());
+    const state = await api.status();
+    if (requestVersion !== statusRequestVersion) return;
+    render(state);
   } catch (error) {
+    if (requestVersion !== statusRequestVersion) return;
     if (!silent) showFeedback(cleanError(error), 'error');
   }
 };
@@ -565,6 +573,7 @@ const refresh = async ({ silent = true } = {}) => {
 const runAction = async (action, successMessage) => {
   if (actionInFlight) return;
   actionInFlight = true;
+  invalidateStatusRequests();
   if (latestState) setButtons(latestState);
   try {
     const state = await action();
@@ -646,6 +655,7 @@ $('backup-import-dialog').addEventListener('cancel', (event) => {
 $('backup-import-confirm').addEventListener('click', async () => {
   if (actionInFlight || !pendingBackupImport?.bundlePath) return;
   actionInFlight = true;
+  invalidateStatusRequests();
   if (latestState) setButtons(latestState);
   $('backup-import-cancel').disabled = true;
   $('backup-import-confirm').disabled = true;
@@ -654,7 +664,12 @@ $('backup-import-confirm').addEventListener('click', async () => {
   $('backup-import-progress').textContent = 'Validando e importando os dados… Não feche o Relay UI.';
   try {
     const result = await api.importConvertedBackup(pendingBackupImport.bundlePath);
-    await refresh();
+    if (result.state?.settings) {
+      invalidateStatusRequests();
+      render(result.state);
+    } else {
+      await refresh({ force: true });
+    }
     if (latestState?.running) await refreshManagement();
     const rollbackLabel = result.rollbackDir ? 'rollback preservado' : 'nova instalação';
     $('backup-import-dialog').close();

@@ -232,7 +232,7 @@ ipcMain.handle('relay-ui:importConvertedBackup', async (_event, rawBundlePath) =
     // resultado precisa ser aberto imediatamente. Caso contrário, em uma
     // instalação nova o painel permanece com as métricas vazias e faz parecer
     // que a importação não teve efeito, embora os arquivos já estejam no disco.
-    await startRelay();
+    const state = await startRelay();
     return {
       canceled: false,
       stats: result.stats,
@@ -242,7 +242,8 @@ ipcMain.handle('relay-ui:importConvertedBackup', async (_event, rawBundlePath) =
       credentialsFile: result.manifest.credentialsFile
         ? path.join(bundlePath, result.manifest.credentialsFile)
         : null,
-      restarted: true
+      restarted: true,
+      state
     };
   } catch (error) {
     if (wasRunning) await startRelay().catch(() => undefined);
