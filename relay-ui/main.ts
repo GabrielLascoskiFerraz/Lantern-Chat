@@ -228,7 +228,11 @@ ipcMain.handle('relay-ui:importConvertedBackup', async (_event, rawBundlePath) =
       importedAt: number;
       source: string;
     };
-    if (wasRunning) await startRelay();
+    // A restauração é feita com o Relay parado para liberar o banco, mas o
+    // resultado precisa ser aberto imediatamente. Caso contrário, em uma
+    // instalação nova o painel permanece com as métricas vazias e faz parecer
+    // que a importação não teve efeito, embora os arquivos já estejam no disco.
+    await startRelay();
     return {
       canceled: false,
       stats: result.stats,
@@ -238,7 +242,7 @@ ipcMain.handle('relay-ui:importConvertedBackup', async (_event, rawBundlePath) =
       credentialsFile: result.manifest.credentialsFile
         ? path.join(bundlePath, result.manifest.credentialsFile)
         : null,
-      restarted: wasRunning
+      restarted: true
     };
   } catch (error) {
     if (wasRunning) await startRelay().catch(() => undefined);
