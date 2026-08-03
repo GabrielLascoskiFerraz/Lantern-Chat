@@ -43,6 +43,7 @@
     stop: async () => (await request('/api/admin/relay-ui/status')).state,
     restart: async () => (await request('/api/admin/relay-ui/status')).state,
     backup: async () => (await request('/api/admin/backup', json('POST'))).backup,
+    selectConvertedBackup: async () => ({ canceled: true }),
     importConvertedBackup: async () => ({ canceled: true }),
     createUser: async (input) => (await request('/api/admin/users', json('POST', input))).user,
     updateUser: async (userId, input) => (await request(`/api/admin/users/${encodeURIComponent(userId)}`, json('PATCH', input))).user,

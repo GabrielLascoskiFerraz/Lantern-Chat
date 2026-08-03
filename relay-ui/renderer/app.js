@@ -7,6 +7,7 @@ let settingsDirty = false;
 let actionInFlight = false;
 let managementActionInFlight = false;
 let feedbackTimer = null;
+let pendingBackupImport = null;
 const accountDrafts = new Map();
 const stickerPreviewCache = new Map();
 const STICKER_PREVIEW_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -608,17 +609,62 @@ $('import-backup').addEventListener('click', async () => {
   actionInFlight = true;
   if (latestState) setButtons(latestState);
   try {
-    const result = await api.importConvertedBackup();
-    if (result?.canceled) return;
+    const selected = await api.selectConvertedBackup();
+    if (selected?.canceled) return;
+    pendingBackupImport = selected;
+    $('backup-import-name').textContent = selected.name || 'Backup selecionado';
+    $('backup-import-summary').textContent = [
+      `${number(selected.counts?.users)} conta(s)`,
+      `${number(selected.counts?.directMessages)} mensagem(ns)`,
+      `${number((selected.counts?.directAttachments || 0) + (selected.counts?.groupAttachments || 0))} anexo(s)`,
+      `${number(selected.counts?.groups)} grupo(s)`
+    ].join(' · ');
+    $('backup-import-progress').hidden = true;
+    $('backup-import-progress').className = 'dialog-progress';
+    $('backup-import-cancel').disabled = false;
+    $('backup-import-confirm').disabled = false;
+    $('backup-import-dialog').showModal();
+  } catch (error) {
+    showFeedback(cleanError(error), 'error');
+  } finally {
+    actionInFlight = false;
+    if (latestState) setButtons(latestState);
+  }
+});
+$('backup-import-cancel').addEventListener('click', () => {
+  if (actionInFlight) return;
+  pendingBackupImport = null;
+  $('backup-import-dialog').close();
+});
+$('backup-import-dialog').addEventListener('cancel', (event) => {
+  if (actionInFlight) {
+    event.preventDefault();
+    return;
+  }
+  pendingBackupImport = null;
+});
+$('backup-import-confirm').addEventListener('click', async () => {
+  if (actionInFlight || !pendingBackupImport?.bundlePath) return;
+  actionInFlight = true;
+  if (latestState) setButtons(latestState);
+  $('backup-import-cancel').disabled = true;
+  $('backup-import-confirm').disabled = true;
+  $('backup-import-progress').hidden = false;
+  $('backup-import-progress').className = 'dialog-progress active';
+  $('backup-import-progress').textContent = 'Validando e importando os dados… Não feche o Relay UI.';
+  try {
+    const result = await api.importConvertedBackup(pendingBackupImport.bundlePath);
     await refresh();
     if (latestState?.running) await refreshManagement();
     const rollbackLabel = result.rollbackDir ? 'rollback preservado' : 'nova instalação';
-    showFeedback(
-      `Backup importado · ${number(result.stats?.users || 0)} conta(s) · ${rollbackLabel}`,
-      'success'
-    );
+    $('backup-import-dialog').close();
+    pendingBackupImport = null;
+    showFeedback(`Backup importado · ${number(result.stats?.users || 0)} conta(s) · ${rollbackLabel}`, 'success');
   } catch (error) {
-    showFeedback(cleanError(error), 'error');
+    $('backup-import-progress').className = 'dialog-progress error';
+    $('backup-import-progress').textContent = cleanError(error);
+    $('backup-import-cancel').disabled = false;
+    $('backup-import-confirm').disabled = false;
   } finally {
     actionInFlight = false;
     if (latestState) setButtons(latestState);

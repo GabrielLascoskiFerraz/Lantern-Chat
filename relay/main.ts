@@ -2480,11 +2480,27 @@ export class LanternRelay {
       this.udpSocket = null;
     }
 
-    for (const session of this.sessionsBySocket.values()) {
+    const socketsToClose = Array.from(this.sessionsBySocket.values(), (session) => session.socket);
+    for (const socket of socketsToClose) {
       try {
-        session.socket.close(1001, reason);
+        socket.close(1001, reason);
       } catch {
         // ignore
+      }
+    }
+
+    // Um cliente que não conclui o handshake de fechamento não pode bloquear
+    // indefinidamente operações administrativas, como restaurar um backup.
+    // Dá uma janela curta para o encerramento normal e então força apenas as
+    // conexões que ainda permanecerem abertas.
+    if (socketsToClose.length > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 750));
+      for (const socket of socketsToClose) {
+        try {
+          if (socket.readyState !== socket.CLOSED) socket.terminate();
+        } catch {
+          // ignore
+        }
       }
     }
 

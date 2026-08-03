@@ -287,6 +287,38 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
   .sticker-management-actions .button { flex: 1; }
 }
 
+.app-dialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 72px rgba(13, 24, 45, .28);
+}
+.app-dialog::backdrop { background: rgba(17, 27, 45, .52); backdrop-filter: blur(3px); }
+.dialog-panel { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px; padding: 28px; }
+.dialog-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; }
+.dialog-icon.warning { color: #8a4b00; background: #fff2cc; }
+.dialog-icon svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dialog-content { min-width: 0; }
+.dialog-content h2 { margin: 1px 0 14px; font-size: 21px; }
+.dialog-content p { margin: 0; }
+.dialog-backup-name { overflow: hidden; color: var(--text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.dialog-summary { margin-top: 6px !important; color: var(--muted); }
+.dialog-warning { margin-top: 18px !important; padding: 13px 15px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); background: var(--surface-soft); line-height: 1.45; }
+.dialog-progress { margin-top: 14px !important; padding: 12px 14px; border-radius: 9px; color: #244d91; background: #e9f1ff; }
+.dialog-progress.active::before { content: ''; display: inline-block; width: 12px; height: 12px; margin-right: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -1px; animation: dialog-spin .75s linear infinite; }
+.dialog-progress.error { color: #8f1d21; background: #fdebec; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+@keyframes dialog-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 520px) {
+  .dialog-panel { grid-template-columns: 1fr; padding: 22px; }
+  .dialog-actions { flex-direction: column-reverse; }
+  .dialog-actions .button { width: 100%; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; }

@@ -182,7 +182,7 @@ ipcMain.handle('relay-ui:backup', async () => {
   if (!relay) throw new Error('Inicie o Relay antes de criar um backup.');
   return relay.createCanonicalBackup();
 });
-ipcMain.handle('relay-ui:importConvertedBackup', async () => {
+ipcMain.handle('relay-ui:selectConvertedBackup', async () => {
   const openOptions: OpenDialogOptions = {
     title: 'Selecionar backup do Lantern Relay',
     buttonLabel: 'Selecionar backup',
@@ -195,31 +195,34 @@ ipcMain.handle('relay-ui:importConvertedBackup', async () => {
   const bundlePath = selection.filePaths[0];
   const manifest = validateConvertedBackup(bundlePath);
   const counts = manifest.counts || {};
-  const messageOptions: Electron.MessageBoxOptions = {
-    type: 'warning',
-    title: 'Importar backup do Relay',
-    message: 'Substituir os dados atuais do Lantern Relay?',
-    detail: [
-      `Backup: ${path.basename(bundlePath)}`,
-      `${Number(counts.users || 0)} conta(s) · ${Number(counts.directMessages || 0)} mensagem(ns) direta(s) · ${Number(counts.groups || 0)} grupo(s)`,
-      '',
-      'O Relay será interrompido durante a importação. O estado atual será preservado automaticamente para rollback.'
-    ].join('\n'),
-    buttons: ['Cancelar', 'Importar backup'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
+  return {
+    canceled: false,
+    bundlePath,
+    name: path.basename(bundlePath),
+    counts: {
+      users: Number(counts.users || 0),
+      directMessages: Number(counts.directMessages || 0),
+      groups: Number(counts.groups || 0),
+      directAttachments: Number(counts.directAttachments || 0),
+      groupAttachments: Number(counts.groupAttachments || 0)
+    }
   };
-  const confirmation = mainWindow
-    ? await dialog.showMessageBox(mainWindow, messageOptions)
-    : await dialog.showMessageBox(messageOptions);
-  if (confirmation.response !== 1) return { canceled: true };
+});
+
+ipcMain.handle('relay-ui:importConvertedBackup', async (_event, rawBundlePath) => {
+  const inputPath = String(rawBundlePath || '').trim();
+  if (!inputPath) throw new Error('Selecione novamente a pasta do backup que será importado.');
+  const bundlePath = path.resolve(inputPath);
+  if (!fs.statSync(bundlePath, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error('A pasta do backup selecionado não está mais disponível.');
+  }
+  validateConvertedBackup(bundlePath);
 
   const wasRunning = Boolean(relay);
   if (wasRunning) await stopRelay();
   try {
     const result = await runConvertedBackupImport(bundlePath) as {
-      manifest: typeof manifest;
+      manifest: ReturnType<typeof validateConvertedBackup>;
       stats: Record<string, unknown>;
       rollbackDir: string | null;
       importedAt: number;
@@ -228,7 +231,10 @@ ipcMain.handle('relay-ui:importConvertedBackup', async () => {
     if (wasRunning) await startRelay();
     return {
       canceled: false,
-      ...result,
+      stats: result.stats,
+      rollbackDir: result.rollbackDir,
+      importedAt: result.importedAt,
+      source: result.source,
       credentialsFile: result.manifest.credentialsFile
         ? path.join(bundlePath, result.manifest.credentialsFile)
         : null,

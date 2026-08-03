@@ -357,6 +357,24 @@
       </section>
     </main>
   </div>
+  <dialog id="backup-import-dialog" class="app-dialog" aria-labelledby="backup-import-title">
+    <div class="dialog-panel">
+      <div class="dialog-icon warning" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4L12 3Zm0 6v5m0 3h.01"/></svg>
+      </div>
+      <div class="dialog-content">
+        <h2 id="backup-import-title">Substituir os dados do Relay?</h2>
+        <p id="backup-import-name" class="dialog-backup-name"></p>
+        <p id="backup-import-summary" class="dialog-summary"></p>
+        <p class="dialog-warning">O Relay será interrompido durante a importação. O estado atual será preservado automaticamente para rollback.</p>
+        <p id="backup-import-progress" class="dialog-progress" hidden></p>
+        <div class="dialog-actions">
+          <button id="backup-import-cancel" class="button" type="button">Cancelar</button>
+          <button id="backup-import-confirm" class="button primary" type="button">Importar backup</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <script src="./web-adapter.js"></script>
   <script src="./app.js"></script>
 </body>
