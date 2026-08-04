@@ -10,7 +10,7 @@ import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { GroupStore } from './groupStore';
 import { SessionRegistry } from './sessionRegistry';
 import { RelayGroupEvent, RelayGroupFileChunk } from './groupTypes';
-import { CentralStore } from './centralStore';
+import { CALENDAR_SYSTEM_ACTOR_ID, CentralStore } from './centralStore';
 import { RetentionPolicy } from './centralTypes';
 import { createSessionToken, hashToken } from './security';
 import { CalendarAutomationEvent, fetchCalendarEventsForDay } from './calendarAutomation';
@@ -2100,6 +2100,9 @@ export class LanternRelay {
       maxPayload: this.config.maxPayloadBytes
     });
     this.centralStore = new CentralStore(path.join(resolveRelayDataDir(), 'central'), logRelay);
+    this.centralStore.ensureCalendarSystemActor();
+    const reassignedCalendarAnnouncements =
+      this.centralStore.reassignCalendarAutomationFrames();
     this.updateStore = new UpdateStore(resolveRelayDataDir(), RELAY_VERSION);
     this.groupStore = new GroupStore(
       LEGACY_GROUP_STORE_FILE,
@@ -2117,6 +2120,13 @@ export class LanternRelay {
     this.wsServer.on('connection', (socket) => this.handleConnection(socket));
     this.ensureStickerDirectory();
     this.loadAnnouncementStore();
+    if (reassignedCalendarAnnouncements > 0) {
+      this.persistAnnouncementStore();
+      logRelay('calendar_announcement_authors_repaired', {
+        announcements: reassignedCalendarAnnouncements,
+        actor: CALENDAR_SYSTEM_ACTOR_ID
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -2774,21 +2784,12 @@ export class LanternRelay {
   }
 
   private async publishCalendarEvent(event: CalendarAutomationEvent): Promise<boolean> {
-    const publisher = this.centralStore
-      .listUsers()
-      .filter((user) => !user.disabled)
-      .sort((left, right) => {
-        if (left.role !== right.role) return left.role === 'admin' ? -1 : 1;
-        return left.createdAt - right.createdAt || left.userId.localeCompare(right.userId);
-      })[0];
-    if (!publisher) {
-      throw new Error('Não há uma conta ativa para publicar os eventos do calendário.');
-    }
+    this.centralStore.ensureCalendarSystemActor();
     const formatTime = (value: number) => new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
     const lines = [`📅 ${event.title}`, event.allDay ? 'Evento de dia inteiro' : `${formatTime(event.start)} – ${formatTime(event.end)}`];
     if (event.location) lines.push(`📍 ${event.location}`);
     if (event.description) lines.push('', event.description.slice(0, 1200));
-    const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: publisher.userId, to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
+    const frame: RelayTransportFrame = { type: 'announce', messageId: `calendar-${event.id}`, from: CALENDAR_SYSTEM_ACTOR_ID, to: null, createdAt: Date.now(), payload: { text: lines.join('\n'), calendarEventId: event.id, calendarEventStart: event.start, automated: true } };
     const saved = this.centralStore.saveFrame({ messageId: frame.messageId, type: frame.type, senderUserId: frame.from, targetUserId: null, conversationId: 'announcements', clientCreatedAt: frame.createdAt, createdAt: Date.now(), payload: frame.payload });
     if (saved !== 'inserted') return false;
     const canonical = this.centralStore.getFrame(frame.messageId);
@@ -4310,6 +4311,7 @@ export class LanternRelay {
         const text = asString(payload?.text) || asString(payload?.bodyText) ||
           (asString(payload?.filename) ? `📎 ${asString(payload?.filename)}` : '(sem texto)');
         const author = peersById.get(state.frame.from);
+        const fromCalendar = state.frame.from === CALENDAR_SYSTEM_ACTOR_ID;
         const reactionsCount = Object.entries(state.reactionsByDeviceId || {}).filter((entry) =>
           ALLOWED_ANNOUNCEMENT_REACTIONS.has(entry[1])
         ).length;
@@ -4321,9 +4323,9 @@ export class LanternRelay {
           messageId: state.messageId,
           messageShort: state.messageId.slice(0, 8),
           authorDeviceId: state.frame.from,
-          authorName: author?.displayName || `Usuário ${state.frame.from.slice(0, 8)}`,
-          authorAvatarEmoji: author?.avatarEmoji || '✦',
-          authorAvatarBg: author?.avatarBg || '#147ad6',
+          authorName: fromCalendar ? 'Agenda do Relay' : author?.displayName || `Usuário ${state.frame.from.slice(0, 8)}`,
+          authorAvatarEmoji: fromCalendar ? '📅' : author?.avatarEmoji || '✦',
+          authorAvatarBg: fromCalendar ? '#5b5fc7' : author?.avatarBg || '#147ad6',
           text,
           createdAt: state.createdAt,
           expiresAt: state.expiresAt,

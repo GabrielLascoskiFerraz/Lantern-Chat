@@ -26,6 +26,8 @@ import { EncryptedChunkStore } from './encryptedChunkStore';
 import { BackupService, BackupSource, CanonicalBackup } from './backupService';
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,47}$/;
+export const CALENDAR_SYSTEM_ACTOR_ID = 'relay-calendar';
+const CALENDAR_SYSTEM_ACTOR_USERNAME = '__relay_calendar__';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ATTACHMENT_CHUNK_BYTES = 64 * 1024;
 const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
@@ -633,8 +635,79 @@ export class CentralStore {
   }
 
   listUsers(): CentralUser[] {
-    const rows = this.db.prepare('SELECT * FROM users ORDER BY disabled ASC, department ASC, displayName ASC').all() as UserRow[];
+    const rows = this.db.prepare(`
+      SELECT * FROM users
+      WHERE userId != ?
+      ORDER BY disabled ASC, department ASC, displayName ASC
+    `).all(CALENDAR_SYSTEM_ACTOR_ID) as UserRow[];
     return rows.map((row) => this.toUser(row));
+  }
+
+  ensureCalendarSystemActor(): string {
+    const now = Date.now();
+    const row: UserRow = {
+      userId: CALENDAR_SYSTEM_ACTOR_ID,
+      username: CALENDAR_SYSTEM_ACTOR_USERNAME,
+      displayName: 'Agenda do Relay',
+      department: '',
+      avatarEmoji: '📅',
+      avatarBg: '#5b5fc7',
+      statusMessage: '',
+      locale: 'pt-BR',
+      role: 'user',
+      profileSetupCompleted: 1,
+      passwordSetupRequired: 0,
+      disabled: 1,
+      passwordHash: hashPassword(createSessionToken()),
+      createdAt: now,
+      updatedAt: now
+    };
+    this.db.prepare(`
+      INSERT INTO users(userId, username, displayName, department, avatarEmoji, avatarBg,
+        statusMessage, locale, role, profileSetupCompleted, passwordSetupRequired, disabled,
+        passwordHash, createdAt, updatedAt)
+      VALUES (@userId, @username, @displayName, @department, @avatarEmoji, @avatarBg,
+        @statusMessage, @locale, @role, @profileSetupCompleted, @passwordSetupRequired, @disabled,
+        @passwordHash, @createdAt, @updatedAt)
+      ON CONFLICT(userId) DO UPDATE SET
+        username = excluded.username,
+        displayName = excluded.displayName,
+        department = '',
+        avatarEmoji = excluded.avatarEmoji,
+        avatarBg = excluded.avatarBg,
+        statusMessage = '',
+        role = 'user',
+        profileSetupCompleted = 1,
+        passwordSetupRequired = 0,
+        disabled = 1,
+        updatedAt = excluded.updatedAt
+    `).run(row);
+    return CALENDAR_SYSTEM_ACTOR_ID;
+  }
+
+  reassignCalendarAutomationFrames(): number {
+    const rows = this.db.prepare(`
+      SELECT messageId, senderUserId, payloadCipher
+      FROM canonical_frames
+      WHERE conversationId = 'announcements' AND type = 'announce'
+    `).all() as Array<{ messageId: string; senderUserId: string; payloadCipher: string }>;
+    const update = this.db.prepare(
+      'UPDATE canonical_frames SET senderUserId = ? WHERE messageId = ?'
+    );
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const row of rows) {
+        if (row.senderUserId === CALENDAR_SYSTEM_ACTOR_ID) continue;
+        try {
+          const payload = JSON.parse(this.encrypted.decrypt(row.payloadCipher)) as Record<string, unknown>;
+          if (payload.automated !== true || typeof payload.calendarEventId !== 'string') continue;
+          changed += update.run(CALENDAR_SYSTEM_ACTOR_ID, row.messageId).changes;
+        } catch {
+          // Um payload corrompido será tratado pelas rotinas de integridade.
+        }
+      }
+      return changed;
+    })();
   }
 
   listVisibleUsersForUser(userId: string): CentralUser[] {
