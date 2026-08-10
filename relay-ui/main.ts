@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { LanternRelay, RelayConfig } from '../relay/main';
 import { validateConvertedBackup } from '../relay/convertedBackup';
 import { isUpdatePlatform } from '../relay/updateStore';
+import { resolveSharedRelayDataDir } from '../relay/dataPaths';
 
 interface RelayUiSettings {
   port: number;
@@ -20,7 +21,7 @@ let mainWindow: BrowserWindow | null = null;
 let relay: LanternRelay | null = null;
 
 const settingsFile = (): string => path.join(app.getPath('userData'), 'relay-ui-settings.json');
-const relayDataDir = (): string => path.join(app.getPath('userData'), 'relay-data');
+const relayDataDir = (): string => resolveSharedRelayDataDir();
 const importEngineFile = (): string => {
   const candidates = [
     path.resolve(__dirname, '..', 'relay', 'importConvertedBackup.js'),

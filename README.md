@@ -255,6 +255,16 @@ npm run rebuild:native
 
 O Relay headless usa o ABI do Node.js e não deve ser iniciado por meio do binário do Electron.
 
+### Dados compartilhados entre Relay UI e Relay headless
+
+O Relay UI Electron e o Relay headless Node usam a mesma pasta canônica `lantern/relay-data` dentro do diretório de dados da plataforma. Assim, é possível fechar um e iniciar o outro sem mudar de banco ou perder contas, mensagens, anúncios e anexos. `LANTERN_RELAY_DATA_DIR` continua disponível para testes, migrações e instalações avançadas.
+
+| Sistema | Pasta padrão compartilhada |
+| --- | --- |
+| macOS | `~/Library/Application Support/lantern/relay-data` |
+| Windows | `%APPDATA%/lantern/relay-data` |
+| Linux | `$XDG_CONFIG_HOME/lantern/relay-data` ou `~/.config/lantern/relay-data` |
+
 Durante `npm run dev`, o renderer usa `http://localhost:5173` e o Relay usa a porta `43190`.
 
 ## Endereços locais

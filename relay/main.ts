@@ -15,6 +15,7 @@ import { RetentionPolicy } from './centralTypes';
 import { createSessionToken, hashToken } from './security';
 import { CalendarAutomationEvent, fetchCalendarEventsForDay } from './calendarAutomation';
 import { isUpdatePlatform, UpdatePlatform, UpdateStore } from './updateStore';
+import { resolveSharedRelayDataDir } from './dataPaths';
 
 const resolveLanternVersion = (): string => {
   for (const candidate of [
@@ -43,32 +44,7 @@ const ANNOUNCEMENT_EXPIRED_RETENTION_MS = 12 * 60 * 60 * 1000;
 const ANNOUNCEMENT_SWEEP_INTERVAL_MS = 15_000;
 const SEND_CALLBACK_TIMEOUT_MS = 10_000;
 const resolveRelayDataDir = (): string => {
-  const configured = String(process.env.LANTERN_RELAY_DATA_DIR || '').trim();
-  if (configured) return path.resolve(configured);
-  if ((process as NodeJS.Process & { pkg?: unknown }).pkg) {
-    if (process.platform === 'darwin') {
-      return path.join(
-        process.env.HOME || path.dirname(process.execPath),
-        'Library',
-        'Application Support',
-        'Lantern Relay Server'
-      );
-    }
-    if (process.platform === 'win32') {
-      return path.join(
-        process.env.APPDATA || process.env.LOCALAPPDATA || path.dirname(process.execPath),
-        'Lantern Relay Server'
-      );
-    }
-    return path.join(
-      process.env.XDG_DATA_HOME || path.join(process.env.HOME || path.dirname(process.execPath), '.local', 'share'),
-      'lantern-relay-server'
-    );
-  }
-  const entryFile = process.argv[1]
-    ? path.resolve(process.argv[1])
-    : path.resolve(process.cwd(), 'dist-relay', 'main.js');
-  return path.dirname(entryFile);
+  return resolveSharedRelayDataDir();
 };
 
 const directorySizeBytes = (root: string): number => {

@@ -28,3 +28,19 @@ test('pacote do Relay headless inclui dashboard administrativa e cliente Web', (
     assert.ok(fs.statSync(path.join(projectRoot, relativePath)).isFile(), `${relativePath} ausente`);
   }
 });
+
+test('Relay UI Electron e Relay headless calculam a mesma pasta compartilhada', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'relay', 'dataPaths.ts'), 'utf8');
+  assert.match(source, /path\.join\(appData, 'lantern', 'relay-data'\)/);
+  assert.match(source, /platform === 'darwin'/);
+  assert.match(source, /platform === 'win32'/);
+  assert.match(source, /XDG_CONFIG_HOME/);
+  assert.match(
+    fs.readFileSync(path.join(projectRoot, 'relay-ui', 'main.ts'), 'utf8'),
+    /resolveSharedRelayDataDir/
+  );
+  assert.match(
+    fs.readFileSync(path.join(projectRoot, 'relay', 'main.ts'), 'utf8'),
+    /resolveSharedRelayDataDir/
+  );
+});
