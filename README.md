@@ -18,7 +18,7 @@ Estes são os comandos que realmente geram aplicativos, instaladores ou executá
 | --- | --- | --- | --- |
 | **Lantern (cliente)** | Universal `.app` + `.dmg`: `npm run build:mac` | Instalador + unpacked: `npm run build:win` | `npm run build:linux` |
 | **Lantern Relay UI** | Universal `.app` + `.dmg`: `npm run relay-ui:build:mac` | Instalador + unpacked: `npm run relay-ui:build:win` | `npm run relay-ui:build:linux` |
-| **Lantern Relay headless** | Universal: `npm run relay:dist:mac:universal` | `npm run relay:dist:win` | `npm run relay:dist:linux` |
+| **Lantern Relay headless (Node)** | Universal `.app` + `.dmg`: `npm run relay:dist:mac:universal` | Instalador + unpacked: `npm run relay:dist:win` | Executável Node: `npm run relay:dist:linux` |
 | **Lantern Migration** | Universal `.app` + `.dmg`: `npm run migration-ui:build:mac` | Instalador + unpacked: `npm run migration-ui:build:win` | `npm run migration-ui:build:linux` |
 
 ### Arquivos gerados
@@ -31,9 +31,9 @@ Estes são os comandos que realmente geram aplicativos, instaladores ou executá
 | Lantern Relay UI | macOS universal | `mac-universal/Lantern Relay.app` e `LanternRelay-<versão>-universal.dmg` | `dist-relay-ui-installers/` |
 | Lantern Relay UI | Windows x64 | `LanternRelay-Setup-<versão>.exe` e `win-unpacked/` | `dist-relay-ui-installers/` |
 | Lantern Relay UI | Linux x64 | `.AppImage` | `dist-relay-ui-installers/` |
-| Lantern Relay headless | macOS universal | `LanternRelay-mac-universal` | `dist-relay/` |
-| Lantern Relay headless | Windows x64 | `LanternRelay.exe` | `dist-relay/` |
-| Lantern Relay headless | Linux x64 | `LanternRelay-linux-x64` | `dist-relay/` |
+| Lantern Relay headless | macOS universal | `mac-universal/Lantern Relay Server.app` e `LanternRelayServer-<versão>-universal.dmg` | `dist-relay-installers/` |
+| Lantern Relay headless | Windows x64 | `LanternRelayServer-Setup-<versão>.exe` e `win-unpacked/Lantern Relay Server.exe` | `dist-relay-installers/` |
+| Lantern Relay headless | Linux x64 | `linux-x64/LanternRelay` | `dist-relay-installers/` |
 
 ### macOS: universal, Apple Silicon e Intel
 
@@ -73,7 +73,7 @@ dist-relay-ui-installers/LanternRelay-<versão>-universal.dmg
 dist-relay-ui-installers/mac-universal/Lantern Relay.app
 ```
 
-O Relay headless não é empacotado em DMG, pois é um executável de servidor sem interface. No macOS, `npm run relay:dist:mac` e `npm run relay:dist:mac:universal` geram um único binário compatível com Apple Silicon e Intel. Os comandos `relay:dist:mac:arm64` e `relay:dist:mac:x64` continuam disponíveis para builds específicos.
+O Relay headless usa exclusivamente Node.js e não contém Electron. Os pacotes distribuíveis incluem o runtime Node.js 24 LTS. No macOS, o `.app` abre uma janela do Terminal para manter o processo e seus logs visíveis. Ele inclui executáveis Node separados para Apple Silicon e Intel, e um launcher nativo universal seleciona a arquitetura correta sem modificar os snapshots. Isso evita a corrupção causada anteriormente por aplicar `lipo` diretamente sobre executáveis do `pkg`. O DMG e o `.app` são gerados por `npm run relay:dist:mac:universal`.
 
 O Relay headless também pode ser gerado automaticamente para a plataforma e arquitetura da máquina atual:
 
@@ -83,7 +83,7 @@ npm run relay:dist
 
 ### Build conjunto a partir do macOS
 
-Para gerar, em um único comando, o Lantern e o Relay UI para macOS universal, Windows x64 e Linux x64:
+Para gerar, em um único comando, o Lantern, o Relay UI e o Relay headless para macOS universal, Windows x64 e Linux x64:
 
 ```bash
 npm run build:all:from-mac
@@ -97,7 +97,7 @@ npm run build:all:from-mac -- --skip-native-repair
 npm run build:all:from-mac -- --win-skip-rcedit
 ```
 
-Para gerar o cliente Lantern universal para macOS, o cliente Windows e os binários headless do Relay para macOS e Windows:
+Para gerar o cliente Lantern e o Relay headless para macOS universal e Windows x64:
 
 ```bash
 npm run build:mac-win:from-mac
@@ -109,8 +109,10 @@ Saídas principais:
 dist-installers/Lantern-<versão>-universal.dmg
 dist-installers/mac-universal/Lantern.app
 dist-installers/Lantern-Setup-<versão>.exe
-dist-relay/LanternRelay-mac-universal
-dist-relay/LanternRelay.exe
+dist-relay-installers/LanternRelayServer-<versão>-universal.dmg
+dist-relay-installers/mac-universal/Lantern Relay Server.app
+dist-relay-installers/LanternRelayServer-Setup-<versão>.exe
+dist-relay-installers/win-unpacked/Lantern Relay Server.exe
 ```
 
 Para compilar e publicar esses artefatos em uma GitHub Release:
@@ -148,6 +150,8 @@ Em especial, `npm run build:relay` não gera o executável do Relay. Para isso, 
 | Ferramenta Lantern Migration | `npm run migration-ui:dev` |
 
 O cliente Web usa o mesmo renderer do desktop e é servido pelo Relay em `/app/`. O build do Relay e do Relay UI inclui o conteúdo de `dist-renderer/` quando necessário.
+
+`npm run dev:relay`, `npm run relay:start` e o executável distribuído iniciam o Relay headless diretamente com Node.js. Electron é usado somente nos produtos com interface gráfica (Lantern, Relay UI e Lantern Migration).
 
 ## Ferramenta Lantern Migration
 
@@ -239,15 +243,17 @@ npm run migrate:local-backups -- \
 
 ## Requisitos e ambiente
 
-- Node.js 22 LTS
+- Node.js 22 ou mais recente (os executáveis headless incluem Node.js 24 LTS)
 - npm 10 ou mais recente
 - Git
 
-Módulos nativos como `better-sqlite3` precisam usar o ABI do Electron. Se houver erro de `NODE_MODULE_VERSION`, execute:
+Nos aplicativos gráficos, módulos nativos como `better-sqlite3` precisam usar o ABI do Electron. Se houver erro de `NODE_MODULE_VERSION` ao executar Lantern, Relay UI ou Lantern Migration, execute:
 
 ```bash
 npm run rebuild:native
 ```
+
+O Relay headless usa o ABI do Node.js e não deve ser iniciado por meio do binário do Electron.
 
 Durante `npm run dev`, o renderer usa `http://localhost:5173` e o Relay usa a porta `43190`.
 

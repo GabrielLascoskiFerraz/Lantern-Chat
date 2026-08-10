@@ -13,6 +13,7 @@ Uso:
 Gera a partir do macOS:
   - Lantern para macOS universal, Windows x64 e Linux x64
   - Lantern Relay UI para macOS universal, Windows x64 e Linux x64
+  - Lantern Relay headless para macOS universal, Windows x64 e Linux x64
 
 Opções:
   --dry-run             Mostra os comandos sem executá-los.
@@ -100,6 +101,7 @@ const validateArtifacts = () => {
   if (dryRun) return;
   const clientDir = path.join(projectRoot, 'dist-installers');
   const relayUiDir = path.join(projectRoot, 'dist-relay-ui-installers');
+  const relayHeadlessDir = path.join(projectRoot, 'dist-relay-installers');
 
   requirePath('Lantern macOS .app universal', path.join(clientDir, 'mac-universal', 'Lantern.app'));
   requireMatch('Lantern macOS DMG universal', clientDir, /^Lantern-.*-universal\.dmg$/i);
@@ -112,6 +114,29 @@ const validateArtifacts = () => {
   requirePath('Relay UI Windows unpacked', path.join(relayUiDir, 'win-unpacked', 'Lantern Relay.exe'));
   requireMatch('Relay UI Windows instalador', relayUiDir, /^LanternRelay-Setup-.*\.exe$/i);
   requireMatch('Relay UI Linux AppImage', relayUiDir, /^LanternRelay-.*\.AppImage$/i);
+
+  requirePath(
+    'Relay headless macOS .app universal',
+    path.join(relayHeadlessDir, 'mac-universal', 'Lantern Relay Server.app')
+  );
+  requireMatch(
+    'Relay headless macOS DMG universal',
+    relayHeadlessDir,
+    /^LanternRelayServer-.*-universal\.dmg$/i
+  );
+  requirePath(
+    'Relay headless Windows unpacked',
+    path.join(relayHeadlessDir, 'win-unpacked', 'Lantern Relay Server.exe')
+  );
+  requireMatch(
+    'Relay headless Windows instalador',
+    relayHeadlessDir,
+    /^LanternRelayServer-Setup-.*\.exe$/i
+  );
+  requirePath(
+    'Relay headless Linux x64',
+    path.join(relayHeadlessDir, 'linux-x64', 'LanternRelay')
+  );
 };
 
 let buildError = null;
@@ -135,6 +160,11 @@ try {
 
   run('Lantern — Linux x64 (AppImage)', npx, builderArgs(null, ['--linux', '--x64']));
   run('Relay UI — Linux x64 (AppImage)', npx, builderArgs(relayUiConfig, ['--linux', '--x64']));
+  run('Compilando o Relay headless Node', npm, ['run', 'build:relay']);
+  run('Relay headless Node — macOS, Windows e Linux', process.execPath, [
+    './scripts/build-relay-node.cjs',
+    'all'
+  ]);
 
   validateArtifacts();
   console.log('\n[Lantern build] Todos os artefatos foram gerados.');

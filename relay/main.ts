@@ -46,7 +46,24 @@ const resolveRelayDataDir = (): string => {
   const configured = String(process.env.LANTERN_RELAY_DATA_DIR || '').trim();
   if (configured) return path.resolve(configured);
   if ((process as NodeJS.Process & { pkg?: unknown }).pkg) {
-    return path.dirname(process.execPath);
+    if (process.platform === 'darwin') {
+      return path.join(
+        process.env.HOME || path.dirname(process.execPath),
+        'Library',
+        'Application Support',
+        'Lantern Relay Server'
+      );
+    }
+    if (process.platform === 'win32') {
+      return path.join(
+        process.env.APPDATA || process.env.LOCALAPPDATA || path.dirname(process.execPath),
+        'Lantern Relay Server'
+      );
+    }
+    return path.join(
+      process.env.XDG_DATA_HOME || path.join(process.env.HOME || path.dirname(process.execPath), '.local', 'share'),
+      'lantern-relay-server'
+    );
   }
   const entryFile = process.argv[1]
     ? path.resolve(process.argv[1])

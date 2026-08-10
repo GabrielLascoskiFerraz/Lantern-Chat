@@ -1,0 +1,10 @@
+{
+  "assets": [
+    "package.json",
+    "dist-renderer/**/*",
+    "relay-ui/renderer/**/*",
+    "assets/**/*",
+    "node_modules/better-sqlite3/prebuilds/*.node"
+  ],
+  "compress": "GZip"
+}

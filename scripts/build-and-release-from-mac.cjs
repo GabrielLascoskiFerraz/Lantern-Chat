@@ -4,7 +4,7 @@ const { spawnSync } = require('node:child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distInstallersDir = path.join(projectRoot, 'dist-installers');
-const distRelayDir = path.join(projectRoot, 'dist-relay');
+const distRelayInstallersDir = path.join(projectRoot, 'dist-relay-installers');
 const distReleaseDir = path.join(projectRoot, 'dist-release');
 const distReleaseAssetsDir = path.join(distReleaseDir, 'assets');
 const distReleaseTmpDir = path.join(distReleaseDir, 'tmp');
@@ -160,24 +160,16 @@ const copyFile = (source, target) => {
   fs.copyFileSync(source, target);
 };
 
-const makeRelayZip = (sourceFile, zipFile, dryRun) => {
+const makeRelayZip = (sourcePath, zipFile, dryRun) => {
   const tempDir = path.join(
     distReleaseTmpDir,
-    `${path.basename(sourceFile)}-${Date.now().toString(36)}`
+    `${path.basename(sourcePath)}-${Date.now().toString(36)}`
   );
   fs.mkdirSync(tempDir, { recursive: true });
-  fs.copyFileSync(sourceFile, path.join(tempDir, path.basename(sourceFile)));
-
-  const stickersSource = path.join(projectRoot, 'assets', 'stickers', 'cats');
-  if (fs.existsSync(stickersSource)) {
-    const stickersTarget = path.join(tempDir, 'stickers', 'cats');
-    fs.mkdirSync(stickersTarget, { recursive: true });
-    for (const name of fs.readdirSync(stickersSource)) {
-      if (/^lantern-cat-sticker-[a-z0-9-]+\.gif$/i.test(name)) {
-        fs.copyFileSync(path.join(stickersSource, name), path.join(stickersTarget, name));
-      }
-    }
-  }
+  fs.cpSync(sourcePath, path.join(tempDir, path.basename(sourcePath)), {
+    recursive: true,
+    preserveTimestamps: true
+  });
 
   if (fs.existsSync(zipFile)) {
     fs.rmSync(zipFile, { force: true });
@@ -248,12 +240,16 @@ const buildReleaseAssets = (dryRun) => {
     findFile(distInstallersDir, (name) => /^Lantern-.*universal.*\.dmg$/i.test(name)) ||
     findFile(distInstallersDir, (name) => /^Lantern-.*arm64.*\.dmg$/i.test(name)) ||
     findFile(distInstallersDir, (name) => /^Lantern-.*\.dmg$/i.test(name));
-  const relayWin = path.join(distRelayDir, 'LanternRelay.exe');
-  const relayMac =
-    findFile(distRelayDir, (name) => /^LanternRelay-mac-universal$/i.test(name)) ||
-    findFile(distRelayDir, (name) => /^LanternRelay-mac-arm64$/i.test(name)) ||
-    findFile(distRelayDir, (name) => /^LanternRelay-mac-x64$/i.test(name)) ||
-    findFile(distRelayDir, (name) => /^LanternRelay-mac-/i.test(name));
+  const relayWin = path.join(
+    distRelayInstallersDir,
+    'win-unpacked',
+    'Lantern Relay Server.exe'
+  );
+  const relayMac = path.join(
+    distRelayInstallersDir,
+    'mac-universal',
+    'Lantern Relay Server.app'
+  );
 
   if (!windowsInstaller) {
     throw new Error('Instalador Windows não encontrado em dist-installers.');
@@ -262,10 +258,10 @@ const buildReleaseAssets = (dryRun) => {
     throw new Error('DMG macOS não encontrado em dist-installers.');
   }
   if (!fs.existsSync(relayWin)) {
-    throw new Error('Relay Windows não encontrado em dist-relay/LanternRelay.exe.');
+    throw new Error('Relay Windows unpacked não encontrado em dist-relay-installers.');
   }
-  if (!relayMac) {
-    throw new Error('Relay macOS não encontrado em dist-relay.');
+  if (!fs.existsSync(relayMac)) {
+    throw new Error('Relay macOS universal não encontrado em dist-relay-installers.');
   }
 
   const targetWindowsInstaller = path.join(

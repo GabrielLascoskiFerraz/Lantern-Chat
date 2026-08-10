@@ -21,8 +21,10 @@ Saida esperada:
   dist-installers/Lantern-<versao>-universal.dmg
   dist-installers/mac-universal/Lantern.app
   dist-installers/Lantern-Setup-<versao>.exe
-  dist-relay/LanternRelay-mac-universal
-  dist-relay/LanternRelay.exe
+  dist-relay-installers/LanternRelayServer-<versao>-universal.dmg
+  dist-relay-installers/mac-universal/Lantern Relay Server.app
+  dist-relay-installers/LanternRelayServer-Setup-<versao>.exe
+  dist-relay-installers/win-unpacked/Lantern Relay Server.exe
 `);
 };
 
@@ -103,13 +105,13 @@ const main = () => {
   }
   run('Gerando instalador Windows x64', npxCmd, windowsBuildArgs);
 
-  run('Build do Relay (TypeScript)', npmCmd, ['run', 'build:relay']);
-  run('Gerando binario universal do Relay para macOS', process.execPath, [
-    './scripts/build-relay-universal-mac.cjs'
+  run('Gerando Relay headless para macOS universal (.app + .dmg)', npmCmd, [
+    'run',
+    'relay:dist:mac:universal'
   ]);
-  run('Gerando binario do Relay para Windows x64', process.execPath, [
-    './scripts/build-relay-bin.cjs',
-    'win'
+  run('Gerando Relay headless para Windows x64 (instalador + unpacked)', npmCmd, [
+    'run',
+    'relay:dist:win'
   ]);
 
   if (!skipNativeRepair) {
